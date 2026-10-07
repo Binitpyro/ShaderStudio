@@ -7,6 +7,7 @@ import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue, ParsedUniform } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
 import { parseGlslUniforms } from "@/parsers/glslUniforms"
+import type { PostProcessPassType } from "@/core/postProcessChain"
 
 type GeometryKey = "cube" | "sphere" | "plane"
 
@@ -22,6 +23,7 @@ export class ThreeJSAdapter implements RenderAdapter {
   private initialized = false
   private currentGeometry: GeometryKey = "cube"
   private composer: EffectComposer | null = null
+  private postProcessPassesMap = new Map<string, ShaderPass>()
   private hasPostProcess = false
   private lastFrameTime = 0
   private frameCount = 0
@@ -172,6 +174,8 @@ export class ThreeJSAdapter implements RenderAdapter {
     if (!queue || queue.length === 0) return
     this.hasPostProcess = false
     this.textureBindings = {}
+    const ppSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
+
     for (const step of queue) {
       if (step.type === "mesh") {
         this.createMesh(step.geometry as GeometryKey)
@@ -187,22 +191,197 @@ export class ThreeJSAdapter implements RenderAdapter {
         }
       } else if (step.type === "postprocess") {
         this.hasPostProcess = true
-        this.setupPostProcess()
+        const passType: PostProcessPassType = step.pass || "vignette"
+        ppSteps.push({
+          id: step.id || `${passType}-${ppSteps.length}`,
+          pass: passType,
+          customSource: step.customSource,
+          uniforms: step.uniforms || {},
+        })
       }
+    }
+    if (this.hasPostProcess) {
+      this.setupPostProcess(ppSteps)
+    } else {
+      this.composer?.dispose()
+      this.composer = null
+      this.postProcessPassesMap.clear()
     }
   }
 
-  private setupPostProcess() {
+  private setupPostProcess(steps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []) {
     if (!this.renderer || !this.scene || !this.camera) return
     this.composer?.dispose()
     this.composer = new EffectComposer(this.renderer)
-    const renderPass = new RenderPass(this.scene, this.camera); this.composer.addPass(renderPass)
-    const vignetteShader = {
-      uniforms: { tDiffuse: { value: null }, u_vignetteIntensity: { value: 0.5 }, u_vignetteRadius: { value: 0.8 } },
-      vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-      fragmentShader: `uniform sampler2D tDiffuse; uniform float u_vignetteIntensity; uniform float u_vignetteRadius; varying vec2 vUv; void main() { vec4 color = texture2D(tDiffuse, vUv); vec2 uv = vUv * 2.0 - 1.0; float dist = length(uv); float vignette = smoothstep(u_vignetteRadius, u_vignetteRadius - 0.3, dist); vignette = mix(1.0, vignette, u_vignetteIntensity); gl_FragColor = vec4(color.rgb * vignette, color.a); }`,
+    this.postProcessPassesMap.clear()
+
+    const renderPass = new RenderPass(this.scene, this.camera)
+    this.composer.addPass(renderPass)
+
+    const w = this.canvas?.width || 800
+    const h = this.canvas?.height || 600
+    const passSteps = steps.length > 0
+      ? steps
+      : [{ id: "vignette-default", pass: "vignette" as PostProcessPassType, uniforms: {} }]
+
+    for (let i = 0; i < passSteps.length; i++) {
+      const step = passSteps[i]
+      const isFinal = (i === passSteps.length - 1)
+      let shaderDef: any
+
+      switch (step.pass) {
+        case "blur": {
+          const amount = Number(step.uniforms.amount ?? step.uniforms.u_blurAmount ?? 2.0)
+          shaderDef = {
+            uniforms: {
+              tDiffuse: { value: null },
+              u_resolution: { value: new THREE.Vector2(w, h) },
+              u_blurAmount: { value: amount },
+            },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              uniform vec2 u_resolution;
+              uniform float u_blurAmount;
+              varying vec2 vUv;
+              void main() {
+                vec2 texelSize = 1.0 / u_resolution * u_blurAmount;
+                vec4 result = vec4(0.0);
+                float weights[9] = float[](0.0625, 0.125, 0.0625, 0.125, 0.25, 0.125, 0.0625, 0.125, 0.0625);
+                int idx = 0;
+                for (int y = -1; y <= 1; y++) {
+                  for (int x = -1; x <= 1; x++) {
+                    vec2 offset = vec2(float(x), float(y)) * texelSize;
+                    result += texture2D(tDiffuse, vUv + offset) * weights[idx];
+                    idx++;
+                  }
+                }
+                gl_FragColor = result;
+              }
+            `,
+          }
+          break
+        }
+        case "chromatic_aberration": {
+          const offset = Number(step.uniforms.offset ?? step.uniforms.u_aberrationOffset ?? 0.008)
+          shaderDef = {
+            uniforms: {
+              tDiffuse: { value: null },
+              u_aberrationOffset: { value: offset },
+            },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              uniform float u_aberrationOffset;
+              varying vec2 vUv;
+              void main() {
+                vec2 uv = vUv;
+                vec2 dir = uv - vec2(0.5);
+                float dist = length(dir);
+                vec2 offset = (dist > 0.0001) ? (dir / dist) * u_aberrationOffset : vec2(u_aberrationOffset, 0.0);
+                float r = texture2D(tDiffuse, uv + offset).r;
+                float g = texture2D(tDiffuse, uv).g;
+                float b = texture2D(tDiffuse, uv - offset).b;
+                float a = texture2D(tDiffuse, uv).a;
+                gl_FragColor = vec4(r, g, b, a);
+              }
+            `,
+          }
+          break
+        }
+        case "bloom": {
+          const threshold = Number(step.uniforms.threshold ?? step.uniforms.u_bloomThreshold ?? 0.7)
+          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_bloomIntensity ?? 0.5)
+          shaderDef = {
+            uniforms: {
+              tDiffuse: { value: null },
+              u_bloomThreshold: { value: threshold },
+              u_bloomIntensity: { value: intensity },
+            },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              uniform float u_bloomThreshold;
+              uniform float u_bloomIntensity;
+              varying vec2 vUv;
+              void main() {
+                vec4 baseColor = texture2D(tDiffuse, vUv);
+                float stepSize = 0.004;
+                vec3 glow = max(baseColor.rgb - vec3(u_bloomThreshold), vec3(0.0));
+                glow += max(texture2D(tDiffuse, vUv + vec2(-stepSize, 0.0)).rgb - vec3(u_bloomThreshold), vec3(0.0));
+                glow += max(texture2D(tDiffuse, vUv + vec2(stepSize, 0.0)).rgb - vec3(u_bloomThreshold), vec3(0.0));
+                glow += max(texture2D(tDiffuse, vUv + vec2(0.0, -stepSize)).rgb - vec3(u_bloomThreshold), vec3(0.0));
+                glow += max(texture2D(tDiffuse, vUv + vec2(0.0, stepSize)).rgb - vec3(u_bloomThreshold), vec3(0.0));
+                glow = (glow / 5.0) * u_bloomIntensity;
+                gl_FragColor = vec4(baseColor.rgb + glow, baseColor.a);
+              }
+            `,
+          }
+          break
+        }
+        case "custom": {
+          shaderDef = {
+            uniforms: { tDiffuse: { value: null } },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              varying vec2 vUv;
+              void main() {
+                vec4 color = texture2D(tDiffuse, vUv);
+                gl_FragColor = vec4(1.0 - color.rgb, color.a);
+              }
+            `,
+          }
+          break
+        }
+        case "vignette":
+        default: {
+          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_vignetteIntensity ?? 0.5)
+          const radius = Number(step.uniforms.radius ?? step.uniforms.u_vignetteRadius ?? 0.8)
+          shaderDef = {
+            uniforms: {
+              tDiffuse: { value: null },
+              u_vignetteIntensity: { value: intensity },
+              u_vignetteRadius: { value: radius },
+            },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              uniform float u_vignetteIntensity;
+              uniform float u_vignetteRadius;
+              varying vec2 vUv;
+              void main() {
+                vec4 color = texture2D(tDiffuse, vUv);
+                vec2 uv = vUv * 2.0 - 1.0;
+                float dist = length(uv);
+                float vignette = smoothstep(u_vignetteRadius, u_vignetteRadius - 0.3, dist);
+                vignette = mix(1.0, vignette, u_vignetteIntensity);
+                gl_FragColor = vec4(color.rgb * vignette, color.a);
+              }
+            `,
+          }
+          break
+        }
+      }
+
+      const shaderPass = new ShaderPass(shaderDef)
+      if (isFinal) shaderPass.renderToScreen = true
+      this.postProcessPassesMap.set(step.id, shaderPass)
+      this.postProcessPassesMap.set(step.pass, shaderPass)
+      this.composer.addPass(shaderPass)
     }
-    const vignettePass = new ShaderPass(vignetteShader); this.composer.addPass(vignettePass)
+  }
+
+  updatePostProcessUniform(nodeId: string, name: string, value: number | number[]) {
+    const pass = this.postProcessPassesMap.get(nodeId)
+    if (!pass || !pass.uniforms) return
+    const numericVal = typeof value === "number" ? value : Number(value[0]) || 0
+    const rawName = name.startsWith("u_") ? name : `u_${name}`
+    if (pass.uniforms[rawName]) {
+      pass.uniforms[rawName].value = numericVal
+    } else if (pass.uniforms[name]) {
+      pass.uniforms[name].value = numericVal
+    }
   }
 
   recompileShader(source: string) {
@@ -352,6 +531,7 @@ export class ThreeJSAdapter implements RenderAdapter {
     if (this.scene) this.scene.traverse((obj) => { if (obj instanceof THREE.Mesh) { obj.geometry.dispose(); if (obj.material instanceof THREE.Material) obj.material.dispose() } })
     if (this.renderer) this.renderer.dispose()
     this.composer?.dispose(); this.composer = null
+    this.postProcessPassesMap.clear()
     for (const tex of this.loadedTextures.values()) {
       tex.dispose()
     }

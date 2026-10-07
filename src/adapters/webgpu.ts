@@ -4,8 +4,22 @@ import type { UniformValue } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
 import { computeUniformBufferLayout, type UniformBufferLayout, type UniformFieldLayout } from "@/core/uniformLayout"
 import { parseWgslUniforms } from "@/parsers/wgslUniforms"
-import { WebGPUPingPong } from "@/core/postProcessChain"
+import { WebGPUPingPong, CUSTOM_WGSL_TEMPLATE, type PostProcessPassType } from "@/core/postProcessChain"
 import defaultShader from "../shaders/default.wgsl?raw"
+import vignetteWgsl from "../shaders/postprocess/vignette.wgsl?raw"
+import blurWgsl from "../shaders/postprocess/blur.wgsl?raw"
+import chromaticWgsl from "../shaders/postprocess/chromatic_aberration.wgsl?raw"
+import bloomWgsl from "../shaders/postprocess/bloom.wgsl?raw"
+import passthroughWgsl from "../shaders/postprocess/passthrough.wgsl?raw"
+
+interface WebGPUPostProcessPass {
+  id: string
+  passType: PostProcessPassType
+  pipeline: GPURenderPipeline
+  bindGroupLayout: GPUBindGroupLayout
+  uniformBuffer: GPUBuffer | null
+  uniformValues: Record<string, number | number[]>
+}
 
 type GeometryKey = "cube" | "sphere" | "plane"
 
@@ -105,6 +119,8 @@ export class WebGPUAdapter implements RenderAdapter {
   private isDisposed = false
   private hasPostProcess = false
   private pingPong: WebGPUPingPong | null = null
+  private postProcessPasses: WebGPUPostProcessPass[] = []
+  private postProcessSampler: GPUSampler | null = null
 
   private uniformLayout: UniformBufferLayout | null = null
   private cpuUniformBuffer: ArrayBuffer | null = null
@@ -477,8 +493,9 @@ export class WebGPUAdapter implements RenderAdapter {
       if (!vertexBuffer) { this.rafId = requestAnimationFrame(render); return }
       const commandEncoder = this.device.createCommandEncoder()
       const textureView = this.context.getCurrentTexture().createView()
-      const targetView = (this.hasPostProcess && this.pingPong?.getCurrent())
-        ? this.pingPong.getCurrent()!
+      const usePostProcess = this.hasPostProcess && this.postProcessPasses.length > 0 && !!this.pingPong?.getCurrent()
+      const targetView = usePostProcess
+        ? this.pingPong!.getCurrent()!
         : textureView
       const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{ view: targetView, clearValue: { r: 0.08, g: 0.08, b: 0.1, a: 1 }, loadOp: "clear", storeOp: "store" }],
@@ -489,6 +506,41 @@ export class WebGPUAdapter implements RenderAdapter {
       renderPass.setVertexBuffer(0, vertexBuffer)
       renderPass.draw(vertexCount)
       renderPass.end()
+
+      if (usePostProcess) {
+        const numPasses = this.postProcessPasses.length
+        for (let i = 0; i < numPasses; i++) {
+          const pass = this.postProcessPasses[i]
+          const isFinal = (i === numPasses - 1)
+          const passTarget = isFinal ? textureView : this.pingPong!.getNext()!
+          const inputView = this.pingPong!.getCurrent()!
+
+          const bindEntries: GPUBindGroupEntry[] = [
+            { binding: 0, resource: this.postProcessSampler! },
+            { binding: 1, resource: inputView },
+          ]
+          if (pass.uniformBuffer) {
+            bindEntries.push({ binding: 2, resource: { buffer: pass.uniformBuffer } })
+          }
+          const passBindGroup = this.device.createBindGroup({
+            layout: pass.bindGroupLayout,
+            entries: bindEntries,
+          })
+
+          const ppPass = commandEncoder.beginRenderPass({
+            colorAttachments: [{ view: passTarget, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          })
+          ppPass.setPipeline(pass.pipeline)
+          ppPass.setBindGroup(0, passBindGroup)
+          ppPass.draw(6)
+          ppPass.end()
+
+          if (!isFinal) {
+            this.pingPong!.swap()
+          }
+        }
+      }
+
       this.device.queue.submit([commandEncoder.finish()])
       this.rafId = requestAnimationFrame(render)
     }
@@ -499,6 +551,8 @@ export class WebGPUAdapter implements RenderAdapter {
     if (!queue || queue.length === 0) return
     this.hasPostProcess = false
     this.queueTextures = []
+    const ppSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
+
     for (const step of queue) {
       if (step.type === "mesh") {
         this.currentGeometry = step.geometry as GeometryKey
@@ -511,13 +565,122 @@ export class WebGPUAdapter implements RenderAdapter {
         }
       } else if (step.type === "postprocess") {
         this.hasPostProcess = true
+        const passType: PostProcessPassType = step.pass || "vignette"
+        ppSteps.push({
+          id: step.id || `${passType}-${ppSteps.length}`,
+          pass: passType,
+          customSource: step.customSource,
+          uniforms: step.uniforms || {},
+        })
       }
     }
     if (this.hasPostProcess && this.device && this.canvas) {
-      if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device)
+      if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device, this.format)
       this.pingPong.resize(this.canvas.width, this.canvas.height)
+      this.rebuildPostProcessPasses(ppSteps)
+    } else {
+      this.cleanupPostProcessPasses()
     }
     this.updateBindGroup()
+  }
+
+  private rebuildPostProcessPasses(steps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }>) {
+    if (!this.device) return
+    this.cleanupPostProcessPasses()
+
+    if (!this.postProcessSampler) {
+      this.postProcessSampler = this.device.createSampler({
+        magFilter: "linear",
+        minFilter: "linear",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+      })
+    }
+
+    for (const step of steps) {
+      try {
+        let code = passthroughWgsl
+        switch (step.pass) {
+          case "vignette": code = vignetteWgsl; break
+          case "blur": code = blurWgsl; break
+          case "chromatic_aberration": code = chromaticWgsl; break
+          case "bloom": code = bloomWgsl; break
+          case "custom": code = step.customSource || CUSTOM_WGSL_TEMPLATE; break
+          case "passthrough": code = passthroughWgsl; break
+        }
+
+        const shaderModule = this.device.createShaderModule({ code })
+        let uniformBuffer: GPUBuffer | null = null
+
+        if (step.pass === "vignette") {
+          uniformBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          })
+          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_vignetteIntensity ?? 0.5)
+          const radius = Number(step.uniforms.radius ?? step.uniforms.u_vignetteRadius ?? 0.8)
+          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([intensity, radius, 0, 0]).buffer as ArrayBuffer)
+        } else if (step.pass === "blur") {
+          uniformBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          })
+          const w = this.canvas?.width || 800
+          const h = this.canvas?.height || 600
+          const amount = Number(step.uniforms.amount ?? step.uniforms.u_blurAmount ?? 2.0)
+          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([w, h, amount, 0]).buffer as ArrayBuffer)
+        } else if (step.pass === "chromatic_aberration") {
+          uniformBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          })
+          const offset = Number(step.uniforms.offset ?? step.uniforms.u_aberrationOffset ?? 0.008)
+          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([offset, 0, 0, 0]).buffer as ArrayBuffer)
+        } else if (step.pass === "bloom") {
+          uniformBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          })
+          const threshold = Number(step.uniforms.threshold ?? step.uniforms.u_bloomThreshold ?? 0.7)
+          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_bloomIntensity ?? 0.5)
+          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([threshold, intensity, 0, 0]).buffer as ArrayBuffer)
+        }
+
+        const entries: GPUBindGroupLayoutEntry[] = [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+        ]
+        if (uniformBuffer) {
+          entries.push({ binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } })
+        }
+        const bindGroupLayout = this.device.createBindGroupLayout({ entries })
+        const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] })
+        const pipeline = this.device.createRenderPipeline({
+          layout: pipelineLayout,
+          vertex: { module: shaderModule, entryPoint: "vertex_main" },
+          fragment: { module: shaderModule, entryPoint: "fragment_main", targets: [{ format: this.format }] },
+          primitive: { topology: "triangle-list" },
+        })
+
+        this.postProcessPasses.push({
+          id: step.id,
+          passType: step.pass,
+          pipeline,
+          bindGroupLayout,
+          uniformBuffer,
+          uniformValues: { ...step.uniforms },
+        })
+      } catch (e) {
+        console.error("Failed to compile post-process pass:", step.pass, e)
+      }
+    }
+  }
+
+  private cleanupPostProcessPasses() {
+    for (const p of this.postProcessPasses) {
+      p.uniformBuffer?.destroy()
+    }
+    this.postProcessPasses = []
   }
 
   private async loadTexture(textureId: string) {
@@ -585,6 +748,48 @@ export class WebGPUAdapter implements RenderAdapter {
     this.device.queue.writeBuffer(this.uniformBuffer, field.offset, slice)
   }
 
+  updatePostProcessUniform(nodeId: string, name: string, value: number | number[]) {
+    if (!this.device) return
+    const pass = this.postProcessPasses.find(p => p.id === nodeId || p.passType === nodeId)
+    if (!pass || !pass.uniformBuffer) return
+    pass.uniformValues[name] = value
+
+    const val = typeof value === "number" ? value : Number(value[0]) || 0
+    switch (pass.passType) {
+      case "vignette": {
+        const intensity = name.includes("Intensity") || name === "intensity"
+          ? val
+          : Number(pass.uniformValues.intensity ?? pass.uniformValues.u_vignetteIntensity ?? 0.5)
+        const radius = name.includes("Radius") || name === "radius"
+          ? val
+          : Number(pass.uniformValues.radius ?? pass.uniformValues.u_vignetteRadius ?? 0.8)
+        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([intensity, radius, 0, 0]).buffer as ArrayBuffer)
+        break
+      }
+      case "blur": {
+        const amount = val
+        const w = this.canvas?.width || 800
+        const h = this.canvas?.height || 600
+        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([w, h, amount, 0]).buffer as ArrayBuffer)
+        break
+      }
+      case "chromatic_aberration": {
+        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([val, 0, 0, 0]).buffer as ArrayBuffer)
+        break
+      }
+      case "bloom": {
+        const threshold = name.includes("Threshold") || name === "threshold"
+          ? val
+          : Number(pass.uniformValues.threshold ?? pass.uniformValues.u_bloomThreshold ?? 0.7)
+        const intensity = name.includes("Intensity") || name === "intensity"
+          ? val
+          : Number(pass.uniformValues.intensity ?? pass.uniformValues.u_bloomIntensity ?? 0.5)
+        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([threshold, intensity, 0, 0]).buffer as ArrayBuffer)
+        break
+      }
+    }
+  }
+
   setPerfCallback(callback: (metrics: PerfMetrics) => void) { this.onPerfUpdate = callback }
 
   dispose() {
@@ -598,7 +803,9 @@ export class WebGPUAdapter implements RenderAdapter {
     for (const texture of this.textureResources.values()) texture?.destroy()
     this.textureResources.clear()
     this.defaultTexture?.destroy(); this.defaultTexture = null; this.defaultSampler = null
+    this.cleanupPostProcessPasses()
     this.pingPong?.destroy(); this.pingPong = null; this.hasPostProcess = false
+    this.postProcessSampler = null
     this.device?.destroy(); this.device = null
     this.context = null; this.initialized = false
   }

@@ -12,4 +12,5 @@ export interface RenderAdapter {
   dispose(): void
   readonly backendType: "webgpu" | "webgl2" | "threejs"
   setPerfCallback?(callback: (metrics: PerfMetrics) => void): void
+  updatePostProcessUniform?(nodeId: string, name: string, value: number | number[]): void
 }

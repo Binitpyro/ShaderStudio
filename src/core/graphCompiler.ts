@@ -1,11 +1,18 @@
 import type { Node, Edge } from "reactflow"
 
+import type { PostProcessPassType } from "./postProcessChain"
+
 export interface MeshNodeData { type: "mesh"; geometry: "cube" | "sphere" | "plane" }
 export interface MaterialNodeData { type: "material"; shaderPath: string | null }
 export interface TextureNodeData { type: "texture"; textureId: string | null; name: string }
 export interface UniformNodeData { type: "uniform"; uniformId: string; name: string; uniformType: "float" | "vec2" | "vec3" | "vec4" | "color" | "bool"; defaultValue: number | number[] | boolean }
 export interface TimeNodeData { type: "time" }
-export interface PostProcessNodeData { type: "postprocess" }
+export interface PostProcessNodeData {
+  type: "postprocess"
+  passType?: PostProcessPassType
+  params?: Record<string, number | number[]>
+  customSource?: string
+}
 export interface OutputNodeData { type: "output" }
 
 export type GraphNodeData = MeshNodeData | MaterialNodeData | TextureNodeData | UniformNodeData | TimeNodeData | PostProcessNodeData | OutputNodeData
@@ -13,7 +20,13 @@ export type GraphNodeData = MeshNodeData | MaterialNodeData | TextureNodeData | 
 export interface MeshStep { type: "mesh"; geometry: "cube" | "sphere" | "plane" }
 export interface TextureStep { type: "texture"; id: string; src: string; binding: number }
 export interface MaterialStep { type: "material"; shaderPath: string; textureBindings: Record<string, string> }
-export interface PostProcessStep { type: "postprocess"; pass: "passthrough" }
+export interface PostProcessStep {
+  type: "postprocess"
+  id?: string
+  pass: PostProcessPassType
+  customSource?: string
+  uniforms?: Record<string, number | number[]>
+}
 export type RenderStep = MeshStep | TextureStep | MaterialStep | PostProcessStep
 export type RenderQueue = RenderStep[]
 
@@ -88,7 +101,21 @@ export function compileGraph(nodes: Node<GraphNodeData>[], edges: Edge[]): Compi
         }
         queue.push({ type: "material", shaderPath: data.shaderPath || "default.wgsl", textureBindings }); break
       }
-      case "postprocess": queue.push({ type: "postprocess", pass: "passthrough" }); break
+      case "postprocess": {
+        const pass = data.passType || "passthrough"
+        if (!data.passType && !data.params && !data.customSource) {
+          queue.push({ type: "postprocess", pass: "passthrough" })
+        } else {
+          queue.push({
+            type: "postprocess",
+            id: node.id,
+            pass,
+            customSource: data.customSource,
+            uniforms: data.params || {},
+          })
+        }
+        break
+      }
       case "uniform": case "time": break
       case "output": break
     }

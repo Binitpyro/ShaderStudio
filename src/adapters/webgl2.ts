@@ -1,10 +1,29 @@
 import type { RenderAdapter, PerfMetrics } from "./types"
 import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue } from "@/stores/projectStore"
-import { WebGL2Framebuffer, PASSTHROUGH_VERTEX, VIGNETTE_FRAGMENT } from "@/core/postProcessChain"
+import {
+  WebGL2Framebuffer,
+  PASSTHROUGH_VERTEX,
+  PASSTHROUGH_FRAGMENT,
+  VIGNETTE_FRAGMENT,
+  BLUR_FRAGMENT,
+  CHROMATIC_ABERRATION_FRAGMENT,
+  BLOOM_FRAGMENT,
+  CUSTOM_GLSL_TEMPLATE,
+  getDefaultPostProcessUniforms,
+  type PostProcessPassType,
+} from "@/core/postProcessChain"
 import { useProjectStore } from "@/stores/projectStore"
 import defaultVertSource from "../shaders/default.vert?raw"
 import defaultFragSource from "../shaders/default.frag?raw"
+
+interface WebGL2PostProcessPass {
+  id: string
+  passType: PostProcessPassType
+  program: WebGLProgram
+  uniformLocations: Map<string, WebGLUniformLocation | null>
+  uniforms: Record<string, number | number[]>
+}
 
 type GeometryKey = "cube" | "sphere" | "plane"
 
@@ -53,6 +72,7 @@ export class WebGL2Adapter implements RenderAdapter {
   private currentGeometry: GeometryKey = "cube"
   private postProcessFramebuffers: WebGL2Framebuffer[] = []
   private postProcessPrograms: WebGLProgram[] = []
+  private postProcessPasses: WebGL2PostProcessPass[] = []
   private hasPostProcess = false
   private mvpLocation: WebGLUniformLocation | null = null
   private colorLocation: WebGLUniformLocation | null = null
@@ -286,6 +306,8 @@ export class WebGL2Adapter implements RenderAdapter {
     this.hasPostProcess = false
     this.queueTextures = []
     this.textureBindings = {}
+    const ppSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
+
     for (const step of queue) {
       if (step.type === "mesh") {
         this.createGeometry(step.geometry as GeometryKey)
@@ -298,9 +320,77 @@ export class WebGL2Adapter implements RenderAdapter {
         }
       } else if (step.type === "postprocess") {
         this.hasPostProcess = true
+        const passType: PostProcessPassType = step.pass || "vignette"
+        ppSteps.push({
+          id: step.id || `${passType}-${ppSteps.length}`,
+          pass: passType,
+          customSource: step.customSource,
+          uniforms: step.uniforms || {},
+        })
       }
     }
-    if (this.hasPostProcess && this.canvas) this.createPostProcessFramebuffers(this.canvas.width, this.canvas.height)
+    if (this.hasPostProcess && this.canvas) {
+      this.createPostProcessFramebuffers(this.canvas.width, this.canvas.height)
+      this.rebuildPostProcessPasses(ppSteps)
+    } else {
+      this.cleanupPostProcessPasses()
+    }
+  }
+
+  private rebuildPostProcessPasses(steps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }>) {
+    this.cleanupPostProcessPasses()
+    const gl = this.gl
+    if (!gl) return
+
+    for (const step of steps) {
+      let fragSource = PASSTHROUGH_FRAGMENT
+      switch (step.pass) {
+        case "vignette": fragSource = VIGNETTE_FRAGMENT; break
+        case "blur": fragSource = BLUR_FRAGMENT; break
+        case "chromatic_aberration": fragSource = CHROMATIC_ABERRATION_FRAGMENT; break
+        case "bloom": fragSource = BLOOM_FRAGMENT; break
+        case "custom": fragSource = step.customSource || CUSTOM_GLSL_TEMPLATE; break
+        case "passthrough": fragSource = PASSTHROUGH_FRAGMENT; break
+      }
+
+      const program = this.createProgram(PASSTHROUGH_VERTEX, fragSource)
+      if (program) {
+        this.postProcessPrograms.push(program)
+        const uniformLocations = new Map<string, WebGLUniformLocation | null>()
+        const names = [
+          "u_texture", "u_resolution",
+          "u_vignetteIntensity", "u_vignetteRadius",
+          "u_blurAmount",
+          "u_aberrationOffset",
+          "u_bloomThreshold", "u_bloomIntensity",
+        ]
+        for (const name of names) {
+          uniformLocations.set(name, gl.getUniformLocation(program, name))
+        }
+
+        const uniforms: Record<string, number | number[]> = {
+          ...getDefaultPostProcessUniforms(step.pass),
+          ...step.uniforms,
+        }
+
+        this.postProcessPasses.push({
+          id: step.id,
+          passType: step.pass,
+          program,
+          uniformLocations,
+          uniforms,
+        })
+      }
+    }
+  }
+
+  private cleanupPostProcessPasses() {
+    const gl = this.gl
+    for (const pass of this.postProcessPasses) {
+      if (gl) gl.deleteProgram(pass.program)
+    }
+    this.postProcessPasses = []
+    this.postProcessPrograms = []
   }
 
   recompileShader(source: string) {
@@ -444,32 +534,87 @@ export class WebGL2Adapter implements RenderAdapter {
       }
 
       gl.bindVertexArray(this.vao); gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount); gl.bindVertexArray(null)
-      if (this.hasPostProcess && this.postProcessPrograms.length > 0 && this.postProcessFramebuffers.length > 0) {
-        this.postProcessFramebuffers[0].unbind()
-        gl.viewport(0, 0, this.canvas.width, this.canvas.height)
-        const ppProgram = this.postProcessPrograms[0]; gl.useProgram(ppProgram)
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.postProcessFramebuffers[0].getTexture())
-        gl.uniform1i(gl.getUniformLocation(ppProgram, "u_texture"), 0)
-        gl.uniform2f(gl.getUniformLocation(ppProgram, "u_resolution"), this.canvas.width, this.canvas.height)
-        gl.uniform1f(gl.getUniformLocation(ppProgram, "u_vignetteIntensity"), 0.5)
-        gl.uniform1f(gl.getUniformLocation(ppProgram, "u_vignetteRadius"), 0.8)
+
+      if (this.hasPostProcess && this.postProcessFramebuffers.length >= 2) {
         if (!this.quadVAO) {
           this.quadVAO = gl.createVertexArray(); gl.bindVertexArray(this.quadVAO)
           this.quadBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer)
           gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW)
           gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
         }
-        gl.bindVertexArray(this.quadVAO); gl.drawArrays(gl.TRIANGLES, 0, 6)
+
+        const passes = this.postProcessPasses.length > 0
+          ? this.postProcessPasses
+          : (this.postProcessPrograms.length > 0
+              ? [{
+                  id: "vignette-default",
+                  passType: "vignette" as PostProcessPassType,
+                  program: this.postProcessPrograms[0],
+                  uniformLocations: new Map<string, WebGLUniformLocation | null>(),
+                  uniforms: { u_vignetteIntensity: 0.5, u_vignetteRadius: 0.8 },
+                }]
+              : [])
+
+        const numPasses = passes.length
+        let currentRead = 0
+
+        for (let i = 0; i < numPasses; i++) {
+          const pass = passes[i]
+          const isFinal = (i === numPasses - 1)
+
+          if (isFinal) {
+            this.postProcessFramebuffers[currentRead].unbind()
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height)
+          } else {
+            this.postProcessFramebuffers[1 - currentRead].bind()
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height)
+          }
+
+          gl.useProgram(pass.program)
+          gl.activeTexture(gl.TEXTURE0)
+          gl.bindTexture(gl.TEXTURE_2D, this.postProcessFramebuffers[currentRead].getTexture())
+
+          const locTex = pass.uniformLocations.get("u_texture") ?? gl.getUniformLocation(pass.program, "u_texture")
+          if (locTex) gl.uniform1i(locTex, 0)
+
+          const locRes = pass.uniformLocations.get("u_resolution") ?? gl.getUniformLocation(pass.program, "u_resolution")
+          if (locRes) gl.uniform2f(locRes, this.canvas.width, this.canvas.height)
+
+          for (const [uName, uVal] of Object.entries(pass.uniforms)) {
+            const loc = pass.uniformLocations.get(uName) ?? gl.getUniformLocation(pass.program, uName)
+            if (loc && typeof uVal === "number") {
+              gl.uniform1f(loc, uVal)
+            }
+          }
+
+          gl.bindVertexArray(this.quadVAO)
+          gl.drawArrays(gl.TRIANGLES, 0, 6)
+          gl.bindVertexArray(null)
+
+          if (!isFinal) {
+            currentRead = 1 - currentRead
+          }
+        }
       }
       this.rafId = requestAnimationFrame(render)
     }
     this.rafId = requestAnimationFrame(render)
   }
 
+  updatePostProcessUniform(nodeId: string, name: string, value: number | number[]) {
+    const pass = this.postProcessPasses.find(p => p.id === nodeId || p.passType === nodeId)
+    if (!pass) return
+    const numericVal = typeof value === "number" ? value : Number(value[0]) || 0
+    pass.uniforms[name] = numericVal
+    const prefixed = name.startsWith("u_") ? name : `u_${name}`
+    pass.uniforms[prefixed] = numericVal
+  }
+
   setPerfCallback(callback: (metrics: PerfMetrics) => void) { this.onPerfUpdate = callback }
 
   dispose() {
     if (this.rafId) { cancelAnimationFrame(this.rafId); this.rafId = null }
+    this.cleanupPostProcessPasses()
     const gl = this.gl
     if (gl) {
       if (this.program) gl.deleteProgram(this.program)
