@@ -11,4 +11,5 @@ export interface RenderAdapter {
   resize(width: number, height: number): void
   dispose(): void
   readonly backendType: "webgpu" | "webgl2" | "threejs"
+  setPerfCallback?(callback: (metrics: PerfMetrics) => void): void
 }

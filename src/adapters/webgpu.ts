@@ -2,6 +2,9 @@ import type { RenderAdapter, PerfMetrics } from "./types"
 import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
+import { computeUniformBufferLayout, type UniformBufferLayout, type UniformFieldLayout } from "@/core/uniformLayout"
+import { parseWgslUniforms } from "@/parsers/wgslUniforms"
+import { WebGPUPingPong } from "@/core/postProcessChain"
 import defaultShader from "../shaders/default.wgsl?raw"
 
 type GeometryKey = "cube" | "sphere" | "plane"
@@ -47,7 +50,7 @@ function getVerticesForGeometry(geometry: GeometryKey): Float32Array {
 
 function createPerspectiveMatrix(fov: number, aspect: number, near: number, far: number): Float32Array {
   const f = 1.0 / Math.tan(fov / 2), nf = 1 / (near - far)
-  return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0])
+  return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, -1, 0, 0, far * near * nf, 0])
 }
 
 function createLookAtMatrix(eye: [number, number, number], target: [number, number, number], up: [number, number, number]): Float32Array {
@@ -58,7 +61,7 @@ function createLookAtMatrix(eye: [number, number, number], target: [number, numb
 
 function createRotationMatrix(angleX: number, angleY: number): Float32Array {
   const cx = Math.cos(angleX), sx = Math.sin(angleX), cy = Math.cos(angleY), sy = Math.sin(angleY)
-  return new Float32Array([cy, sy * sx, -sy * cx, 0, 0, cx, sx, 0, sy, -cy * sx, cy * cx, 1, 0, 0, 0, 1])
+  return new Float32Array([cy, sy * sx, -sy * cx, 0, 0, cx, sx, 0, sy, -cy * sx, cy * cx, 0, 0, 0, 0, 1])
 }
 
 function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array {
@@ -90,18 +93,228 @@ export class WebGPUAdapter implements RenderAdapter {
   private angleY = 0
   private currentGeometry: GeometryKey = "cube"
   private textureResources: Map<string, GPUTexture> = new Map()
+  private defaultSampler: GPUSampler | null = null
+  private defaultTexture: GPUTexture | null = null
+  private textureBindings: Record<string, string> = {}
+  private queueTextures: Array<{ id: string; binding: number }> = []
+  private currentShaderSource: string = defaultShader
   private lastFrameTime = 0
   private frameCount = 0
   private fps = 0
   private onPerfUpdate?: (metrics: PerfMetrics) => void
+  private isDisposed = false
+  private hasPostProcess = false
+  private pingPong: WebGPUPingPong | null = null
+
+  private uniformLayout: UniformBufferLayout | null = null
+  private cpuUniformBuffer: ArrayBuffer | null = null
+  private cachedUniformValues = new Map<string, UniformValue>()
+
+  private setupDynamicUniformBuffer(source: string) {
+    if (!this.device) return
+    const parsed = parseWgslUniforms(source)
+    const bufferUniforms = parsed.filter(u => u.kind !== "texture")
+    this.uniformLayout = computeUniformBufferLayout(bufferUniforms)
+
+    const bufferSize = this.uniformLayout.totalSize
+
+    this.uniformBuffer?.destroy()
+    this.uniformBuffer = this.device.createBuffer({
+      size: bufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      label: "ShaderStudio_DynamicUniformBuffer",
+    })
+
+    this.cpuUniformBuffer = new ArrayBuffer(bufferSize)
+
+    // Seed with existing uniform values from store or cache
+    const storeValues = useProjectStore.getState().uniformValues
+    for (const [name, val] of Object.entries(storeValues)) {
+      this.writeUniformToCpuBuffer(name, val)
+    }
+    for (const [name, val] of this.cachedUniformValues.entries()) {
+      this.writeUniformToCpuBuffer(name, val)
+    }
+
+    // Default color if color field exists but wasn't populated
+    const colorField = this.uniformLayout.fields["color"] || this.uniformLayout.fields["u_color"]
+    if (colorField && !storeValues["color"] && !storeValues["u_color"] && !this.cachedUniformValues.has("color") && !this.cachedUniformValues.has("u_color")) {
+      this.writeUniformToCpuBuffer(colorField.name, { type: "color", value: [0.4, 0.6, 0.9] })
+    }
+
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.cpuUniformBuffer)
+  }
+
+  private getFieldLayout(name: string): UniformFieldLayout | null {
+    if (!this.uniformLayout) return null
+    const direct = this.uniformLayout.fields[name] ||
+                   this.uniformLayout.fields[name.replace(/^u_/, "")] ||
+                   this.uniformLayout.fields[`u_${name}`]
+    if (direct) return direct
+
+    const match = name.match(/^(.+?)\[(\d+)\]$/)
+    if (match) {
+      const baseName = match[1]
+      const index = parseInt(match[2], 10)
+      const baseField = this.uniformLayout.fields[baseName] ||
+                        this.uniformLayout.fields[baseName.replace(/^u_/, "")] ||
+                        this.uniformLayout.fields[`u_${baseName}`]
+      if (baseField && baseField.arrayCount && baseField.arrayStride && index < baseField.arrayCount) {
+        return {
+          name,
+          type: baseField.type,
+          offset: baseField.offset + index * baseField.arrayStride,
+          size: baseField.arrayStride,
+          alignment: baseField.alignment,
+        }
+      }
+    }
+
+    const elem0 = this.uniformLayout.fields[`${name}[0]`] ||
+                  this.uniformLayout.fields[`${name.replace(/^u_/, "")}[0]`] ||
+                  this.uniformLayout.fields[`u_${name}[0]`]
+    if (elem0) {
+      const prefix = elem0.name.replace(/\[0\]$/, "")
+      let count = 0
+      while (this.uniformLayout.fields[`${prefix}[${count}]`]) {
+        count++
+      }
+      const elem1 = this.uniformLayout.fields[`${prefix}[1]`]
+      const stride = elem1 ? elem1.offset - elem0.offset : Math.max(16, elem0.size)
+      return {
+        name,
+        type: elem0.type,
+        offset: elem0.offset,
+        size: count > 0 ? count * stride : elem0.size,
+        alignment: elem0.alignment,
+        arrayCount: count,
+        arrayStride: stride,
+      }
+    }
+
+    return null
+  }
+
+  private writeElement(
+    view: DataView,
+    type: string,
+    offset: number,
+    rawVal: any,
+    isColor = false
+  ) {
+    switch (type) {
+      case "f32": {
+        const v = typeof rawVal === "number" ? rawVal : Number(rawVal) || 0
+        view.setFloat32(offset, isNaN(v) ? 0 : v, true)
+        break
+      }
+      case "i32": {
+        const v = Math.round(Number(rawVal) || 0)
+        view.setInt32(offset, isNaN(v) ? 0 : v, true)
+        break
+      }
+      case "u32": {
+        const v = Math.max(0, Math.round(Number(rawVal) || 0))
+        view.setUint32(offset, isNaN(v) ? 0 : v, true)
+        break
+      }
+      case "bool": {
+        view.setUint32(offset, rawVal ? 1 : 0, true)
+        break
+      }
+      case "vec2f": {
+        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0]
+        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
+        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
+        break
+      }
+      case "vec3f": {
+        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0, 0]
+        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
+        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
+        view.setFloat32(offset + 8, Number(arr[2] ?? 0) || 0, true)
+        break
+      }
+      case "vec4f": {
+        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0, 0, 0]
+        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
+        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
+        view.setFloat32(offset + 8, Number(arr[2] ?? 0) || 0, true)
+        view.setFloat32(offset + 12, Number(arr[3] ?? (isColor ? 1 : 0)) || 0, true)
+        break
+      }
+      case "mat4x4f": {
+        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) && (rawVal as any).length === 16
+          ? rawVal
+          : [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+        for (let i = 0; i < 16; i++) {
+          view.setFloat32(offset + i * 4, Number(arr[i] ?? (i % 5 === 0 ? 1 : 0)) || 0, true)
+        }
+        break
+      }
+      case "mat3x3f": {
+        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) ? rawVal : [1,0,0, 0,1,0, 0,0,1]
+        if ((arr as any).length >= 12) {
+          for (let col = 0; col < 3; col++) {
+            for (let row = 0; row < 3; row++) {
+              view.setFloat32(offset + col * 16 + row * 4, Number(arr[col * 4 + row] ?? 0) || 0, true)
+            }
+          }
+        } else {
+          for (let col = 0; col < 3; col++) {
+            for (let row = 0; row < 3; row++) {
+              const idx = col * 3 + row
+              view.setFloat32(offset + col * 16 + row * 4, Number(arr[idx] ?? (col === row ? 1 : 0)) || 0, true)
+            }
+          }
+        }
+        break
+      }
+      case "mat2x2f": {
+        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) && (rawVal as any).length === 4
+          ? rawVal
+          : [1,0, 0,1]
+        for (let i = 0; i < 4; i++) {
+          view.setFloat32(offset + i * 4, Number(arr[i] ?? (i % 3 === 0 ? 1 : 0)) || 0, true)
+        }
+        break
+      }
+    }
+  }
+
+  private writeUniformToCpuBuffer(name: string, value: UniformValue) {
+    if (!this.cpuUniformBuffer || !this.uniformLayout) return
+    const field = this.getFieldLayout(name)
+    if (!field) return
+
+    const view = new DataView(this.cpuUniformBuffer)
+    const rawVal = value.value
+
+    if (field.arrayCount && field.arrayCount > 0 && field.arrayStride) {
+      const arr = Array.isArray(rawVal) ? rawVal : [rawVal]
+      for (let i = 0; i < field.arrayCount; i++) {
+        const elemOffset = field.offset + i * field.arrayStride
+        this.writeElement(view, field.type, elemOffset, arr[i], value.type === "color")
+      }
+      return
+    }
+
+    this.writeElement(view, field.type, field.offset, rawVal, value.type === "color")
+  }
 
   async mount(canvas: HTMLCanvasElement): Promise<boolean> {
     this.canvas = canvas
+    this.isDisposed = false
     if (!navigator.gpu) { useProjectStore.getState().setLastCompileError("WebGPU not supported"); return false }
     const adapter = await navigator.gpu.requestAdapter()
     if (!adapter) { useProjectStore.getState().setLastCompileError("No WebGPU adapter found"); return false }
     this.device = await adapter.requestDevice()
-    this.device.lost.then((info) => { useProjectStore.getState().setDeviceLost(true); useProjectStore.getState().setLastCompileError(`Device lost: ${info.message}`); this.initialized = false })
+    this.device.lost.then((info) => {
+      if (this.isDisposed) return
+      useProjectStore.getState().setDeviceLost(true)
+      useProjectStore.getState().setLastCompileError(`Device lost: ${info.message}`)
+      this.initialized = false
+    })
     this.context = canvas.getContext("webgpu")
     if (!this.context) { useProjectStore.getState().setLastCompileError("Could not get WebGPU context"); return false }
     this.format = navigator.gpu.getPreferredCanvasFormat()
@@ -113,7 +326,11 @@ export class WebGPUAdapter implements RenderAdapter {
       this.vertexBuffers.set(geo, buffer)
       this.vertexCounts.set(geo, vertices.length / 3)
     }
-    this.uniformBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+
+    this.createDefaultTexture()
+    this.currentShaderSource = defaultShader
+    this.setupDynamicUniformBuffer(defaultShader)
+
     const shaderModule = this.device.createShaderModule({ code: defaultShader })
     try {
       this.pipeline = this.device.createRenderPipeline({
@@ -124,12 +341,90 @@ export class WebGPUAdapter implements RenderAdapter {
         depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
       })
     } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(msg); return false }
-    this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }] })
+    this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(defaultShader) })
     this.createDepthTexture()
     useProjectStore.getState().setLastCompileError(null)
     this.initialized = true
     this.startRenderLoop()
     return true
+  }
+
+  private createDefaultTexture() {
+    if (!this.device) return
+    this.defaultTexture = this.device.createTexture({
+      size: [2, 2],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    this.defaultSampler = this.device.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+    })
+  }
+
+  private buildBindGroupEntries(wgslSource?: string): GPUBindGroupEntry[] {
+    const entries: GPUBindGroupEntry[] = []
+    if (this.uniformBuffer) {
+      entries.push({ binding: 0, resource: { buffer: this.uniformBuffer } })
+    }
+    if (!this.device) return entries
+
+    const source = wgslSource || this.currentShaderSource
+    if (source) {
+      const bindingRegex = /(?:@group\s*\(\s*0\s*\)\s*@binding\s*\(\s*(\d+)\s*\)|@binding\s*\(\s*(\d+)\s*\)\s*@group\s*\(\s*0\s*\))\s*var(?:\s*<[^>]+>)?\s+(\w+)\s*:\s*([^;]+);/g
+      let match: RegExpExecArray | null
+      while ((match = bindingRegex.exec(source)) !== null) {
+        const rawIdx = match[1] !== undefined ? match[1] : match[2]
+        const bindingIndex = parseInt(rawIdx, 10)
+        if (bindingIndex === 0) continue
+
+        const name = match[3]
+        const typeStr = match[4].trim()
+
+        if (typeStr.startsWith("sampler")) {
+          if (this.defaultSampler) {
+            entries.push({ binding: bindingIndex, resource: this.defaultSampler })
+          }
+        } else if (typeStr.startsWith("texture_2d")) {
+          const boundTexId = this.textureBindings[name] ||
+                             this.textureBindings[name.replace(/^u_/, "")] ||
+                             this.textureBindings[`u_${name}`]
+          let targetTexture: GPUTexture | null = null
+          if (boundTexId && this.textureResources.has(boundTexId)) {
+            targetTexture = this.textureResources.get(boundTexId)!
+          } else {
+            const qTex = this.queueTextures.find((t) => t.binding === bindingIndex)
+            if (qTex && this.textureResources.has(qTex.id)) {
+              targetTexture = this.textureResources.get(qTex.id)!
+            } else if (this.textureResources.size > 0) {
+              targetTexture = Array.from(this.textureResources.values())[0]
+            } else {
+              targetTexture = this.defaultTexture
+            }
+          }
+
+          if (targetTexture) {
+            entries.push({ binding: bindingIndex, resource: targetTexture.createView() })
+          }
+        }
+      }
+    }
+    return entries
+  }
+
+  private updateBindGroup() {
+    if (!this.device || !this.pipeline) return
+    try {
+      const entries = this.buildBindGroupEntries(this.currentShaderSource)
+      this.bindGroup = this.device.createBindGroup({
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries,
+      })
+    } catch {
+      // Ignore bind group reconstruction errors during transition
+    }
   }
 
   private createDepthTexture() {
@@ -147,6 +442,9 @@ export class WebGPUAdapter implements RenderAdapter {
     if (this.canvas.width === canvasWidth && this.canvas.height === canvasHeight) return
     this.canvas.width = canvasWidth; this.canvas.height = canvasHeight
     this.createDepthTexture()
+    if (this.pingPong && this.hasPostProcess) {
+      this.pingPong.resize(canvasWidth, canvasHeight)
+    }
   }
 
   private startRenderLoop() {
@@ -160,20 +458,30 @@ export class WebGPUAdapter implements RenderAdapter {
       const viewMatrix = createLookAtMatrix([0, 2, 4], [0, 0, 0], [0, 1, 0])
       const rotationMatrix = createRotationMatrix(this.angleX, this.angleY)
       const mvpMatrix = multiplyMatrices(projectionMatrix, multiplyMatrices(viewMatrix, rotationMatrix))
-      const uniformValues = useProjectStore.getState().uniformValues
-      let color: number[] = [0.4, 0.6, 0.9]
-      if (uniformValues["color"] && Array.isArray(uniformValues["color"].value)) color = uniformValues["color"].value as number[]
-      const uniformData = new Float32Array(20)
-      uniformData.set(mvpMatrix, 0); uniformData.set(color, 16)
-      this.device.queue.writeBuffer(this.uniformBuffer!, 0, uniformData.buffer as ArrayBuffer)
+
+      // Update per-frame uniforms (mvp and time only, without stomping other uniforms)
+      if (this.uniformBuffer && this.uniformLayout) {
+        const mvpField = this.uniformLayout.fields["mvp"] || this.uniformLayout.fields["u_mvp"]
+        if (mvpField) {
+          this.device.queue.writeBuffer(this.uniformBuffer, mvpField.offset, mvpMatrix.buffer as ArrayBuffer)
+        }
+        const timeField = this.uniformLayout.fields["time"] || this.uniformLayout.fields["u_time"]
+        if (timeField) {
+          this.device.queue.writeBuffer(this.uniformBuffer, timeField.offset, new Float32Array([time / 1000]).buffer as ArrayBuffer)
+        }
+      }
+
       const geometry = this.currentGeometry
       const vertexBuffer = this.vertexBuffers.get(geometry)
       const vertexCount = this.vertexCounts.get(geometry) ?? 36
       if (!vertexBuffer) { this.rafId = requestAnimationFrame(render); return }
       const commandEncoder = this.device.createCommandEncoder()
       const textureView = this.context.getCurrentTexture().createView()
+      const targetView = (this.hasPostProcess && this.pingPong?.getCurrent())
+        ? this.pingPong.getCurrent()!
+        : textureView
       const renderPass = commandEncoder.beginRenderPass({
-        colorAttachments: [{ view: textureView, clearValue: { r: 0.08, g: 0.08, b: 0.1, a: 1 }, loadOp: "clear", storeOp: "store" }],
+        colorAttachments: [{ view: targetView, clearValue: { r: 0.08, g: 0.08, b: 0.1, a: 1 }, loadOp: "clear", storeOp: "store" }],
         depthStencilAttachment: { view: this.depthTextureView!, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" },
       })
       renderPass.setPipeline(this.pipeline)
@@ -189,25 +497,65 @@ export class WebGPUAdapter implements RenderAdapter {
 
   setRenderQueue(queue: RenderQueue | null) {
     if (!queue || queue.length === 0) return
-    for (const step of queue) { if (step.type === "mesh") { this.currentGeometry = step.geometry as GeometryKey; break } }
-    for (const step of queue) { if (step.type === "texture") this.loadTexture(step.id) }
+    this.hasPostProcess = false
+    this.queueTextures = []
+    for (const step of queue) {
+      if (step.type === "mesh") {
+        this.currentGeometry = step.geometry as GeometryKey
+      } else if (step.type === "texture") {
+        this.queueTextures.push({ id: step.id, binding: step.binding })
+        this.loadTexture(step.id)
+      } else if (step.type === "material") {
+        if (step.textureBindings) {
+          this.textureBindings = { ...step.textureBindings }
+        }
+      } else if (step.type === "postprocess") {
+        this.hasPostProcess = true
+      }
+    }
+    if (this.hasPostProcess && this.device && this.canvas) {
+      if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device)
+      this.pingPong.resize(this.canvas.width, this.canvas.height)
+    }
+    this.updateBindGroup()
   }
 
   private async loadTexture(textureId: string) {
-    if (!this.device) return
+    if (!this.device || !this.initialized) return
     const textureResource = useProjectStore.getState().textureResources.find(t => t.id === textureId)
     if (!textureResource || this.textureResources.has(textureId)) return
     try {
-      const response = await fetch(textureResource.src), blob = await response.blob(), bitmap = await createImageBitmap(blob)
-      const texture = this.device.createTexture({ size: [bitmap.width, bitmap.height], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT })
-      this.device.queue.copyExternalImageToTexture({ source: bitmap }, { texture }, [bitmap.width, bitmap.height])
-      this.textureResources.set(textureId, texture)
-    } catch (e) { console.error("Failed to load texture:", e) }
+      const response = await fetch(textureResource.src)
+      if (!this.device || !this.initialized) return
+      const blob = await response.blob()
+      if (!this.device || !this.initialized) return
+      const bitmap = await createImageBitmap(blob)
+      if (!this.device || !this.initialized) {
+        if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
+        return
+      }
+      try {
+        const texture = this.device.createTexture({
+          size: [bitmap.width, bitmap.height],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+        })
+        this.device.queue.copyExternalImageToTexture({ source: bitmap }, { texture }, [bitmap.width, bitmap.height])
+        this.textureResources.set(textureId, texture)
+        this.updateBindGroup()
+      } finally {
+        if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
+      }
+    } catch (e) {
+      if (this.initialized) console.error("Failed to load texture:", e)
+    }
   }
 
   recompileShader(wgslSource: string) {
     if (!this.device || !this.initialized) return
     try {
+      this.currentShaderSource = wgslSource
+      this.setupDynamicUniformBuffer(wgslSource)
       const shaderModule = this.device.createShaderModule({ code: wgslSource })
       const newPipeline = this.device.createRenderPipeline({
         layout: "auto",
@@ -216,24 +564,31 @@ export class WebGPUAdapter implements RenderAdapter {
         primitive: { topology: "triangle-list", cullMode: "back" },
         depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
       })
-      const newBindGroup = this.device.createBindGroup({ layout: newPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.uniformBuffer! } }] })
-      this.pipeline = newPipeline; this.bindGroup = newBindGroup
+      const newBindGroup = this.device.createBindGroup({ layout: newPipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgslSource) })
+      this.pipeline = newPipeline
+      this.bindGroup = newBindGroup
       useProjectStore.getState().setLastCompileError(null)
     } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(msg) }
   }
 
-  updateUniform(_name: string, value: UniformValue) {
-    if (!this.device || !this.uniformBuffer) return
-    if (value.type === "color" || value.type === "vec3") {
-      const color = Array.isArray(value.value) ? value.value : [0.5, 0.5, 0.5]
-      const uniformData = new Float32Array(4); uniformData.set(color.slice(0, 3), 0); uniformData[3] = 1.0
-      this.device.queue.writeBuffer(this.uniformBuffer, 64, uniformData.buffer as ArrayBuffer)
-    }
+  updateUniform(name: string, value: UniformValue) {
+    const alt = name.startsWith("u_") ? name.slice(2) : `u_${name}`
+    this.cachedUniformValues.delete(alt)
+    this.cachedUniformValues.set(name, value)
+    if (!this.device || !this.uniformBuffer || !this.uniformLayout || !this.cpuUniformBuffer) return
+
+    const field = this.getFieldLayout(name)
+    if (!field) return
+
+    this.writeUniformToCpuBuffer(name, value)
+    const slice = this.cpuUniformBuffer.slice(field.offset, field.offset + field.size)
+    this.device.queue.writeBuffer(this.uniformBuffer, field.offset, slice)
   }
 
   setPerfCallback(callback: (metrics: PerfMetrics) => void) { this.onPerfUpdate = callback }
 
   dispose() {
+    this.isDisposed = true
     if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null }
     this.depthTexture?.destroy(); this.depthTexture = null; this.depthTextureView = null
     for (const buffer of this.vertexBuffers.values()) buffer?.destroy()
@@ -242,6 +597,8 @@ export class WebGPUAdapter implements RenderAdapter {
     this.bindGroup = null; this.pipeline = null
     for (const texture of this.textureResources.values()) texture?.destroy()
     this.textureResources.clear()
+    this.defaultTexture?.destroy(); this.defaultTexture = null; this.defaultSampler = null
+    this.pingPong?.destroy(); this.pingPong = null; this.hasPostProcess = false
     this.device?.destroy(); this.device = null
     this.context = null; this.initialized = false
   }

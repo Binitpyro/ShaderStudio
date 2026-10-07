@@ -51,7 +51,7 @@ void main() { gl_Position = u_mvp * vec4(a_position, 1.0); }
       <div className="flex-1 overflow-hidden">
         <Editor
           height="100%"
-          defaultLanguage={language}
+          language={language}
           value={shaderSource || defaultSource}
           onChange={handleChange}
           onMount={handleEditorMount}

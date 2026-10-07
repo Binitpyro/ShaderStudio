@@ -5,16 +5,92 @@ import type { GraphNodeData, RenderQueue } from "@/core/graphCompiler"
 export type BackendType = "webgpu" | "webgl2" | "threejs"
 export type SyncMode = "bridge" | "folder" | "local"
 
+export type UniformType =
+  | "f32"
+  | "i32"
+  | "u32"
+  | "bool"
+  | "vec2f"
+  | "vec3f"
+  | "vec4f"
+  | "mat2x2f"
+  | "mat3x3f"
+  | "mat4x4f"
+  | "texture"
+  | "struct"
+
+export type UniformKind =
+  | "scalar"
+  | "vector"
+  | "matrix"
+  | "color"
+  | "texture"
+  | "array"
+  | "struct"
+
 export interface ParsedUniform {
   name: string
-  type: "f32" | "i32" | "u32" | "bool" | "vec2f" | "vec3f" | "vec4f" | "texture"
-  kind: "scalar" | "vector" | "color" | "texture" | "array"
+  type: UniformType
+  kind: UniformKind
   arrayLength?: number
+  structFields?: ParsedUniform[]
 }
 
+export type UniformValueType =
+  | "float"
+  | "int"
+  | "uint"
+  | "vec2"
+  | "vec3"
+  | "vec4"
+  | "mat2"
+  | "mat3"
+  | "mat4"
+  | "color"
+  | "bool"
+  | "texture"
+  | "struct"
+
 export interface UniformValue {
-  type: "float" | "vec2" | "vec3" | "vec4" | "color" | "bool" | "texture"
-  value: number | number[] | boolean | string
+  type: UniformValueType
+  value: number | number[] | boolean | string | Record<string, any>
+}
+
+export function getDefaultUniformValue(uniform: ParsedUniform): UniformValue {
+  switch (uniform.kind) {
+    case "color":
+      return {
+        type: uniform.type === "vec4f" ? "vec4" : "color",
+        value: uniform.type === "vec4f" ? [0.5, 0.5, 0.5, 1.0] : [0.5, 0.5, 0.5],
+      }
+    case "vector":
+      if (uniform.type === "vec2f") return { type: "vec2", value: [0, 0] }
+      if (uniform.type === "vec3f") return { type: "vec3", value: [0, 0, 0] }
+      return { type: "vec4", value: [0, 0, 0, 1] }
+    case "matrix":
+      if (uniform.type === "mat2x2f") return { type: "mat2", value: [1, 0, 0, 1] }
+      if (uniform.type === "mat3x3f") return { type: "mat3", value: [1, 0, 0, 0, 1, 0, 0, 0, 1] }
+      return {
+        type: "mat4",
+        value: [
+          1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+          0, 0, 0, 1,
+        ],
+      }
+    case "texture":
+      return { type: "texture", value: "" }
+    case "scalar":
+      if (uniform.type === "bool") return { type: "bool", value: false }
+      return { type: "float", value: 0 }
+    case "struct":
+      return { type: "struct", value: {} }
+    case "array":
+      return { type: "float", value: 0 }
+    default:
+      return { type: "float", value: 0 }
+  }
 }
 
 export interface GraphUniform {
@@ -107,7 +183,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setActiveBackend: (backend) => set({ activeBackend: backend, hasUnsavedChanges: true }),
   setShaderSource: (source) => set({ shaderSource: source, hasUnsavedChanges: true }),
   setActiveShaderPath: (path) => set({ activeShaderPath: path }),
-  setParsedUniforms: (uniforms) => set({ parsedUniforms: uniforms }),
+  setParsedUniforms: (uniforms) => set((state) => {
+    if (!uniforms || uniforms.length === 0) {
+      return { parsedUniforms: [] }
+    }
+    const nextUniformValues = { ...state.uniformValues }
+    for (const u of uniforms) {
+      if (!nextUniformValues[u.name]) {
+        nextUniformValues[u.name] = getDefaultUniformValue(u)
+      }
+    }
+    return {
+      parsedUniforms: uniforms,
+      uniformValues: nextUniformValues,
+    }
+  }),
   setUniformValue: (name, value) => set((state) => ({
     uniformValues: { ...state.uniformValues, [name]: value },
     hasUnsavedChanges: true,

@@ -32,7 +32,7 @@ function createLookAtMatrix(eye: [number, number, number], target: [number, numb
   const zAxis = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]), xAxis = normalize(cross(up, zAxis)), yAxis = cross(zAxis, xAxis)
   return new Float32Array([xAxis[0], yAxis[0], zAxis[0], 0, xAxis[1], yAxis[1], zAxis[1], 0, xAxis[2], yAxis[2], zAxis[2], 0, -dot(xAxis, eye), -dot(yAxis, eye), -dot(zAxis, eye), 1])
 }
-function createRotationMatrix(angleX: number, angleY: number): Float32Array { const cx = Math.cos(angleX), sx = Math.sin(angleX), cy = Math.cos(angleY), sy = Math.sin(angleY); return new Float32Array([cy, sy * sx, -sy * cx, 0, 0, cx, sx, 0, sy, -cy * sx, cy * cx, 1, 0, 0, 0, 1]) }
+function createRotationMatrix(angleX: number, angleY: number): Float32Array { const cx = Math.cos(angleX), sx = Math.sin(angleX), cy = Math.cos(angleY), sy = Math.sin(angleY); return new Float32Array([cy, sy * sx, -sy * cx, 0, 0, cx, sx, 0, sy, -cy * sx, cy * cx, 0, 0, 0, 0, 1]) }
 function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array { const result = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) result[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + a[i * 4 + 3] * b[12 + j]; return result }
 function normalize(v: number[]): number[] { const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0] }
 function cross(a: number[], b: number[]): number[] { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
@@ -61,6 +61,14 @@ export class WebGL2Adapter implements RenderAdapter {
   private fps = 0
   private onPerfUpdate?: (metrics: PerfMetrics) => void
   private quadVAO: WebGLVertexArrayObject | null = null
+  private quadBuffer: WebGLBuffer | null = null
+
+  private uniformLocations = new Map<string, WebGLUniformLocation | null>()
+  private uniformValues = new Map<string, UniformValue>()
+  private loadedTextures = new Map<string, WebGLTexture>()
+  private textureBindings: Record<string, string> = {}
+  private queueTextures: Array<{ id: string; binding: number }> = []
+  private defaultTexture: WebGLTexture | null = null
 
   async mount(canvas: HTMLCanvasElement): Promise<boolean> {
     this.canvas = canvas
@@ -72,7 +80,15 @@ export class WebGL2Adapter implements RenderAdapter {
     return this.initialize()
   }
 
-  private handleContextLost = (e: Event) => { e.preventDefault(); if (this.rafId) { cancelAnimationFrame(this.rafId); this.rafId = null }; this.initialized = false; useProjectStore.getState().setDeviceLost(true); useProjectStore.getState().setLastCompileError("WebGL2 context lost") }
+  private handleContextLost = (e: Event) => {
+    e.preventDefault()
+    if (this.rafId) { cancelAnimationFrame(this.rafId); this.rafId = null }
+    this.initialized = false
+    this.quadVAO = null
+    this.quadBuffer = null
+    useProjectStore.getState().setDeviceLost(true)
+    useProjectStore.getState().setLastCompileError("WebGL2 context lost")
+  }
   private handleContextRestored = () => { useProjectStore.getState().setDeviceLost(false); useProjectStore.getState().setLastCompileError(null); this.initialize() }
 
   private initialize(): boolean {
@@ -80,13 +96,159 @@ export class WebGL2Adapter implements RenderAdapter {
     gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK)
     this.program = this.createProgram(defaultVertSource, defaultFragSource)
     if (!this.program) return false
-    this.mvpLocation = gl.getUniformLocation(this.program, "u_mvp")
-    this.colorLocation = gl.getUniformLocation(this.program, "u_color")
+    this.cacheUniformLocations()
+    this.mvpLocation = this.getUniformLoc("u_mvp")
+    this.colorLocation = this.getUniformLoc("u_color")
     this.createGeometry(this.currentGeometry)
+    this.createDefaultTexture()
     this.initializePostProcess()
     this.initialized = true
     this.startRenderLoop()
     return true
+  }
+
+  private createDefaultTexture() {
+    if (!this.gl) return
+    const gl = this.gl
+    this.defaultTexture = gl.createTexture()
+    if (!this.defaultTexture) return
+    gl.bindTexture(gl.TEXTURE_2D, this.defaultTexture)
+    const whitePixel = new Uint8Array([255, 255, 255, 255])
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, whitePixel)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+  }
+
+  private async loadTexture(textureId: string) {
+    if (!this.gl || !this.initialized) return
+    const resource = useProjectStore.getState().textureResources.find((t) => t.id === textureId)
+    if (!resource || this.loadedTextures.has(textureId)) return
+    try {
+      const response = await fetch(resource.src)
+      const blob = await response.blob()
+      const bitmap = await createImageBitmap(blob)
+      if (!this.gl || !this.initialized) return
+
+      const gl = this.gl
+      const tex = gl.createTexture()
+      if (!tex) return
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      gl.bindTexture(gl.TEXTURE_2D, null)
+
+      this.loadedTextures.set(textureId, tex)
+    } catch (e) {
+      if (this.initialized) console.error("Failed to load texture in WebGL2:", e)
+    }
+  }
+
+  private cacheUniformLocations() {
+    if (!this.gl || !this.program) return
+    this.uniformLocations.clear()
+    const count = this.gl.getProgramParameter(this.program, this.gl.ACTIVE_UNIFORMS)
+    for (let i = 0; i < count; i++) {
+      const info = this.gl.getActiveUniform(this.program, i)
+      if (!info) continue
+      const loc = this.gl.getUniformLocation(this.program, info.name)
+      this.uniformLocations.set(info.name, loc)
+      if (info.name.endsWith("[0]")) {
+        this.uniformLocations.set(info.name.slice(0, -3), loc)
+      }
+    }
+  }
+
+  private getUniformLoc(name: string): WebGLUniformLocation | null {
+    if (this.uniformLocations.has(name)) return this.uniformLocations.get(name)!
+    if (!this.gl || !this.program) return null
+    const loc = this.gl.getUniformLocation(this.program, name)
+    this.uniformLocations.set(name, loc)
+    return loc
+  }
+
+  private findUniformLoc(name: string): WebGLUniformLocation | null {
+    if (this.uniformLocations.has(name)) return this.uniformLocations.get(name)!
+    const prefixed = `u_${name}`
+    if (this.uniformLocations.has(prefixed)) return this.uniformLocations.get(prefixed)!
+    if (name.startsWith("u_")) {
+      const stripped = name.slice(2)
+      if (this.uniformLocations.has(stripped)) return this.uniformLocations.get(stripped)!
+    }
+    return this.getUniformLoc(name) ||
+           this.getUniformLoc(prefixed) ||
+           (name.startsWith("u_") ? this.getUniformLoc(name.slice(2)) : null)
+  }
+
+  private applyUniform(loc: WebGLUniformLocation, val: UniformValue) {
+    const gl = this.gl
+    if (!gl) return
+
+    switch (val.type) {
+      case "mat4": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : []
+        const data = arr.length === 16 ? new Float32Array(arr) : new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
+        gl.uniformMatrix4fv(loc, false, data)
+        break
+      }
+      case "mat3": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : []
+        const data = arr.length === 9 ? new Float32Array(arr) : new Float32Array([1,0,0, 0,1,0, 0,0,1])
+        gl.uniformMatrix3fv(loc, false, data)
+        break
+      }
+      case "mat2": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : []
+        const data = arr.length === 4 ? new Float32Array(arr) : new Float32Array([1,0, 0,1])
+        gl.uniformMatrix2fv(loc, false, data)
+        break
+      }
+      case "vec4": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : [0, 0, 0, 0]
+        gl.uniform4fv(loc, new Float32Array([arr[0] ?? 0, arr[1] ?? 0, arr[2] ?? 0, arr[3] ?? 0]))
+        break
+      }
+      case "vec3": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : [0, 0, 0]
+        gl.uniform3fv(loc, new Float32Array([arr[0] ?? 0, arr[1] ?? 0, arr[2] ?? 0]))
+        break
+      }
+      case "color": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : [0.5, 0.5, 0.5]
+        if (arr.length >= 4) {
+          gl.uniform4fv(loc, new Float32Array([arr[0] ?? 0, arr[1] ?? 0, arr[2] ?? 0, arr[3] ?? 1]))
+        } else {
+          gl.uniform3fv(loc, new Float32Array([arr[0] ?? 0, arr[1] ?? 0, arr[2] ?? 0]))
+        }
+        break
+      }
+      case "vec2": {
+        const arr = Array.isArray(val.value) || val.value instanceof Float32Array ? (val.value as any) : [0, 0]
+        gl.uniform2fv(loc, new Float32Array([arr[0] ?? 0, arr[1] ?? 0]))
+        break
+      }
+      case "float": {
+        gl.uniform1f(loc, typeof val.value === "number" ? val.value : Number(val.value) || 0)
+        break
+      }
+      case "bool": {
+        gl.uniform1i(loc, val.value ? 1 : 0)
+        break
+      }
+      case "int": {
+        gl.uniform1i(loc, Math.round(Number(val.value) || 0))
+        break
+      }
+      case "uint": {
+        gl.uniform1ui(loc, Math.max(0, Math.round(Number(val.value) || 0)))
+        break
+      }
+    }
   }
 
   private createProgram(vertexSource: string, fragmentSource: string): WebGLProgram | null {
@@ -122,8 +284,22 @@ export class WebGL2Adapter implements RenderAdapter {
   setRenderQueue(queue: RenderQueue | null) {
     if (!queue || queue.length === 0) return
     this.hasPostProcess = false
-    for (const step of queue) { if (step.type === "mesh") { this.createGeometry(step.geometry as GeometryKey); break } }
-    for (const step of queue) { if (step.type === "postprocess") this.hasPostProcess = true }
+    this.queueTextures = []
+    this.textureBindings = {}
+    for (const step of queue) {
+      if (step.type === "mesh") {
+        this.createGeometry(step.geometry as GeometryKey)
+      } else if (step.type === "texture") {
+        this.queueTextures.push({ id: step.id, binding: step.binding })
+        this.loadTexture(step.id)
+      } else if (step.type === "material") {
+        if (step.textureBindings) {
+          this.textureBindings = { ...step.textureBindings }
+        }
+      } else if (step.type === "postprocess") {
+        this.hasPostProcess = true
+      }
+    }
     if (this.hasPostProcess && this.canvas) this.createPostProcessFramebuffers(this.canvas.width, this.canvas.height)
   }
 
@@ -132,10 +308,54 @@ export class WebGL2Adapter implements RenderAdapter {
     let vertSource = defaultVertSource, fragSource = source
     if (source.includes("#ifdef FRAGMENT")) { const parts = source.split("#ifdef FRAGMENT"); vertSource = parts[0].replace("// Fragment shader", "").trim(); fragSource = parts[1].replace("#endif", "").trim() }
     const newProgram = this.createProgram(vertSource, fragSource)
-    if (newProgram) { if (this.program) gl.deleteProgram(this.program); this.program = newProgram; this.mvpLocation = gl.getUniformLocation(this.program, "u_mvp"); this.colorLocation = gl.getUniformLocation(this.program, "u_color"); useProjectStore.getState().setLastCompileError(null) }
+    if (newProgram) {
+      if (this.program) gl.deleteProgram(this.program)
+      this.program = newProgram
+      this.cacheUniformLocations()
+      this.mvpLocation = this.getUniformLoc("u_mvp")
+      this.colorLocation = this.getUniformLoc("u_color")
+      useProjectStore.getState().setLastCompileError(null)
+    }
   }
 
-  updateUniform(_name: string, _value: UniformValue) { /* uniforms updated in render loop */ }
+  updateUniform(name: string, value: UniformValue) {
+    const alt = name.startsWith("u_") ? name.slice(2) : `u_${name}`
+    this.uniformValues.delete(alt)
+    this.uniformValues.set(name, value)
+    if (this.gl && this.program) {
+      this.gl.useProgram(this.program)
+      const loc = this.findUniformLoc(name)
+      if (loc) {
+        this.applyUniform(loc, value)
+      }
+    }
+  }
+
+  private getAuthoritativeUniforms(storeValues: Record<string, UniformValue>): Map<string, UniformValue> {
+    const authoritative = new Map<string, UniformValue>()
+
+    // 1. Seed with store values, prioritizing 'u_' prefixed keys for WebGL2 GLSL conventions
+    for (const [key, val] of Object.entries(storeValues)) {
+      const alt = key.startsWith("u_") ? key.slice(2) : `u_${key}`
+      if (authoritative.has(alt)) {
+        if (key.startsWith("u_")) {
+          authoritative.delete(alt)
+          authoritative.set(key, val)
+        }
+      } else {
+        authoritative.set(key, val)
+      }
+    }
+
+    // 2. Overlay adapter uniformValues (runtime updates take absolute precedence over store)
+    for (const [key, val] of this.uniformValues.entries()) {
+      const alt = key.startsWith("u_") ? key.slice(2) : `u_${key}`
+      authoritative.delete(alt)
+      authoritative.set(key, val)
+    }
+
+    return authoritative
+  }
 
   resize(width: number, height: number) {
     if (!this.canvas || !this.gl) return
@@ -158,15 +378,71 @@ export class WebGL2Adapter implements RenderAdapter {
       const viewMatrix = createLookAtMatrix([0, 2, 4], [0, 0, 0], [0, 1, 0])
       const rotationMatrix = createRotationMatrix(this.angleX, this.angleY)
       const mvpMatrix = multiplyMatrices(projectionMatrix, multiplyMatrices(viewMatrix, rotationMatrix))
-      const uniformValues = useProjectStore.getState().uniformValues
+      const storeValues = useProjectStore.getState().uniformValues
+      const authoritative = this.getAuthoritativeUniforms(storeValues)
       let color: number[] = [0.4, 0.6, 0.9]
-      if (uniformValues["color"] && Array.isArray(uniformValues["color"].value)) color = uniformValues["color"].value as number[]
+      const colorVal = authoritative.get("u_color") || authoritative.get("color")
+      if (colorVal && Array.isArray(colorVal.value)) color = colorVal.value as number[]
       const gl = this.gl
       if (this.hasPostProcess && this.postProcessFramebuffers.length > 0) { this.postProcessFramebuffers[0].bind(); gl.viewport(0, 0, this.canvas.width, this.canvas.height) }
       gl.clearColor(0.08, 0.08, 0.1, 1.0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
       gl.useProgram(this.program)
-      gl.uniformMatrix4fv(this.mvpLocation, false, mvpMatrix)
-      gl.uniform3fv(this.colorLocation, new Float32Array(color))
+
+      if (this.mvpLocation) {
+        gl.uniformMatrix4fv(this.mvpLocation, false, mvpMatrix)
+      }
+      if (this.colorLocation) {
+        gl.uniform3fv(this.colorLocation, new Float32Array(color.slice(0, 3)))
+      }
+
+      // Time uniform update
+      const timeLoc = this.findUniformLoc("time")
+      if (timeLoc) {
+        gl.uniform1f(timeLoc, time / 1000)
+      }
+
+      // Bind all custom and modified uniforms without duplicate location uploads
+      const boundLocations = new Set<WebGLUniformLocation>()
+      if (this.mvpLocation) boundLocations.add(this.mvpLocation)
+      if (this.colorLocation) boundLocations.add(this.colorLocation)
+      if (timeLoc) boundLocations.add(timeLoc)
+
+      for (const [name, val] of authoritative.entries()) {
+        if (name === "color" || name === "u_color" || name === "u_mvp" || name === "mvp" || name === "time" || name === "u_time") continue
+        const loc = this.findUniformLoc(name)
+        if (loc && !boundLocations.has(loc)) {
+          boundLocations.add(loc)
+          this.applyUniform(loc, val)
+        }
+      }
+
+      // Bind textures to texture units
+      let activeUnit = 0
+      for (const [uniformName, texId] of Object.entries(this.textureBindings)) {
+        const tex = this.loadedTextures.get(texId) || this.defaultTexture
+        if (tex) {
+          gl.activeTexture(gl.TEXTURE0 + activeUnit)
+          gl.bindTexture(gl.TEXTURE_2D, tex)
+          const loc = this.findUniformLoc(uniformName)
+          if (loc) {
+            gl.uniform1i(loc, activeUnit)
+          }
+          activeUnit++
+        }
+      }
+      for (const qTex of this.queueTextures) {
+        const tex = this.loadedTextures.get(qTex.id) || this.defaultTexture
+        if (tex) {
+          const unit = qTex.binding ?? activeUnit
+          gl.activeTexture(gl.TEXTURE0 + unit)
+          gl.bindTexture(gl.TEXTURE_2D, tex)
+          const loc = this.findUniformLoc(`u_texture${unit}`) || this.findUniformLoc("u_texture")
+          if (loc) {
+            gl.uniform1i(loc, unit)
+          }
+        }
+      }
+
       gl.bindVertexArray(this.vao); gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount); gl.bindVertexArray(null)
       if (this.hasPostProcess && this.postProcessPrograms.length > 0 && this.postProcessFramebuffers.length > 0) {
         this.postProcessFramebuffers[0].unbind()
@@ -179,7 +455,7 @@ export class WebGL2Adapter implements RenderAdapter {
         gl.uniform1f(gl.getUniformLocation(ppProgram, "u_vignetteRadius"), 0.8)
         if (!this.quadVAO) {
           this.quadVAO = gl.createVertexArray(); gl.bindVertexArray(this.quadVAO)
-          const quadBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer)
+          this.quadBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer)
           gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW)
           gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
         }
@@ -195,9 +471,25 @@ export class WebGL2Adapter implements RenderAdapter {
   dispose() {
     if (this.rafId) { cancelAnimationFrame(this.rafId); this.rafId = null }
     const gl = this.gl
-    if (gl) { if (this.program) gl.deleteProgram(this.program); if (this.vao) gl.deleteVertexArray(this.vao); if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer); for (const prog of this.postProcessPrograms) gl.deleteProgram(prog); for (const fb of this.postProcessFramebuffers) fb.destroy() }
+    if (gl) {
+      if (this.program) gl.deleteProgram(this.program)
+      if (this.vao) gl.deleteVertexArray(this.vao)
+      if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer)
+      if (this.quadVAO) gl.deleteVertexArray(this.quadVAO)
+      if (this.quadBuffer) gl.deleteBuffer(this.quadBuffer)
+      for (const prog of this.postProcessPrograms) gl.deleteProgram(prog)
+      for (const fb of this.postProcessFramebuffers) fb.destroy()
+      for (const tex of this.loadedTextures.values()) gl.deleteTexture(tex)
+      this.loadedTextures.clear()
+      if (this.defaultTexture) gl.deleteTexture(this.defaultTexture)
+      this.defaultTexture = null
+    }
+    this.queueTextures = []
+    this.textureBindings = {}
     if (this.canvas) { this.canvas.removeEventListener("webglcontextlost", this.handleContextLost); this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored) }
-    this.program = null; this.vao = null; this.vertexBuffer = null; this.initialized = false; this.gl = null; this.canvas = null
+    this.program = null; this.vao = null; this.vertexBuffer = null; this.quadVAO = null; this.quadBuffer = null; this.initialized = false; this.gl = null; this.canvas = null
+    this.uniformLocations.clear()
+    this.uniformValues.clear()
   }
 }
 

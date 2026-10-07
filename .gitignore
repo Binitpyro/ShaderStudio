@@ -17,3 +17,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent logs and analysis output
+.agents/
+graphify-out/

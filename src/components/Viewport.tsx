@@ -17,10 +17,9 @@ export function Viewport({ className }: ViewportProps) {
   const deviceLost = useProjectStore((state) => state.deviceLost)
   const recompileTrigger = useProjectStore((state) => state.recompileTrigger)
   const shaderSource = useProjectStore((state) => state.shaderSource)
-  const renderQueue = useProjectStore((state) => state.renderQueue)
   const activeBackend = useProjectStore((state) => state.activeBackend)
+  const renderQueue = useProjectStore((state) => state.renderQueue)
   const prevRecompileRef = useRef(recompileTrigger)
-  const prevBackendRef = useRef(activeBackend)
 
   const getAdapter = useCallback((backend: string): RenderAdapter => {
     switch (backend) {
@@ -31,38 +30,36 @@ export function Viewport({ className }: ViewportProps) {
     }
   }, [])
 
-  const switchAdapter = useCallback(async (backend: string) => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    // Dispose current adapter
-    if (adapterRef.current) {
-      adapterRef.current.dispose()
-    }
-
-    // Get new adapter and mount
-    const adapter = getAdapter(backend)
-    adapterRef.current = adapter
-    await adapter.mount(canvas)
-
-    // Send current render queue
-    adapter.setRenderQueue(renderQueue)
-  }, [getAdapter, renderQueue])
-
-  // Initial mount
+  // Mount and switch adapter whenever activeBackend changes
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    switchAdapter(activeBackend)
-  }, [])
+    let isCancelled = false
 
-  // Handle backend switch
-  useEffect(() => {
-    if (activeBackend !== prevBackendRef.current) {
-      prevBackendRef.current = activeBackend
-      switchAdapter(activeBackend)
+    const mountCurrent = async () => {
+      if (adapterRef.current) {
+        adapterRef.current.dispose()
+      }
+
+      const adapter = getAdapter(activeBackend)
+      adapterRef.current = adapter
+      await adapter.mount(canvas)
+      if (isCancelled) return
+
+      adapter.setRenderQueue(renderQueue)
+      if (shaderSource) {
+        adapter.recompileShader(shaderSource)
+      }
     }
-  }, [activeBackend, switchAdapter])
+
+    mountCurrent()
+
+    return () => {
+      isCancelled = true
+      adapterRef.current?.dispose()
+      adapterRef.current = null
+    }
+  }, [activeBackend, getAdapter])
 
   // Handle recompile
   useEffect(() => {
@@ -111,7 +108,7 @@ export function Viewport({ className }: ViewportProps) {
 
   return (
     <div ref={containerRef} className={cn("h-full w-full overflow-hidden relative", className)}>
-      <canvas ref={canvasRef} className="h-full w-full block" style={{ display: "block" }} />
+      <canvas key={activeBackend} ref={canvasRef} className="h-full w-full block" style={{ display: "block" }} />
       <PerfOverlay className="absolute" />
       <ScreenshotButton canvasRef={canvasRef} className="absolute bottom-2 right-2" />
     </div>

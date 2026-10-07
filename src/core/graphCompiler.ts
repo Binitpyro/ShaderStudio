@@ -37,18 +37,36 @@ export function compileGraph(nodes: Node<GraphNodeData>[], edges: Edge[]): Compi
   }
 
   const visited = new Set<string>()
+  const visiting = new Set<string>()
   const sorted: Node<GraphNodeData>[] = []
+  let cycleError: string | null = null
 
   function visit(nodeId: string) {
+    if (cycleError) return
+    if (visiting.has(nodeId)) {
+      cycleError = `Cycle detected in node graph involving node "${nodeId}".`
+      return
+    }
     if (visited.has(nodeId)) return
-    visited.add(nodeId)
+
+    visiting.add(nodeId)
     const nodeInfo = nodeMap.get(nodeId)
-    if (!nodeInfo) return
-    for (const edge of nodeInfo.inputs) visit(edge.source)
-    sorted.push(nodeInfo.node)
+    if (nodeInfo) {
+      for (const edge of nodeInfo.inputs) {
+        visit(edge.source)
+        if (cycleError) return
+      }
+    }
+    visiting.delete(nodeId)
+    visited.add(nodeId)
+    if (nodeInfo) {
+      sorted.push(nodeInfo.node)
+    }
   }
 
   visit(outputNode.id)
+  if (cycleError) return { queue: [], error: cycleError }
+
   const queue: RenderQueue = []
   let textureBindingSlot = 0
 
@@ -83,7 +101,20 @@ function validateGraph(nodes: Node<GraphNodeData>[], edges: Edge[]): string | nu
   const outputNodes = nodes.filter((n) => n.data.type === "output")
   if (outputNodes.length === 0) return "No output node found. Add an Output node to render."
   if (outputNodes.length > 1) return "Multiple output nodes found. Only one Output node is allowed."
-  const materialNodes = nodes.filter((n) => n.data.type === "material")
+
+  const outputNode = outputNodes[0]
+  const reachable = new Set<string>()
+  const queue = [outputNode.id]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (reachable.has(current)) continue
+    reachable.add(current)
+    for (const edge of edges) {
+      if (edge.target === current) queue.push(edge.source)
+    }
+  }
+
+  const materialNodes = nodes.filter((n) => n.data.type === "material" && reachable.has(n.id))
   for (const matNode of materialNodes) {
     const meshInput = edges.find((e) => e.target === matNode.id && e.targetHandle === "mesh")
     if (!meshInput) return `Material node "${matNode.id}" is missing a mesh input.`
