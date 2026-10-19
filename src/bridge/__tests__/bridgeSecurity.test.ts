@@ -1,25 +1,6 @@
 import { describe, it, expect } from "vitest"
-
-const ALLOWED_AI_HOSTS = new Set([
-  "api.anthropic.com",
-  "generativelanguage.googleapis.com",
-  "api.openai.com",
-  "localhost",
-  "127.0.0.1",
-])
-
-function isAllowedAiUrl(targetUrl: string): boolean {
-  try {
-    const parsed = new URL(targetUrl)
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false
-    if (parsed.protocol === "http:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
-      return false
-    }
-    return ALLOWED_AI_HOSTS.has(parsed.hostname)
-  } catch {
-    return false
-  }
-}
+// @ts-expect-error -- untyped JS script
+import { isAllowedAiUrl } from "../../../scripts/bridge.js"
 
 describe("Bridge Security & SSRF Protection", () => {
   it("allows trusted cloud AI provider endpoints over HTTPS", () => {

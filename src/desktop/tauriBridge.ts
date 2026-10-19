@@ -118,7 +118,7 @@ export async function saveProjectNative(path?: string, projectJson: string = "{}
   }
 
   if (isTauri()) {
-    return await invokeTauri<string>("save_project_native", { path: targetPath, project_json: projectJson })
+    return await invokeTauri<string>("save_project_native", { path: targetPath, projectJson })
   }
 
   inMemoryFs.set(targetPath, projectJson)

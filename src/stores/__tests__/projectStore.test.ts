@@ -45,3 +45,50 @@ describe("Project Store Persistence & Default Merging", () => {
     expect(env.showSkybox).toBe(false)
   })
 })
+
+// fleet(w1-d-coverage): behaviour tests for default uniform values and simple setters
+import { getDefaultUniformValue } from "../projectStore"
+
+describe("projectStore: default uniform values for non-vector kinds", () => {
+  const u = (kind: string, type = "f32"): any => ({ name: "u", kind, type })
+
+  it("struct -> empty struct, array/unknown -> float 0", () => {
+    expect(getDefaultUniformValue(u("struct"))).toEqual({ type: "struct", value: {} })
+    expect(getDefaultUniformValue(u("array"))).toEqual({ type: "float", value: 0 })
+    expect(getDefaultUniformValue(u("bogus"))).toEqual({ type: "float", value: 0 })
+  })
+})
+
+describe("projectStore: simple setters", () => {
+  beforeEach(() => useProjectStore.getState().resetProject())
+
+  it("setActiveShaderPath / setAutoCompile / setSelectedNodeId store values", () => {
+    const s = useProjectStore.getState()
+    s.setActiveShaderPath("shaders/a.wgsl")
+    s.setAutoCompile(false)
+    s.setSelectedNodeId("n1")
+    const st = useProjectStore.getState()
+    expect(st.activeShaderPath).toBe("shaders/a.wgsl")
+    expect(st.autoCompile).toBe(false)
+    expect(st.selectedNodeId).toBe("n1")
+  })
+
+  it("setGraphNodes / setGraphEdges replace graph and mark project dirty; setHasUnsavedChanges clears it", () => {
+    const s = useProjectStore.getState()
+    s.setHasUnsavedChanges(false)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(false)
+    s.setGraphNodes([])
+    expect(useProjectStore.getState()._graphNodes).toEqual([])
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+    s.setHasUnsavedChanges(false)
+    const edges: any[] = [{ id: "e1", source: "a", target: "b" }]
+    s.setGraphEdges(edges)
+    expect(useProjectStore.getState()._graphEdges).toEqual(edges)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+  })
+
+  it("getInitialState reflects the live state (SSR snapshot contract)", () => {
+    useProjectStore.getState().setSelectedNodeId("zzz")
+    expect(useProjectStore.getInitialState().selectedNodeId).toBe("zzz")
+  })
+})
