@@ -1,4 +1,9 @@
 import type { RenderStep } from "@/core/graphCompiler"
+import ssaoFragSource from "@/shaders/postprocess/ssao.frag?raw"
+import dofFragSource from "@/shaders/postprocess/dof.frag?raw"
+import fxaaFragSource from "@/shaders/postprocess/fxaa.frag?raw"
+import taaFragSource from "@/shaders/postprocess/taa.frag?raw"
+import ssrFragSource from "@/shaders/postprocess/ssr.frag?raw"
 
 export type PostProcessPassType =
   | "passthrough"
@@ -6,6 +11,11 @@ export type PostProcessPassType =
   | "blur"
   | "chromatic_aberration"
   | "bloom"
+  | "ssao"
+  | "dof"
+  | "fxaa"
+  | "taa"
+  | "ssr"
   | "custom"
 
 export interface PostProcessPass {
@@ -42,6 +52,16 @@ export function getDefaultPostProcessUniforms(type: PostProcessPassType): Record
       return { u_aberrationOffset: 0.008 }
     case "bloom":
       return { u_bloomThreshold: 0.7, u_bloomIntensity: 0.5 }
+    case "ssao":
+      return { u_radius: 0.5, u_intensity: 1.5, u_sampleCount: 16, u_bias: 0.025 }
+    case "dof":
+      return { u_focalDistance: 4.0, u_aperture: 0.05, u_maxBlur: 16.0, u_bokehShape: 0 }
+    case "fxaa":
+      return { u_fxaaQualitySubpix: 0.75, u_fxaaQualityEdgeThreshold: 0.166, u_fxaaQualityEdgeThresholdMin: 0.0833 }
+    case "taa":
+      return { u_feedbackMin: 0.88, u_feedbackMax: 0.97, u_motionScale: 1.0 }
+    case "ssr":
+      return { u_maxSteps: 64, u_thickness: 0.02, u_falloff: 0.8, u_iblBlend: 0.5 }
     case "passthrough":
     case "custom":
     default:
@@ -320,3 +340,10 @@ void main() {
   fragColor = vec4(1.0 - color.rgb, color.a);
 }
 `
+
+export const SSAO_FRAGMENT = ssaoFragSource
+export const DOF_FRAGMENT = dofFragSource
+export const FXAA_FRAGMENT = fxaaFragSource
+export const TAA_FRAGMENT = taaFragSource
+export const SSR_FRAGMENT = ssrFragSource
+

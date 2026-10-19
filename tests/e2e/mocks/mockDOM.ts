@@ -75,6 +75,14 @@ export class MockCanvasElement {
       toJSON: () => ({}),
     }
   }
+
+  toDataURL(type = "image/png") {
+    return `data:${type};base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==`
+  }
+
+  toBlob(callback: (blob: any) => void, type = "image/png") {
+    callback({ type, size: 100 })
+  }
 }
 
 export function createMockGPUCanvasContext(canvas: MockCanvasElement) {

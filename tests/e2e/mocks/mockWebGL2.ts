@@ -103,11 +103,57 @@ export class MockWebGL2RenderingContext {
   readonly CLAMP_TO_EDGE = 0x812f
   readonly FRAMEBUFFER = 0x8d40
   readonly COLOR_ATTACHMENT0 = 0x8ce0
+  readonly COLOR_ATTACHMENT1 = 0x8ce1
+  readonly COLOR_ATTACHMENT2 = 0x8ce2
+  readonly COLOR_ATTACHMENT3 = 0x8ce3
+  readonly COLOR_ATTACHMENT4 = 0x8ce4
+  readonly COLOR_ATTACHMENT5 = 0x8ce5
+  readonly COLOR_ATTACHMENT6 = 0x8ce6
+  readonly COLOR_ATTACHMENT7 = 0x8ce7
+  readonly DEPTH_ATTACHMENT = 0x8d00
+  readonly DEPTH_STENCIL_ATTACHMENT = 0x821a
+  readonly RGBA8 = 0x8058
+  readonly RGBA16F = 0x881a
+  readonly RGBA32F = 0x8814
+  readonly RG16F = 0x822f
+  readonly RG32F = 0x8230
+  readonly R16F = 0x822d
+  readonly R32F = 0x822e
+  readonly DEPTH_COMPONENT16 = 0x81a5
+  readonly DEPTH_COMPONENT24 = 0x81a6
+  readonly DEPTH_COMPONENT32F = 0x8cac
+  readonly DEPTH24_STENCIL8 = 0x88f0
+  readonly TEXTURE_CUBE_MAP = 0x8513
+  readonly TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515
+  readonly TEXTURE_CUBE_MAP_NEGATIVE_X = 0x8516
+  readonly TEXTURE_CUBE_MAP_POSITIVE_Y = 0x8517
+  readonly TEXTURE_CUBE_MAP_NEGATIVE_Y = 0x8518
+  readonly TEXTURE_CUBE_MAP_POSITIVE_Z = 0x8519
+  readonly TEXTURE_CUBE_MAP_NEGATIVE_Z = 0x851a
+  readonly COMPARE_REF_TO_TEXTURE = 0x884e
+  readonly TEXTURE_COMPARE_MODE = 0x884c
+  readonly TEXTURE_COMPARE_FUNC = 0x884d
+  readonly LEQUAL = 0x0203
+  readonly NONE = 0
+  readonly HALF_FLOAT = 0x140b
+  readonly TEXTURE4 = 0x84c4
+  readonly TEXTURE5 = 0x84c5
+  readonly TEXTURE6 = 0x84c6
+  readonly TEXTURE7 = 0x84c7
+  readonly TEXTURE8 = 0x84c8
+  readonly TEXTURE9 = 0x84c9
+  readonly TEXTURE10 = 0x84ca
+  readonly DRAW_FRAMEBUFFER = 0x8ca9
+  readonly READ_FRAMEBUFFER = 0x8ca8
+  readonly RENDERBUFFER = 0x8d41
   readonly FRAMEBUFFER_COMPLETE = 0x8cd5
   readonly TEXTURE_MIN_FILTER = 0x2801
   readonly TEXTURE_MAG_FILTER = 0x2800
   readonly TEXTURE_WRAP_S = 0x2802
   readonly TEXTURE_WRAP_T = 0x2803
+  readonly TEXTURE_WRAP_R = 0x8072
+
+  drawBuffersList: number[] = []
 
   canvas: MockCanvasElement
   activeProgram: MockWebGLProgram | null = null
@@ -148,6 +194,8 @@ export class MockWebGL2RenderingContext {
   disable(cap: number): void {
     this.enabledCaps.delete(cap)
   }
+
+  depthMask(_flag: boolean): void {}
 
   cullFace(_mode: number): void {}
 
@@ -314,6 +362,13 @@ export class MockWebGL2RenderingContext {
     }
   }
 
+  uniform3f(location: MockWebGLUniformLocation | null, x: number, y: number, z: number): void {
+    if (location) {
+      location.value = [x, y, z]
+      this.uniformValues.set(location.name, [x, y, z])
+    }
+  }
+
   uniform3fv(location: MockWebGLUniformLocation | null, v: Float32Array | number[]): void {
     if (location) {
       const arr = Array.from(v)
@@ -424,6 +479,40 @@ export class MockWebGL2RenderingContext {
   deleteFramebuffer(fb: MockWebGLFramebuffer): void {
     fb.isDestroyed = true
   }
+
+  drawBuffers(buffers: number[]): void {
+    this.drawBuffersList = [...buffers]
+  }
+
+  getExtension(name: string): any {
+    if (
+      name === "EXT_color_buffer_float" ||
+      name === "OES_texture_float_linear" ||
+      name === "EXT_color_buffer_half_float"
+    ) {
+      return {}
+    }
+    return {}
+  }
+
+  texStorage2D(target: number, _levels: number, _internalformat: number, width: number, height: number): void {
+    const tex = this.boundTextures.get(this.activeTextureUnit)
+    if (tex) {
+      tex.target = target
+      tex.width = width
+      tex.height = height
+    }
+  }
+
+  createRenderbuffer(): any {
+    return { isDestroyed: false }
+  }
+
+  bindRenderbuffer(_target: number, _rb: any): void {}
+
+  renderbufferStorage(_target: number, _internalformat: number, _width: number, _height: number): void {}
+
+  framebufferRenderbuffer(_target: number, _attachment: number, _renderbuffertarget: number, _renderbuffer: any): void {}
 
   isContextLost(): boolean {
     return this.contextLost

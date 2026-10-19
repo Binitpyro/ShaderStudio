@@ -26,6 +26,15 @@ export class MockThreeRenderer {
   clear = vi.fn()
   autoClear = true
 
+  shadowMap = {
+    enabled: false,
+    type: 1,
+    autoUpdate: true,
+    needsUpdate: false,
+  }
+  toneMapping = 0
+  toneMappingExposure = 1
+
   private _width = 800
   private _height = 600
   private _pixelRatio = 1

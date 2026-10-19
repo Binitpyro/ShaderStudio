@@ -1,9 +1,10 @@
 import { memo } from "react"
-import { Handle, Position, type NodeProps } from "reactflow"
+import { Handle, Position } from "@xyflow/react"
+import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { TimeNodeData } from "@/core/graphCompiler"
 
-function TimeNodeComponent({ selected }: NodeProps<TimeNodeData>) {
+function TimeNodeComponent({ selected }: FlowNodeProps<TimeNodeData>) {
   return (
     <div className={cn("bg-card border rounded-md p-3 min-w-[100px] shadow-sm", selected ? "border-primary" : "border-border")}>
       <div className="text-xs font-semibold text-foreground mb-1">Time</div>

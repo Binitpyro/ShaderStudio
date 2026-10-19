@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { compileGraph, type GraphNodeData } from "../graphCompiler"
-import type { Node, Edge } from "reactflow"
+import type { Node, Edge } from "@xyflow/react"
 
 describe("graphCompiler", () => {
   it("fails when no output node is present", () => {

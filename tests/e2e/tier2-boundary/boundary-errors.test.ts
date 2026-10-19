@@ -3,7 +3,7 @@ import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../mocks"
 import { WebGPUAdapter } from "@/adapters/webgpu"
 import { WebGL2Adapter } from "@/adapters/webgl2"
 import { compileGraph, type GraphNodeData } from "@/core/graphCompiler"
-import type { Node, Edge } from "reactflow"
+import type { Node, Edge } from "@xyflow/react"
 import { useProjectStore } from "@/stores/projectStore"
 
 describe("Tier 2: Boundary & Corner Cases — Error Handling & Recovery", () => {

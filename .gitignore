@@ -21,3 +21,5 @@ dist-ssr
 # Agent logs and analysis output
 .agents/
 graphify-out/
+*.exe
+.vitest/

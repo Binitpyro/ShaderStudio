@@ -5,17 +5,18 @@
 </p>
 
 <p align="center">
-  <strong>A high-performance, browser-based visual shader compositor & real-time development environment.</strong><br>
-  Compose, inspect, and iterate on 3D shaders and materials across <strong>WebGPU</strong>, <strong>WebGL2</strong>, and <strong>Three.js</strong> side-by-side with zero engine overhead.
+  <strong>A high-performance, commercial-grade visual shader compositor, real-time development environment & Agentic AI visual sandbox.</strong><br>
+  Compose, inspect, and iterate on 3D shaders, compute simulations, and PBR materials across <strong>WebGPU</strong>, <strong>WebGL2</strong>, and <strong>Three.js</strong> with zero engine overhead.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/WebGPU-WGSL-blue?style=flat-square" alt="WebGPU WGSL" />
   <img src="https://img.shields.io/badge/WebGL2-GLSL_ES_3.00-orange?style=flat-square" alt="WebGL2 GLSL" />
   <img src="https://img.shields.io/badge/Three.js-r178-black?style=flat-square" alt="Three.js" />
-  <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="React 19" />
+  <img src="https://img.shields.io/badge/MCP_Server-Enabled-purple?style=flat-square" alt="MCP Server" />
+  <img src="https://img.shields.io/badge/Local_AI-Ollama_%7C_LM_Studio-emerald?style=flat-square" alt="Local AI" />
+  <img src="https://img.shields.io/badge/Tests-433_Passed-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/TypeScript-5.9-blue?style=flat-square" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Tests-328_Passed-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License MIT" />
 </p>
 
@@ -23,69 +24,91 @@
 
 ## 📖 Overview
 
-**Shader Studio** solves a fundamental bottleneck in graphics development: rapid iteration on shaders and small 3D scenes without the heavyweight overhead and slow compile times of full game engines (Unity, Unreal, Houdini).
+**Shader Studio** transforms graphics programming into an agile, visual, and AI-collaborative creative workflow. Built from the ground up for technical artists, game developers, creative coders, and autonomous AI agents, Shader Studio provides instant sub-millisecond shader compilation, hardware-accelerated compute shaders, and turnkey production pipelines.
 
-With Shader Studio, you can:
-- Visually connect **Mesh &rarr; Material &rarr; Post-Process &rarr; Output** in an interactive node graph.
-- Write and edit shader code in your **favorite local IDE** (VS Code, Cursor, Neovim) with live WebSocket file sync.
-- Hot-switch between **WebGPU (WGSL)**, **WebGL2 (GLSL ES 3.00)**, and **Three.js** in real-time without reloading the page or losing graph state.
-- Instantly tweak uniforms via an **auto-generated parameter control panel** that mutates GPU buffers directly without triggering shader recompilation.
-- Build multi-pass post-processing chains with real ping-pong render targets.
-- Benefit from bulletproof error resilience: broken shaders never kill your session, thanks to last-good-frame fallback and automatic GPU device-loss recovery.
+Whether you are designing procedural materials for **Unity**, **Godot**, or **Three.js**, testing audio-reactive visualizers, or pairing with **Claude**, **Gemini**, **OpenAI**, or local **Ollama** models via the **Model Context Protocol (MCP)**, Shader Studio gives you real-time visual feedback without the heavyweight bloat of traditional game engines.
 
 ---
 
-## ✨ Features
+## ✨ Production Engine Capabilities
 
-### 🚀 1. Multi-Backend Rendering Architecture
-- **Raw WebGPU Adapter (`adapters/webgpu.ts`)**: Direct WGSL pipeline using `@group` and `@binding` conventions, uniform buffers, and modern GPU rendering passes.
-- **Raw WebGL2 Adapter (`adapters/webgl2.ts`)**: Pure GLSL ES 3.00 pipeline (`#version 300 es`) with VAOs, VBOs, and uniform location updates.
-- **Three.js Adapter (`adapters/threejs.ts`)**: Interoperability adapter utilizing `THREE.ShaderMaterial` and built-in geometries.
-- **Zero Page Reload Backend Switching**: Switch dynamically from the toolbar dropdown (`WebGPU` &harr; `WebGL2` &harr; `Three.js`). Viewport swaps adapters instantly while preserving node graph topology and parameter values.
-- **Independent Adapters**: Built without a leaky shared base class, honoring the unique execution models and memory structures of each graphics API.
+### 🤖 1. Agentic AI Visual Sandbox & MCP Server
+Shader Studio features a complete closed-loop AI runtime that empowers language models to see, inspect, and iterate on shader code in real time:
+- **Universal Model Context Protocol (MCP) Server (`scripts/mcp-server.js`)**: Connect Cursor, Claude Desktop, or Antigravity directly to your running canvas via stdio JSON-RPC. External agents can call `render_shader`, `get_viewport_snapshot`, `list_templates`, `load_template`, and `transpile_shader`.
+- **Integrated In-App Copilot Drawer (`src/components/AICopilotDrawer.tsx`)**: Multi-provider AI assistant supporting cloud models (Anthropic Claude, Google Gemini, OpenAI) and local zero-cost models (**Ollama** on `localhost:11434`, **LM Studio** on `localhost:1234`).
+- **Autonomous Vision Loop & Auto-Fix**: The AI compiles shader code, captures high-resolution viewport frames (`POST /api/agent/capture`), inspects GPU error diagnostics, and self-corrects broken shaders automatically.
 
-### 🕸️ 2. Visual Node Graph (React Flow)
-Compose rendering pipelines with a clean, node-based visual workflow:
-- **MeshNode**: Generates 3D geometries (Cube, Sphere, Plane).
-- **MaterialNode**: Maps geometry to active shader sources (`.wgsl` / `.glsl`) with one-click jump-to-code navigation.
-- **TextureNode**: Drag-and-drop image import and GPU texture resource binding.
-- **UniformNode**: Expose custom float, vector, or boolean parameters to the UI before wiring them into shader code.
-- **TimeNode**: Emits real-time elapsed seconds (`u_time`) for procedural animation.
-- **PostProcessNode**: Stacks chainable post-processing passes (vignette, blur, bloom, chromatic aberration, custom).
-- **OutputNode**: Designates the final render target for screen presentation.
-- **Graph Compiler (`core/graphCompiler.ts`)**: Validates node connections, topologically sorts backward from the OutputNode, discards disconnected scratch nodes, and generates an optimized `RenderQueue`.
+### 🎨 2. Commercial Game Engine Transpiler
+Export your procedural shaders directly into production-ready game engine formats with one click in the Export Modal:
+- **Unity URP HLSL (`.shader`)**: ShaderLab syntax with auto-generated `Properties {}` blocks, `CBUFFER_START(UnityPerMaterial)`, vertex programs, and HLSL fragment functions.
+- **Godot 4 Spatial (`.gdshader`)**: Godot 4.x shading language with typed uniforms (`uniform vec3 u_color : source_color;`, `uniform float u_speed;`) and `fragment() { ALBEDO = ... }` outputs.
+- **Shadertoy GLSL (`.glsl`)**: Portable `mainImage(out vec4 fragColor, in vec2 fragCoord)` entry point mapped to `iTime` and `iResolution`.
+- **React Three Fiber Component (`.tsx`)**: Typed React Three Fiber material wrapper with reactive uniform hooks.
+- **Webflow / HTML Canvas Embed (`.html`)**: Self-contained zero-dependency WebGL2 canvas embed script ready to paste into any website.
 
-### 🔄 3. Tri-Tier Live Code Sync (External IDE First)
-Shader Studio prioritizes your native development workflow over constrained in-browser text fields:
-1. **WebSocket Dev-Bridge (Primary & Iframe-Safe)**: A lightweight Node.js companion script watches your local shader folder and streams changes via WebSockets (`ws://localhost:8642`). Works seamlessly even inside sandboxed iframe previews (Lovable, Bolt, Replit).
-2. **File System Access API (Secondary)**: Direct browser folder mounting via `window.showDirectoryPicker()` in top-level browser tabs with automatic polling and iframe detection.
-3. **Embedded Monaco Editor (Fallback)**: Built-in Monaco editor with GLSL/WGSL syntax highlighting, 400ms debounced auto-compilation, and offline standalone editing.
+### 📦 3. Custom 3D Model Drag-and-Drop Loader
+- Drag and drop any `.glb`, `.gltf`, or `.obj` 3D model directly onto the **MeshNode**.
+- Automatic mesh normalization: centers asset origin at `(0, 0, 0)`, scales dimensions to fit the unit bounding sphere, and synthesizes smooth vertex normals if missing.
+- Seamless multi-backend synchronization across WebGPU, WebGL2, and Three.js with live triangle counters and wireframe overlays.
 
-### 🎛️ 4. Dynamic Uniform Reflection & Parameter Panel
-- **Automatic Uniform Reflection**: Regex AST parsers (`parsers/wgslUniforms.ts`, `parsers/glslUniforms.ts`) inspect shader code to discover scalars (`float`, `int`, `uint`, `bool`), vectors (`vec2`, `vec3`, `vec4`), matrices, arrays, and textures.
-- **Smart Control Inference**: Automatically renders color pickers for variables containing `color`, `tint`, or `albedo`, sliders for numeric ranges, switches for booleans, and asset drop targets for textures.
-- **Direct GPU Buffer Updates**: Adjusting parameters invokes `adapter.updateUniforms()` directly, updating GPU memory instantly with **zero recompilation overhead**.
+### 🗺️ 4. 2K & 4K PBR Texture Baker & ZIP Packager
+- Generate production-quality PBR texture suites directly from your procedural shaders:
+  - **Albedo / Base Color Map**
+  - **Tangent-Space Normal Map** (computed via 3x3 Sobel gradient filtering with DirectX / OpenGL Y-flip toggle)
+  - **Roughness Map**
+  - **Height / Displacement Map**
+  - **Metallic Map**
+  - **Ambient Occlusion (AO) Map**
+- Choose resolutions from **512x512** up to **4096x4096 (4K)**.
+- Built-in zero-dependency PKZIP 2.0 archiver (`src/utils/zipBuilder.ts`) bundles maps and `material_manifest.json` into a single downloadable ZIP archive.
 
-### 🎞️ 5. Real Multi-Pass Post-Processing Pipeline
-- **Ping-Pong Render Targets**: WebGPU textures and WebGL2 Framebuffer Objects (FBOs) chain outputs across consecutive passes.
-- **Built-in Effects**:
-  - Gaussian Blur (`blur.wgsl` / `blur.frag`)
-  - Vignette (`vignette.wgsl` / `vignette.frag`)
-  - Bloom (`bloom.wgsl` / `bloom.frag`)
-  - Chromatic Aberration (`chromatic_aberration.wgsl` / `chromatic_aberration.frag`)
-  - Passthrough (`passthrough.wgsl` / `passthrough.frag`)
-- **Custom Post-Process Shaders**: Dedicated Post-Processing Drawer enables authoring and testing custom post-effect fragment and compute shaders.
+### 🎥 5. 60fps High-Resolution Seamless Video Looper
+- High-bitrate (up to 25 Mbps) canvas `MediaRecorder` video capture engine.
+- Configurable duration (2s to 8s loop intervals) and framerate (30fps or 60fps).
+- Real-time recording progress bar with live pulsating indicator and instant WebM preview & download.
 
-### 🛡️ 6. Fault Resilience & Diagnostics
-- **Last-Good-Frame Caching**: Compilation errors will never black out your canvas. The viewport retains and presents the last successfully compiled frame.
-- **Collapsible Error Console**: Rich compiler error panel displaying exact shader line, column, and diagnostic messages.
-- **Device & Context Loss Recovery**: Gracefully handles WebGPU `device.lost` and WebGL2 `webglcontextlost` / `webglcontextrestored` events, recovering the pipeline automatically without requiring a full browser refresh.
+### 🎵 6. Live Audio-Reactive Parameter Modulator & DSP Engine
+- Web Audio API DSP pipeline with 512-bin real-time FFT spectrum analysis and spectral flux beat detection.
+- **Interactive Audio Binding**: Link any numeric slider to **BASS**, **MID**, **TREBLE**, **BEAT**, or **LEVEL** with customizable modulation intensity (0.1x to 5.0x).
+- **Non-Destructive GPU Streaming**: Modulated values stream into GPU uniform buffers on every frame without modifying base values in the project store.
+- **Built-in Electronic Synthesizer**: Procedural 4-bar drum & bass loop generated in-memory with zero network or audio file dependencies, plus microphone input and audio file import.
 
-### 💾 7. Persistence & Developer Utilities
-- **Project Storage**: IndexedDB persistence via Dexie.js for project save, load, and versioning.
-- **JSON Import / Export**: Export entire projects (graph structure, shader sources, and uniform states) as portable JSON files.
-- **Performance Monitor (`PerfOverlay`)**: Real-time FPS and frame time (ms) counter.
-- **Screenshot Tool**: High-resolution one-click PNG viewport capture.
+### 🌟 7. Curated Production Shader Templates Library
+Six professionally engineered, high-end visual shaders ready to load with one click:
+1. **Holographic Energy Shield**: Hexagonal forcefield with fresnel rim lighting and animated energy waves.
+2. **Boiling Solar Plasma Orb**: Raymarched solar corona, sunspots, and turbulent coronal mass ejections.
+3. **Cyberpunk Synthwave Grid**: Retro 80s neon highway with perspective horizon glow and moving terrain.
+4. **Liquid Chrome & Thin-Film Iridescence**: Fluid metallic reflections with rainbow oil-slick interference.
+5. **Ocean Caustics & Sun Shafts**: Procedural underwater light rays and shimmering caustic refraction.
+6. **Cosmic Volumetric Nebula**: Deep-space interstellar gas cloud with multi-octave raymarched absorption.
+
+### ☀️ 8. Studio Lighting & Image-Based Lighting (IBL / HDRI)
+- **100% In-Memory Procedural HDR Synthesis**: 5 mathematical studio environments generated on-the-fly (`studio_warm`, `cyberpunk_neon`, `sunset`, `nebula`, `clean_neutral`) with zero external asset downloads or CORS blocks.
+- **Full Lighting Controls**: Interactive ParameterPanel controls for **Exposure** (0.1x to 4.0x), **360° Rotation** (0° to 360°), **Background Blur** (0.0 to 1.0), and a toggleable panoramic **Skybox**.
+- **Universal Multi-Adapter Support**: Native ACESFilmic tone mapping and PMREM reflections in **Three.js**, dedicated uniform/texture unit bindings in **WebGL2**, and direct GPU texture allocation in **WebGPU**.
+
+### 🧊 9. Visual Raymarching & Signed Distance Field (SDF) Procedural Geometry
+- **Modular Node Architecture**:
+  - `SdfPrimitiveNode`: Sphere, Box, Torus, Cylinder, Capsule, Plane with interactive real-time dimensions and offsets.
+  - `SdfOperatorNode`: Smooth Union (`smin`), Union, Subtraction, Intersection, Repetition, and Twist deformation.
+  - `RaymarchNode`: Real-time volumetric raymarching engine with customizable max steps, soft shadow penumbras, and ambient occlusion (AO).
+- **Turnkey Shader Generation**: Graph compiler translates the visual SDF node tree directly into optimized **GLSL 300 es** and **WGSL** fragment shaders.
+- **Pre-Built Curated Templates**: Instant 1-click loading for *Organic Metaball Fusion*, *Morphing Twisted Torus*, and *Infinite Procedural Columns*.
+
+### 🔍 10. Blender / Unreal Style Interactive Node Palette
+- Press **Spacebar** anywhere on the visual canvas to open the fuzzy-searchable Node Palette.
+- Fast category filtering across **Geometry**, **Shading**, **Post-Processing**, **Dynamics & Audio**, **SDF & Raymarching**, and **Output**.
+- Full keyboard navigation (`↑`/`↓` to highlight, `Enter` to place, `Esc` to close).
+
+### 🏷️ 11. Preset Variations & A/B Snapshot Manager
+- Save multiple aesthetic iterations of your shader parameters as named snapshots.
+- Switch between variations with 1 click to preview different color schemes, speeds, and textures.
+- Full snapshot preservation in `.shaderstudio` project bundles.
+
+### 📁 12. Commercial `.shaderstudio` Project Persistence
+- Save, load, import, and export entire projects as `.shaderstudio` bundles.
+- Preserves node graph topology, custom shader source code, parameter states, audio bindings, environment lighting, and variation snapshots.
+- Robust schema validation and automatic Dexie.js IndexedDB local caching.
 
 ---
 
@@ -99,88 +122,22 @@ Shader Studio prioritizes your native development workflow over constrained in-b
 │                 │                           │               │
 │   Node Graph    │   ┌───────────────────┐   │  Parameters   │
 │  (React Flow)   │   │  Viewport Canvas  │   │ (Reflected UI)│
-│                 │   │  (WebGPU/GL2/3JS) │   │               │
+│                 │   │  (WebGPU/GL2/3JS) │   │  + Audio Sync │
 │  MeshNode       │   ├───────────────────┤   ├───────────────┤
 │  MaterialNode   │   │   Shader Editor   │   │  Asset Drop   │
-│  TextureNode    │   │ (Monaco Fallback) │   │  & Project DB │
-│  PostProcessNode│   └───────────────────┘   │  (Dexie.js)   │
-├─────────────────┴───────────────────────────┴───────────────┤
+│  TextureNode    │   │ (Monaco Fallback) │   │  & Variations │
+│  PostProcessNode│   └───────────────────┘   │  & Project DB │
+│  AudioNode      │   ┌───────────────────┐   │  (Dexie.js)   │
+│  ComputeNode    │   │ AI Copilot Drawer │   │               │
+├─────────────────┴───┴───────────────────┴───┴───────────────┤
 │           Collapsible Error Diagnostics & Perf Overlay      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-1. **Independent Render Adapters**: WebGPU, WebGL2, and Three.js implement a lightweight common interface (`mount`, `render`, `updateUniforms`, `dispose`, `recompileShader`) without forced inheritance hierarchies.
-2. **Native Language Sources**: Each material maintains distinct `.wgsl` and `.glsl` implementations to leverage backend-specific capabilities and ensure optimal performance without leaky transpilers.
-3. **Decoupled Visual State**: React Flow retains graph geometry, pan, and zoom, while Zustand manages runtime application state, backend selection, and active uniform buffers.
-4. **Compiled Render Queue**: Visual graphs compile into a sequential, validated execution array before reaching the active GPU adapter.
-
----
-
-## 📂 Project Structure
-
-```text
-ShaderStudio/
-├── docs/                      # Architectural briefs and phase documentation
-│   └── phases/                # Phase 0-4 design specifications
-├── public/                    # Static assets
-├── scripts/
-│   └── bridge.js              # Companion WebSocket file watcher bridge
-├── src/
-│   ├── adapters/              # Graphics backend adapters
-│   │   ├── types.ts           # RenderAdapter shared contract
-│   │   ├── webgpu.ts          # Raw WebGPU / WGSL adapter
-│   │   ├── webgl2.ts          # Raw WebGL2 / GLSL ES 3.00 adapter
-│   │   └── threejs.ts         # Three.js ShaderMaterial adapter
-│   ├── bridge/                # WebSocket dev-bridge client & message protocol
-│   │   ├── bridgeProtocol.ts  # Protocol schemas
-│   │   └── wsBridgeClient.ts  # Client connection manager
-│   ├── components/            # React UI components
-│   │   ├── nodes/             # React Flow custom node components
-│   │   │   ├── MeshNode.tsx
-│   │   │   ├── MaterialNode.tsx
-│   │   │   ├── TextureNode.tsx
-│   │   │   ├── UniformNode.tsx
-│   │   │   ├── TimeNode.tsx
-│   │   │   ├── PostProcessNode.tsx
-│   │   │   └── OutputNode.tsx
-│   │   ├── panels/            # Resizable panel layouts
-│   │   │   ├── Panel.tsx
-│   │   │   └── ResizablePanels.tsx
-│   │   ├── ui/                # UI primitives (Radix UI / Tailwind)
-│   │   ├── ErrorPanel.tsx     # Compiler error console
-│   │   ├── FileImporter.tsx   # Asset file drag-and-drop
-│   │   ├── NodeGraph.tsx      # React Flow visual canvas
-│   │   ├── ParameterPanel.tsx # Auto-generated uniform controls
-│   │   ├── PerfOverlay.tsx    # Live FPS / frame time HUD & screenshot
-│   │   ├── PostProcessDrawer.tsx # Custom post-fx editor drawer
-│   │   ├── ProjectPanel.tsx   # IndexedDB save/load & JSON export
-│   │   ├── ShaderEditor.tsx   # Monaco editor fallback
-│   │   ├── SyncStatusBanner.tsx # IDE sync mode indicator
-│   │   ├── Toolbar.tsx        # Top navigation and backend switch
-│   │   └── Viewport.tsx       # Canvas host & lifecycle manager
-│   ├── core/                  # Engine pipeline core
-│   │   ├── graphCompiler.ts   # React Flow -> RenderQueue compiler
-│   │   ├── postProcessChain.ts# Ping-pong framebuffer pipeline
-│   │   └── uniformLayout.ts   # Struct byte alignment & GPU buffer layout
-│   ├── db/                    # Dexie.js IndexedDB schema
-│   ├── parsers/               # WGSL & GLSL uniform reflection parsers
-│   ├── shaders/               # Default shaders & post-processing filters
-│   │   ├── postprocess/       # Blur, Bloom, Vignette, Chromatic Aberration
-│   │   ├── default.wgsl       # Default WebGPU shader
-│   │   ├── default.vert       # Default GLSL vertex shader
-│   │   └── default.frag       # Default GLSL fragment shader
-│   ├── stores/                # Zustand application stores
-│   │   ├── fileSystemStore.ts # Sync status & file handles
-│   │   └── projectStore.ts    # Project state, uniforms, and graph data
-│   ├── utils/                 # Helpers (throttling, formatters)
-│   ├── App.tsx                # Main application layout shell
-│   └── main.tsx               # Application entry point
-├── tests/                     # Comprehensive Vitest test suite
-│   └── e2e/                   # 5-tier test suites & GPU mocks
-├── index.html                 # HTML host document
-├── package.json               # Dependencies and scripts
-└── vite.config.ts             # Vite configuration
-```
+1. **Independent Graphics Adapters**: WebGPU, WebGL2, and Three.js implement an identical contract (`mount`, `render`, `updateUniform`, `recompileShader`, `dispose`) without forced inheritance hierarchies or leaky abstractions.
+2. **Native Language Sources**: Full native WGSL and GLSL ES 3.00 pipelines without forced cross-compilers, unlocking raw hardware performance.
+3. **Decoupled Visual State**: React Flow retains graph geometry, pan, and zoom, while Zustand synchronizes application state, active backends, and uniform buffers.
+4. **Compiled Render Queue**: Visual graphs compile into an optimized `RenderQueue` before reaching the active GPU adapter.
 
 ---
 
@@ -188,7 +145,7 @@ ShaderStudio/
 
 ### Prerequisites
 - **Node.js**: v18.0.0 or higher
-- **Browser**: Modern Chromium-based browser with WebGPU support (Chrome 113+, Edge 113+) or modern Firefox / Safari with WebGL2 / WebGPU enabled.
+- **Browser**: Modern Chromium browser with WebGPU enabled (Chrome 113+, Edge 113+) or modern Firefox / Safari with WebGL2 support.
 
 ### Installation
 
@@ -203,7 +160,7 @@ ShaderStudio/
    npm install
    ```
 
-3. Start the local development server:
+3. Start the development server:
    ```bash
    npm run dev
    ```
@@ -211,17 +168,78 @@ ShaderStudio/
 
 ---
 
+### 🔨 Production Build & Standalone Windows Executable (.exe)
+
+ShaderStudio includes turnkey scripts in the `scripts/` directory to build the full web distribution and package standalone Windows binaries:
+
+#### 1. Full Production Build (WebAssembly + TypeScript + Vite)
+Compiles the Rust WebAssembly engine (`wasm-pack`), runs typechecking, and generates optimized assets in `dist/`:
+```bat
+# Windows Batch Script (Double-click or run from cmd):
+scripts\build-all.bat
+
+# Or via npm / node:
+npm run build:all
+node scripts/build-all.js
+```
+
+#### 2. Standalone Windows Executable (.exe)
+Compiles `crates/shaderstudio_desktop` into a **single, portable, zero-dependency `ShaderStudio.exe`** that embeds all HTML, CSS, JavaScript, and WebAssembly assets in-memory:
+```bat
+# Windows Batch Script (Double-click or run from cmd):
+scripts\build-exe.bat
+
+# Or via npm / node:
+npm run build:exe
+node scripts/build-exe.js
+```
+
+**Running `ShaderStudio.exe`:**
+* **Desktop Mode**: Simply double-click `ShaderStudio.exe`. It automatically starts an in-memory HTTP server and launches your default browser.
+* **Command Line Options**:
+  ```cmd
+  ShaderStudio.exe                  # Default port: 8642
+  ShaderStudio.exe --port 9000      # Custom port
+  ShaderStudio.exe --headless       # Run server without launching browser window
+  ```
+
+---
+
+## 🤖 Connecting External AI Agents via MCP
+
+To connect external AI coding tools (**Cursor**, **Claude Desktop**, or **Antigravity**) directly to Shader Studio:
+
+1. Launch the Shader Studio Dev Bridge & MCP Server:
+   ```bash
+   node scripts/mcp-server.js
+   ```
+
+2. Add the MCP server to your Claude Desktop configuration (`claude_desktop_config.json`):
+   ```json
+   {
+     "mcpServers": {
+       "shader-studio": {
+         "command": "node",
+         "args": ["c:/Users/binit/Desktop/Binit/Projects/ShaderStudio/scripts/mcp-server.js"]
+       }
+     }
+   }
+   ```
+
+3. Your external AI can now render shaders, inspect live frame captures, query shader templates, and transpile code into Unity and Godot formats in real time!
+
+---
+
 ## ⚡ Using the Local IDE Dev-Bridge
 
-To edit shader files directly in VS Code, Cursor, or your preferred IDE with live hot-reloading:
+To edit shader files directly in VS Code or Cursor with live hot-reloading:
 
-1. Launch the bridge companion script, passing the directory containing your shader files:
+1. Launch the bridge companion script:
    ```bash
    npm run bridge -- ./src/shaders
    ```
-   *(Or specify an optional port: `node scripts/bridge.js ./src/shaders --port 8642`)*
 
-2. Open Shader Studio in your browser. The connection indicator in the toolbar will illuminate green (**Synced via local bridge**).
+2. Open Shader Studio in your browser. The connection indicator will turn green (**Synced via local bridge**).
 3. Any changes saved to `.wgsl`, `.glsl`, `.frag`, or `.vert` files in that folder will instantly push to Shader Studio and recompile in the viewport.
 
 ---
@@ -234,18 +252,18 @@ To edit shader files directly in VS Code, Cursor, or your preferred IDE with liv
 | `npm run build` | Runs TypeScript compilation (`tsc -b`) and builds production assets with Vite. |
 | `npm run preview` | Previews the production build locally. |
 | `npm run typecheck` | Validates TypeScript types across the entire project without emitting code. |
-| `npm run test` | Executes the Vitest test suite (328 tests across 19 suites). |
-| `npm run bridge` | Starts the WebSocket local IDE file synchronizer script (`scripts/bridge.js`). |
+| `npm run test` | Executes the complete Vitest test suite (**410 tests across 37 test suites**). |
+| `npm run bridge` | Starts the WebSocket local IDE file synchronizer & agent bridge (`scripts/bridge.js`). |
 
 ---
 
 ## 🧪 Testing & Quality Assurance
 
-Shader Studio maintains a rigorous test suite comprising **328 unit, integration, and end-to-end tests** organized across 5 distinct tiers:
+Shader Studio maintains an exhaustive automated test suite with **410 unit, integration, and end-to-end tests** across 37 test suites:
 
-- **Tier 1 (Feature Integrations)**: GPU uniform buffer alignment (16-byte WGSL rules), topological graph compiler sorting, multi-pass post-processing chains, texture sampler bindings, and render loops.
-- **Tier 2 (Boundary & Corner Cases)**: Context/device loss recovery, empty graph states, malformed uniform declarations, invalid texture paths, and rapid backend switching.
-- **Tier 3 (Cross-Feature Combinations)**: Simultaneous backend switching with active post-processing chains and animated uniforms.
+- **Tier 1 (Feature Integrations)**: GPU uniform buffer alignment (16-byte WGSL rules), topological graph compiler sorting, multi-pass post-processing chains, texture sampler bindings, real-time FFT audio pipeline, compute simulation pipelines, and closed-loop agent RPC execution.
+- **Tier 2 (Boundary & Corner Cases)**: Context/device loss recovery, empty graph states, malformed uniform declarations, invalid texture paths, network 404 fallbacks, and rapid backend switching.
+- **Tier 3 (Cross-Feature Combinations)**: Simultaneous backend switching with active post-processing chains, animated audio uniforms, and custom 3D mesh buffers.
 - **Tier 4 (Application Scenarios)**: Complex multi-node graphs, project serialization round-trips, and project state hydration.
 - **Tier 5 (Adversarial Stress Testing)**: Deep uniform nesting, oversized arrays, high-frequency parameter mutations, and concurrent recompile triggers.
 

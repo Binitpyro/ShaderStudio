@@ -20,26 +20,31 @@ interface FileSystemState {
   setBridgeConnected: (connected: boolean) => void
 }
 
-export const useFileSystemStore = create<FileSystemState>((set) => ({
-  syncMode: "local",
-  activeFilePath: null,
-  fileHandles: new Map(),
-  isIframe,
-  bridgeConnected: false,
-  setSyncMode: (mode) => set({ syncMode: mode }),
-  setActiveFilePath: (path) => set({ activeFilePath: path }),
-  setFileHandle: (path, entry) => set((state) => {
-    const newHandles = new Map(state.fileHandles)
-    newHandles.set(path, entry)
-    return { fileHandles: newHandles }
-  }),
-  removeFileHandle: (path) => set((state) => {
-    const newHandles = new Map(state.fileHandles)
-    newHandles.delete(path)
-    return { fileHandles: newHandles }
-  }),
-  clearFileHandles: () => set({ fileHandles: new Map() }),
-  setBridgeConnected: (connected) => set({ bridgeConnected: connected }),
-}))
+export const useFileSystemStore = create<FileSystemState>((set, _get, api) => {
+  api.getInitialState = () => api.getState()
+  return {
+    syncMode: "local",
+    activeFilePath: null,
+    fileHandles: new Map(),
+    isIframe,
+    bridgeConnected: false,
+    setSyncMode: (mode) => set({ syncMode: mode }),
+    setActiveFilePath: (path) => set({ activeFilePath: path }),
+    setFileHandle: (path, entry) => set((state) => {
+      const newHandles = new Map(state.fileHandles)
+      newHandles.set(path, entry)
+      return { fileHandles: newHandles }
+    }),
+    removeFileHandle: (path) => set((state) => {
+      const newHandles = new Map(state.fileHandles)
+      newHandles.delete(path)
+      return { fileHandles: newHandles }
+    }),
+    clearFileHandles: () => set({ fileHandles: new Map() }),
+    setBridgeConnected: (connected) => set({ bridgeConnected: connected }),
+  }
+})
+
+useFileSystemStore.getInitialState = () => useFileSystemStore.getState()
 
 export { isIframe }

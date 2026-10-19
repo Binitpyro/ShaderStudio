@@ -1,5 +1,6 @@
 import { memo, useState, useCallback, useEffect } from "react"
-import { Handle, Position, type NodeProps } from "reactflow"
+import { Handle, Position } from "@xyflow/react"
+import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { PostProcessNodeData } from "@/core/graphCompiler"
 import type { PostProcessPassType } from "@/core/postProcessChain"
@@ -17,7 +18,7 @@ const PASS_OPTIONS: { value: PostProcessPassType; label: string }[] = [
   { value: "passthrough", label: "Passthrough" },
 ]
 
-function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessNodeData>) {
+function PostProcessNodeComponent({ id, data, selected }: FlowNodeProps<PostProcessNodeData>) {
   const activeBackend = useProjectStore((s) => s.activeBackend)
   const passType: PostProcessPassType = data.passType || "vignette"
 
@@ -94,8 +95,10 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
   return (
     <div
       className={cn(
-        "bg-card border rounded-md p-3 min-w-[190px] max-w-[220px] shadow-sm select-none text-foreground",
-        selected ? "border-primary" : "border-border"
+        "bg-card border rounded-md p-3 shadow-sm select-none text-foreground transition-all duration-150",
+        selected
+          ? "border-primary ring-2 ring-primary/30 min-w-[210px] max-w-[240px] shadow-lg"
+          : "border-border min-w-[190px] max-w-[220px]"
       )}
     >
       <div className="flex items-center justify-between mb-2">
@@ -106,7 +109,7 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
       <select
         value={passType}
         onChange={(e) => handleTypeChange(e.target.value as PostProcessPassType)}
-        className="w-full bg-background text-xs border border-border rounded px-2 py-1 mb-2 font-mono"
+        className="w-full bg-background text-xs border border-border rounded px-2 py-1 mb-2 font-mono nodrag"
       >
         {PASS_OPTIONS.map((opt) => (
           <option key={opt.value} value={opt.value}>
@@ -117,7 +120,7 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
 
       {/* Contextual Sliders based on passType */}
       {passType === "vignette" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px]">
+        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
           <div>
             <div className="flex justify-between text-muted-foreground mb-0.5">
               <span>Intensity</span>
@@ -130,7 +133,9 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.05"
               value={params.intensity ?? 0.5}
               onChange={(e) => handleSliderChange("intensity", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
           <div>
@@ -145,14 +150,16 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.05"
               value={params.radius ?? 0.8}
               onChange={(e) => handleSliderChange("radius", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
         </div>
       )}
 
       {passType === "blur" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px]">
+        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
           <div>
             <div className="flex justify-between text-muted-foreground mb-0.5">
               <span>Blur Amount</span>
@@ -165,14 +172,16 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.2"
               value={params.blurAmount ?? 2.0}
               onChange={(e) => handleSliderChange("blurAmount", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
         </div>
       )}
 
       {passType === "chromatic_aberration" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px]">
+        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
           <div>
             <div className="flex justify-between text-muted-foreground mb-0.5">
               <span>Offset</span>
@@ -185,14 +194,16 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.001"
               value={params.aberrationOffset ?? 0.008}
               onChange={(e) => handleSliderChange("aberrationOffset", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
         </div>
       )}
 
       {passType === "bloom" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px]">
+        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
           <div>
             <div className="flex justify-between text-muted-foreground mb-0.5">
               <span>Threshold</span>
@@ -205,7 +216,9 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.05"
               value={params.bloomThreshold ?? 0.7}
               onChange={(e) => handleSliderChange("bloomThreshold", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
           <div>
@@ -220,7 +233,9 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
               step="0.05"
               value={params.bloomIntensity ?? 0.5}
               onChange={(e) => handleSliderChange("bloomIntensity", parseFloat(e.target.value))}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
             />
           </div>
         </div>
@@ -231,10 +246,34 @@ function PostProcessNodeComponent({ id, data, selected }: NodeProps<PostProcessN
           <button
             type="button"
             onClick={handleEditCustom}
-            className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 rounded px-2 py-1 text-xs font-medium transition-colors"
+            className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 rounded px-2 py-1 text-xs font-medium transition-colors nodrag"
           >
             Edit Shader Code
           </button>
+        </div>
+      )}
+
+      {selected && (
+        <div className="mt-2 pt-2 border-t border-border/60 flex flex-col gap-1.5 font-mono text-[10px]">
+          <div className="flex items-center justify-between text-muted-foreground">
+            <span className="font-semibold text-foreground text-[11px]">Pass Pipeline</span>
+            <span className="text-[9px] text-primary font-bold">STAGE ACTIVE</span>
+          </div>
+
+          <div className="p-1.5 rounded bg-muted/30 border border-border/50 flex flex-col gap-1">
+            <div className="flex justify-between text-muted-foreground">
+              <span>Node ID</span>
+              <span className="text-foreground truncate max-w-[120px]">{id}</span>
+            </div>
+            <div className="flex justify-between text-muted-foreground">
+              <span>Buffer Format</span>
+              <span className="text-foreground">RGBA16Float</span>
+            </div>
+            <div className="flex justify-between text-muted-foreground">
+              <span>Sampling</span>
+              <span className="text-foreground">Bilinear Filtering</span>
+            </div>
+          </div>
         </div>
       )}
 

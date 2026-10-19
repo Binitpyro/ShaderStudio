@@ -1,10 +1,11 @@
 import { memo, useState, useRef } from "react"
-import { Handle, Position, type NodeProps } from "reactflow"
+import { Handle, Position } from "@xyflow/react"
+import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import { useProjectStore } from "@/stores/projectStore"
 import type { TextureNodeData } from "@/core/graphCompiler"
 
-function TextureNodeComponent({ data, selected, id }: NodeProps<TextureNodeData>) {
+function TextureNodeComponent({ data, selected, id }: FlowNodeProps<TextureNodeData>) {
   const [isDragging, setIsDragging] = useState(false)
   const [preview, setPreview] = useState<string | null>(null)
   const addTextureResource = useProjectStore((s) => s.addTextureResource)

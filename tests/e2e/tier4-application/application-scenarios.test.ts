@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../mocks"
 import { compileGraph, type GraphNodeData } from "@/core/graphCompiler"
-import type { Node, Edge } from "reactflow"
+import type { Node, Edge } from "@xyflow/react"
 import { WebGPUAdapter } from "@/adapters/webgpu"
 import { WebGL2Adapter } from "@/adapters/webgl2"
 import { useProjectStore } from "@/stores/projectStore"

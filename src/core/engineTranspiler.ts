@@ -1,0 +1,676 @@
+import type { ParsedUniform, UniformValue } from "@/stores/projectStore"
+
+// Re-export modular export systems
+export {
+  exportGltf2Material,
+  createGltfBundle,
+  packOrmTexture,
+  type GltfExportOptions,
+  type GltfMaterialExportResult,
+} from "./gltfExporter"
+
+export {
+  generateNpmPackage,
+  createNpmPackageZip,
+  type NpmPackageOptions,
+  type NpmPackageResult,
+} from "./npmPackageGenerator"
+
+export {
+  importShadertoy,
+  importShadertoyFromUrl,
+  createProjectFromShadertoy,
+  type ShadertoyImportResult,
+} from "./shadertoyImporter"
+
+export {
+  generateR3FExport,
+  type R3FExportOptions,
+} from "./r3fExporter"
+
+export interface EngineExportOptions {
+  shaderName?: string
+  shaderSource: string
+  parsedUniforms?: ParsedUniform[]
+  uniformValues?: Record<string, UniformValue>
+}
+
+export interface UE5Parameter {
+  name: string
+  type: string
+  ue5Type: string
+}
+
+export interface UE5TranspileResult {
+  customExpressionHLSL: string
+  materialFunctionHLSL: string
+  parameters: UE5Parameter[]
+}
+
+function resolveUniforms(options: EngineExportOptions): ParsedUniform[] {
+  if (Array.isArray(options.parsedUniforms)) {
+    return options.parsedUniforms
+  }
+  const synthetic: ParsedUniform[] = []
+  for (const [name, val] of Object.entries(options.uniformValues || {})) {
+    let type: any = "f32"
+    let kind: any = "scalar"
+    if (val.type === "color") {
+      type = "vec4f"
+      kind = "color"
+    } else if (val.type === "vec4") {
+      type = "vec4f"
+      kind = "vector"
+    } else if (val.type === "vec3") {
+      type = "vec3f"
+      kind = "vector"
+    } else if (val.type === "vec2") {
+      type = "vec2f"
+      kind = "vector"
+    }
+    synthetic.push({ name, type, kind })
+  }
+  return synthetic
+}
+
+/**
+ * Transpiles GLSL shader code and active uniforms into a production-ready
+ * Unity ShaderLab + HLSL shader compatible with Universal Render Pipeline (URP).
+ */
+export function transpileToUnityHLSL(options: EngineExportOptions): string {
+  const shaderName = options.shaderName || "ShaderStudio/CustomEffect"
+  const uniforms = resolveUniforms(options).filter(
+    (u) => u.name !== "u_time" && u.name !== "time" && u.name !== "u_resolution" && u.name !== "resolution"
+  )
+
+  // 1. Generate Properties Block
+  const propertyLines: string[] = []
+  for (const u of uniforms) {
+    const val = options.uniformValues?.[u.name]?.value
+    if (u.kind === "color" || u.type === "vec4f") {
+      const arr = Array.isArray(val) ? val : [0.4, 0.6, 0.9, 1.0]
+      propertyLines.push(`        _${u.name} ("${u.name}", Color) = (${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3] ?? 1.0})`)
+    } else if (u.type === "vec3f") {
+      const arr = Array.isArray(val) ? val : [0.4, 0.6, 0.9]
+      propertyLines.push(`        _${u.name} ("${u.name}", Vector) = (${arr[0]}, ${arr[1]}, ${arr[2]}, 1.0)`)
+    } else if (u.type === "vec2f") {
+      const arr = Array.isArray(val) ? val : [1.0, 1.0]
+      propertyLines.push(`        _${u.name} ("${u.name}", Vector) = (${arr[0]}, ${arr[1]}, 0.0, 0.0)`)
+    } else if (u.kind === "texture") {
+      propertyLines.push(`        _${u.name} ("${u.name}", 2D) = "white" {}`)
+    } else {
+      const num = typeof val === "number" ? val : Number(val) || 0
+      propertyLines.push(`        _${u.name} ("${u.name}", Float) = ${num}`)
+    }
+  }
+
+  // 2. Generate CBUFFER Block
+  const cbufferLines: string[] = []
+  for (const u of uniforms) {
+    if (u.kind === "color" || u.type === "vec4f") {
+      cbufferLines.push(`            float4 _${u.name};`)
+    } else if (u.type === "vec3f") {
+      cbufferLines.push(`            float3 _${u.name};`)
+    } else if (u.type === "vec2f") {
+      cbufferLines.push(`            float2 _${u.name};`)
+    } else if (u.kind !== "texture") {
+      cbufferLines.push(`            float _${u.name};`)
+    }
+  }
+
+  // 3. Clean up GLSL body into HLSL equivalent
+  let hlslBody = options.shaderSource
+    .replace(/gl_FragCoord\.xy/g, "i.positionCS.xy")
+    .replace(/gl_FragCoord/g, "i.positionCS")
+    .replace(/u_resolution\.xy/g, "_ScreenParams.xy")
+    .replace(/u_resolution/g, "_ScreenParams.xy")
+    .replace(/resolution\.xy/g, "_ScreenParams.xy")
+    .replace(/resolution/g, "_ScreenParams.xy")
+    .replace(/u_time/g, "_Time.y")
+    .replace(/\btime\b/g, "_Time.y")
+    .replace(/vec2/g, "float2")
+    .replace(/vec3/g, "float3")
+    .replace(/vec4/g, "float4")
+    .replace(/mat2/g, "float2x2")
+    .replace(/mat3/g, "float3x3")
+    .replace(/mat4/g, "float4x4")
+    .replace(/fract\(/g, "frac(")
+    .replace(/mix\(/g, "lerp(")
+    .replace(/texture2D\(/g, "tex2D(")
+
+  // Replace uniform references with Unity prefixed versions
+  for (const u of uniforms) {
+    const regex = new RegExp(`\\b${u.name}\\b`, "g")
+    hlslBody = hlslBody.replace(regex, `_${u.name}`)
+  }
+
+  return `// =====================================================================
+// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
+// Target: Unity Universal Render Pipeline (URP) ShaderLab / HLSL
+// =====================================================================
+Shader "${shaderName}"
+{
+    Properties
+    {
+${propertyLines.join("\n") || "        // No exposed properties"}
+    }
+    SubShader
+    {
+        Tags 
+        { 
+            "RenderType" = "Opaque" 
+            "RenderPipeline" = "UniversalPipeline"
+            "Queue" = "Geometry"
+        }
+        LOD 100
+
+        Pass
+        {
+            Name "ForwardLit"
+            Tags { "LightMode" = "UniversalForward" }
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+                float2 uv : TEXCOORD0;
+                float3 normalOS : NORMAL;
+            };
+
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 uv : TEXCOORD0;
+                float3 normalWS : TEXCOORD1;
+            };
+
+            CBUFFER_START(UnityPerMaterial)
+${cbufferLines.join("\n") || "                // Per-material constants"}
+            CBUFFER_END
+
+            Varyings vert(Attributes input)
+            {
+                Varyings output;
+                output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
+                output.uv = input.uv;
+                output.normalWS = TransformObjectToWorldNormal(input.normalOS);
+                return output;
+            }
+
+            float4 frag(Varyings i) : SV_Target
+            {
+                float2 uv = i.uv;
+                float4 fragColor = float4(1.0, 1.0, 1.0, 1.0);
+
+                // --- Shader Studio Translated Body ---
+${hlslBody.split("\n").map(l => "                " + l).join("\n")}
+
+                return fragColor;
+            }
+            ENDHLSL
+        }
+    }
+    FallBack "Hidden/Universal Render Pipeline/FallbackError"
+}
+`
+}
+
+/**
+ * Transpiles shader code and active uniforms into a Godot 4 Spatial Shader (`.gdshader`).
+ */
+export function transpileToGodotShader(options: EngineExportOptions): string {
+  const uniforms = resolveUniforms(options).filter(
+    (u) => u.name !== "u_time" && u.name !== "time" && u.name !== "u_resolution" && u.name !== "resolution"
+  )
+
+  // 1. Generate Godot uniform declarations
+  const godotUniforms: string[] = []
+  for (const u of uniforms) {
+    const val = options.uniformValues?.[u.name]?.value
+    if (u.kind === "color" || u.type === "vec4f") {
+      const arr = Array.isArray(val) ? val : [0.4, 0.6, 0.9, 1.0]
+      godotUniforms.push(`uniform vec4 ${u.name} : source_color = vec4(${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3] ?? 1.0});`)
+    } else if (u.type === "vec3f") {
+      const arr = Array.isArray(val) ? val : [0.4, 0.6, 0.9]
+      godotUniforms.push(`uniform vec3 ${u.name} = vec3(${arr[0]}, ${arr[1]}, ${arr[2]});`)
+    } else if (u.type === "vec2f") {
+      const arr = Array.isArray(val) ? val : [1.0, 1.0]
+      godotUniforms.push(`uniform vec2 ${u.name} = vec2(${arr[0]}, ${arr[1]});`)
+    } else if (u.kind === "texture") {
+      godotUniforms.push(`uniform sampler2D ${u.name} : source_color;`)
+    } else {
+      const num = typeof val === "number" ? val : Number(val) || 0
+      godotUniforms.push(`uniform float ${u.name} = ${num};`)
+    }
+  }
+
+  // 2. Clean up GLSL body to Godot shading language
+  let godotBody = options.shaderSource
+    .replace(/gl_FragCoord\.xy/g, "FRAGCOORD.xy")
+    .replace(/gl_FragCoord/g, "FRAGCOORD")
+    .replace(/u_resolution\.xy/g, "VIEWPORT_SIZE")
+    .replace(/u_resolution/g, "VIEWPORT_SIZE")
+    .replace(/resolution\.xy/g, "VIEWPORT_SIZE")
+    .replace(/resolution/g, "VIEWPORT_SIZE")
+    .replace(/u_time/g, "TIME")
+    .replace(/\btime\b/g, "TIME")
+    .replace(/texture2D\(/g, "texture(")
+
+  return `// =====================================================================
+// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
+// Target: Godot 4 Spatial Shader (.gdshader)
+// =====================================================================
+shader_type spatial;
+render_mode cull_back, diffuse_burley, specular_schlick_ggx;
+
+${godotUniforms.join("\n") || "// No custom uniforms"}
+
+void fragment() {
+    vec2 uv = UV;
+    vec4 fragColor = vec4(1.0);
+
+    // --- Shader Studio Shader Logic ---
+${godotBody.split("\n").map(l => "    " + l).join("\n")}
+
+    ALBEDO = fragColor.rgb;
+    ALPHA = fragColor.a;
+    ROUGHNESS = 0.4;
+    METALLIC = 0.1;
+}
+`
+}
+
+/**
+ * Wraps shader code into the universal Shadertoy standard `mainImage(...)` format.
+ */
+export function transpileToShadertoy(options: EngineExportOptions): string {
+  let body = options.shaderSource
+    .replace(/gl_FragCoord/g, "fragCoord")
+    .replace(/u_time/g, "iTime")
+    .replace(/\btime\b/g, "iTime")
+    .replace(/u_resolution\.xy/g, "iResolution.xy")
+    .replace(/u_resolution/g, "iResolution.xy")
+    .replace(/resolution\.xy/g, "iResolution.xy")
+    .replace(/resolution/g, "iResolution.xy")
+    .replace(/u_mouse/g, "iMouse.xy")
+
+  // If already contains mainImage, return cleanly
+  if (body.includes("void mainImage(")) {
+    return `// =====================================================================
+// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
+// Target: Shadertoy GLSL ES 3.0
+// =====================================================================
+${body}
+`
+  }
+
+  // Otherwise, wrap into mainImage
+  return `// =====================================================================
+// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
+// Target: Shadertoy GLSL ES 3.0
+// =====================================================================
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    vec2 uv = fragCoord.xy / iResolution.xy;
+    fragColor = vec4(1.0);
+
+    // --- Shader Studio Converted Logic ---
+${body.split("\n").map(l => "    " + l).join("\n")}
+}
+`
+}
+
+/**
+ * Transpiles shader code and uniforms into Unreal Engine 5 HLSL:
+ * 1. Custom Expression node HLSL block
+ * 2. Reusable Material Function HLSL block
+ */
+export function transpileToUE5(
+  shaderSourceOrOptions: string | EngineExportOptions,
+  uniformsOrOptions?: ParsedUniform[] | EngineExportOptions
+): UE5TranspileResult {
+  let source = ""
+  let uniforms: ParsedUniform[] = []
+
+  if (typeof shaderSourceOrOptions === "object" && "shaderSource" in shaderSourceOrOptions) {
+    source = shaderSourceOrOptions.shaderSource
+    uniforms = resolveUniforms(shaderSourceOrOptions)
+  } else {
+    source = String(shaderSourceOrOptions || "")
+    if (Array.isArray(uniformsOrOptions)) {
+      uniforms = uniformsOrOptions
+    } else if (uniformsOrOptions && typeof uniformsOrOptions === "object" && "shaderSource" in uniformsOrOptions) {
+      uniforms = resolveUniforms(uniformsOrOptions)
+    }
+  }
+
+  const params: UE5Parameter[] = uniforms.map((u) => {
+    let ue5Type = "ScalarParameter"
+    const t = String(u.type)
+    if (
+      t === "vec2" ||
+      t === "vec2f" ||
+      t === "vec3" ||
+      t === "vec4" ||
+      t === "color" ||
+      t === "vec3f" ||
+      t === "vec4f" ||
+      t.startsWith("mat") ||
+      u.kind === "color" ||
+      u.kind === "vector"
+    ) {
+      ue5Type = "VectorParameter"
+    } else if (
+      t === "sampler2D" ||
+      t === "texture" ||
+      u.kind === "texture" ||
+      t === "samplerCube" ||
+      t === "sampler3D"
+    ) {
+      ue5Type = t === "samplerCube" ? "TextureCube" : "Texture2D"
+    }
+    return { name: u.name, type: u.type, ue5Type }
+  })
+
+  const paramDeclarations = params
+    .map((p) => `// UE5 ${p.ue5Type}: ${p.name}`)
+    .join("\n")
+
+  // Translate GLSL syntax to HLSL
+  const translateGlslToHlsl = (code: string): string => {
+    let hlsl = code
+      .replace(/gl_FragCoord\.xy/g, "Parameters.TexCoords[0].xy * View.ViewSizeAndInvSize.xy")
+      .replace(/gl_FragCoord/g, "float4(Parameters.TexCoords[0].xy * View.ViewSizeAndInvSize.xy, 0.0, 1.0)")
+      .replace(/u_resolution\.xy/g, "View.ViewSizeAndInvSize.xy")
+      .replace(/u_resolution/g, "float3(View.ViewSizeAndInvSize.xy, 1.0)")
+      .replace(/resolution\.xy/g, "View.ViewSizeAndInvSize.xy")
+      .replace(/resolution/g, "float3(View.ViewSizeAndInvSize.xy, 1.0)")
+      .replace(/u_time/g, "View.GameTime")
+      .replace(/\btime\b/g, "View.GameTime")
+      .replace(/\bvec2\b/g, "float2")
+      .replace(/\bvec3\b/g, "float3")
+      .replace(/\bvec4\b/g, "float4")
+      .replace(/\bmat2\b/g, "float2x2")
+      .replace(/\bmat3\b/g, "float3x3")
+      .replace(/\bmat4\b/g, "float4x4")
+      .replace(/\bfract\(/g, "frac(")
+      .replace(/\bmix\(/g, "lerp(")
+      .replace(/\bmod\(/g, "fmod(")
+      .replace(/\btexture2D\(/g, "Texture2DSample(")
+      .replace(/\btexture\(/g, "Texture2DSample(")
+
+    // Only convert 2-argument atan(y, x) to atan2(y, x). Leave single-argument atan(x) as atan(x).
+    return hlsl.replace(/\batan\s*\(/g, (match, offset) => {
+      let depth = 1
+      let hasComma = false
+      const start = offset + match.length
+      for (let i = start; i < hlsl.length; i++) {
+        const ch = hlsl[i]
+        if (ch === "(") depth++
+        else if (ch === ")") {
+          depth--
+          if (depth === 0) break
+        } else if (ch === "," && depth === 1) {
+          hasComma = true
+        }
+      }
+      return hasComma ? "atan2(" : "atan("
+    })
+  }
+
+  // Extract body of void main(...) if present, preserving genuine user shader logic
+  const mainRegex = /\bvoid\s+main\s*\([^)]*\)\s*\{/
+  const mainMatch = source.match(mainRegex)
+  let rawBody = ""
+
+  if (mainMatch && mainMatch.index !== undefined) {
+    const startIdx = mainMatch.index + mainMatch[0].length
+    let depth = 1
+    let endIdx = startIdx
+    for (let i = startIdx; i < source.length; i++) {
+      if (source[i] === "{") depth++
+      else if (source[i] === "}") {
+        depth--
+        if (depth === 0) {
+          endIdx = i
+          break
+        }
+      }
+    }
+    rawBody = source.slice(startIdx, endIdx)
+  } else {
+    rawBody = source
+  }
+
+  const translatedBody = translateGlslToHlsl(rawBody)
+
+  // For Custom Expression: map fragColor / gl_FragColor to return statement
+  let customExprBody = translatedBody
+    .replace(/\b(?:out\s+float4\s+)?(?:fragColor|gl_FragColor)\s*=\s*([^;]+);/g, "return $1;")
+    .trim()
+
+  if (!/\breturn\b/.test(customExprBody)) {
+    customExprBody = customExprBody
+      ? `${customExprBody}\nreturn float4(1.0, 1.0, 1.0, 1.0);`
+      : "return float4(1.0, 1.0, 1.0, 1.0);"
+  }
+
+  const customExpressionHLSL = `
+// UE5 Custom Expression HLSL Block
+${paramDeclarations}
+float3 WorldPosition = GetWorldPosition(Parameters);
+float3 ViewDir = GetCameraVector(Parameters);
+${customExprBody}
+`.trim()
+
+  // Material Function definition
+  const mfParamArgs = params.map((p) => {
+    let hlslType = "float"
+    if (p.ue5Type === "VectorParameter") {
+      hlslType = p.type === "vec3" || p.type === "vec3f" || p.type === "color" ? "float3" : "float4"
+    } else if (p.ue5Type === "Texture2D" || p.ue5Type === "TextureCube") {
+      hlslType = p.ue5Type
+    }
+    return `  ${hlslType} ${p.name}`
+  })
+  const mfAllArgs = [...mfParamArgs, "  float3 WorldPosition", "  float3 ViewDir"].join(",\n")
+
+  let mfBody = translatedBody
+  if (/\b(?:fragColor|gl_FragColor)\s*=/.test(mfBody)) {
+    mfBody = mfBody.replace(
+      /\b(?:fragColor|gl_FragColor)\s*=\s*([^;]+);/g,
+      "float4 calculatedColor = $1;\n  Out.BaseColor = calculatedColor.rgb;"
+    )
+  } else {
+    mfBody = mfBody.trim()
+      ? `${mfBody.trim()}\n  Out.BaseColor = float3(1.0, 1.0, 1.0);`
+      : "  Out.BaseColor = float3(1.0, 1.0, 1.0);"
+  }
+
+  const roughnessParam = params.find((p) => p.name.includes("roughness"))
+  const metallicParam = params.find((p) => p.name.includes("metallic"))
+  const roughnessInit = roughnessParam ? roughnessParam.name : "0.5"
+  const metallicInit = metallicParam ? metallicParam.name : "0.0"
+
+  const materialFunctionHLSL = `
+// UE5 Material Function
+${paramDeclarations}
+struct MaterialFunctionOutput {
+  float3 BaseColor;
+  float Roughness;
+  float Metallic;
+  float3 Normal;
+};
+
+MaterialFunctionOutput MaterialFunction_ShaderStudio(
+${mfAllArgs}
+) {
+  MaterialFunctionOutput Out;
+  ${mfBody}
+  Out.Roughness = ${roughnessInit};
+  Out.Metallic = ${metallicInit};
+  Out.Normal = float3(0.0, 0.0, 1.0);
+  return Out;
+}
+`.trim()
+
+  return { customExpressionHLSL, materialFunctionHLSL, parameters: params }
+}
+
+/**
+ * Generates human-readable Unreal Engine 5 HLSL documentation & code for ExportModal.
+ */
+export function transpileToUnrealHLSL(options: EngineExportOptions): string {
+  const result = transpileToUE5(options)
+  const shaderName = options.shaderName || "ShaderStudio/CustomEffect"
+
+  return `// =====================================================================
+// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
+// Target: Unreal Engine 5 HLSL (Custom Expression & Material Function)
+// Shader: ${shaderName}
+// =====================================================================
+
+/*
+========================================================================
+SECTION 1: Custom Expression Node HLSL
+Paste the following code into a Custom Expression node in UE5 Material Graph.
+Inputs to configure on the node:
+${result.parameters.map((p) => `  - Name: ${p.name} (${p.ue5Type})`).join("\n") || "  - (No custom parameters)"}
+Output Type: Float 4
+========================================================================
+*/
+
+${result.customExpressionHLSL}
+
+/*
+========================================================================
+SECTION 2: Material Function (.ush) HLSL
+Include in your project's Shaders directory or Material Function library.
+========================================================================
+*/
+
+${result.materialFunctionHLSL}
+`
+}
+
+/**
+ * Transpiles shader code and active uniforms into Blender Cycles Open Shading Language (OSL).
+ */
+export function transpileToBlenderOSL(
+  shaderSourceOrOptions: string | EngineExportOptions,
+  uniformsOrOptions?: ParsedUniform[] | EngineExportOptions
+): string {
+  let source = ""
+  let uniforms: ParsedUniform[] = []
+
+  if (typeof shaderSourceOrOptions === "object" && "shaderSource" in shaderSourceOrOptions) {
+    source = shaderSourceOrOptions.shaderSource
+    uniforms = resolveUniforms(shaderSourceOrOptions)
+  } else {
+    source = String(shaderSourceOrOptions || "")
+    if (Array.isArray(uniformsOrOptions)) {
+      uniforms = uniformsOrOptions
+    } else if (uniformsOrOptions && typeof uniformsOrOptions === "object" && "shaderSource" in uniformsOrOptions) {
+      uniforms = resolveUniforms(uniformsOrOptions)
+    }
+  }
+
+  const paramList = uniforms
+    .map((u) => {
+      let oslType = "float"
+      let defVal = "0.0"
+      const t = String(u.type)
+      if (t === "vec2" || t === "vec2f") {
+        oslType = "point"
+        defVal = "point(0.0, 0.0, 0.0)"
+      } else if (t === "vec3" || t === "color" || t === "vec3f" || u.kind === "color") {
+        oslType = "color"
+        defVal = "color(1.0, 1.0, 1.0)"
+      } else {
+        const val = (u as any).defaultValue
+        if (typeof val === "number") {
+          defVal = Number.isInteger(val) ? `${val}.0` : String(val)
+        }
+      }
+      return `    ${oslType} ${u.name} = ${defVal}`
+    })
+    .join(",\n")
+
+  let inlinedBody = ""
+  if (source.includes("BSDF =")) {
+    inlinedBody = source
+  } else {
+    // Extract main if present, else translate whole source
+    const mainRegex = /\bvoid\s+main\s*\([^)]*\)\s*\{/
+    const mainMatch = source.match(mainRegex)
+    let rawBody = ""
+    if (mainMatch && mainMatch.index !== undefined) {
+      const startIdx = mainMatch.index + mainMatch[0].length
+      let depth = 1
+      let endIdx = startIdx
+      for (let i = startIdx; i < source.length; i++) {
+        if (source[i] === "{") depth++
+        else if (source[i] === "}") {
+          depth--
+          if (depth === 0) {
+            endIdx = i
+            break
+          }
+        }
+      }
+      rawBody = source.slice(startIdx, endIdx)
+    } else {
+      rawBody = source
+    }
+
+    // Translate GLSL types and built-ins to OSL
+    let oslBody = rawBody
+      .replace(/gl_FragCoord\.xy/g, "point(u, v, 0.0)")
+      .replace(/gl_FragCoord/g, "point(u, v, 0.0)")
+      .replace(/u_resolution\.xy/g, "point(1.0, 1.0, 0.0)")
+      .replace(/u_resolution/g, "point(1.0, 1.0, 0.0)")
+      .replace(/u_time/g, "time")
+      .replace(/\bvec2\b/g, "point")
+      .replace(/\bvec3\b/g, "color")
+      .replace(/\bvec4\b/g, "color")
+      .replace(/\bmat3\b/g, "matrix")
+      .replace(/\bmat4\b/g, "matrix")
+      .replace(/\bfract\(/g, "fmod(")
+      .replace(/\btexture2D\(/g, "texture(")
+
+    if (/\b(?:fragColor|gl_FragColor)\s*=/.test(oslBody)) {
+      oslBody = oslBody
+        .replace(
+          /\b(?:fragColor|gl_FragColor)\s*=\s*(?:color|vec4)\(([^,]+),\s*([^,]+),\s*([^,]+)[^)]*\);/g,
+          "color finalColor = color($1, $2, $3);\n    BSDF = finalColor * diffuse(N);"
+        )
+        .replace(
+          /\b(?:fragColor|gl_FragColor)\s*=\s*([^;]+);/g,
+          "color finalColor = color($1);\n    BSDF = finalColor * diffuse(N);"
+        )
+    } else if (/\bcol\b/.test(oslBody)) {
+      oslBody = `${oslBody.trim()}\n    BSDF = col * diffuse(N);`
+    } else {
+      oslBody = `${oslBody.trim()}\n    BSDF = diffuse(N);`
+    }
+    inlinedBody = oslBody
+  }
+
+  return `
+#include <stdosl.h>
+
+shader ShaderStudioMaterial(
+${paramList}${paramList.length ? "," : ""}
+    output closure color BSDF = 0
+) {
+    // Blender Cycles Open Shading Language (OSL)
+    ${inlinedBody}
+}
+`.trim()
+}

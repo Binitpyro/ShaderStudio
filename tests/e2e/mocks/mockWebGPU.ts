@@ -227,8 +227,44 @@ export class MockGPURenderPassEncoder {
   }
 }
 
+export class MockGPUComputePipeline {
+  descriptor: any
+  constructor(descriptor: any) {
+    this.descriptor = descriptor
+  }
+}
+
+export class MockGPUComputePassEncoder {
+  descriptor: any
+  currentPipeline: any = null
+  currentBindGroups: Map<number, any> = new Map()
+  dispatches: Array<{ x: number; y: number; z: number }> = []
+  ended = false
+
+  constructor(descriptor: any) {
+    this.descriptor = descriptor
+  }
+
+  setPipeline(pipeline: any): void {
+    this.currentPipeline = pipeline
+  }
+
+  setBindGroup(index: number, bindGroup: any): void {
+    this.currentBindGroups.set(index, bindGroup)
+  }
+
+  dispatchWorkgroups(x: number, y = 1, z = 1): void {
+    this.dispatches.push({ x, y, z })
+  }
+
+  end(): void {
+    this.ended = true
+  }
+}
+
 export class MockGPUCommandEncoder {
   renderPasses: MockGPURenderPassEncoder[] = []
+  computePasses: MockGPUComputePassEncoder[] = []
 
   beginRenderPass(descriptor: any): MockGPURenderPassEncoder {
     const pass = new MockGPURenderPassEncoder(descriptor)
@@ -236,8 +272,14 @@ export class MockGPUCommandEncoder {
     return pass
   }
 
-  finish(): { renderPasses: MockGPURenderPassEncoder[] } {
-    return { renderPasses: this.renderPasses }
+  beginComputePass(descriptor?: any): MockGPUComputePassEncoder {
+    const pass = new MockGPUComputePassEncoder(descriptor)
+    this.computePasses.push(pass)
+    return pass
+  }
+
+  finish(): { renderPasses: MockGPURenderPassEncoder[]; computePasses: MockGPUComputePassEncoder[] } {
+    return { renderPasses: this.renderPasses, computePasses: this.computePasses }
   }
 }
 
@@ -340,9 +382,17 @@ export class MockGPUDevice {
     return module
   }
 
+  createdComputePipelines: MockGPUComputePipeline[] = []
+
   createRenderPipeline(descriptor: any): MockGPURenderPipeline {
     const pipeline = new MockGPURenderPipeline(descriptor)
     this.createdPipelines.push(pipeline)
+    return pipeline
+  }
+
+  createComputePipeline(descriptor: any): MockGPUComputePipeline {
+    const pipeline = new MockGPUComputePipeline(descriptor)
+    this.createdComputePipelines.push(pipeline)
     return pipeline
   }
 

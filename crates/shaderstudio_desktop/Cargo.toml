@@ -1,0 +1,10 @@
+[package]
+name = "shaderstudio_desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Zero external dependencies for maximum portability, security, and sub-second build times!
+
+[profile.release]
+opt-level = 2

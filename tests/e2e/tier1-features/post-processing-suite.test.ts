@@ -12,7 +12,7 @@ import {
 } from "@/core/postProcessChain"
 import { WebGPUAdapter } from "@/adapters/webgpu"
 import { WebGL2Adapter } from "@/adapters/webgl2"
-import type { Node, Edge } from "reactflow"
+import type { Node, Edge } from "@xyflow/react"
 import type { GraphNodeData } from "@/core/graphCompiler"
 
 vi.mock("three", async (importOriginal) => {
