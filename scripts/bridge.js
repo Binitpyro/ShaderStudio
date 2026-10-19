@@ -619,7 +619,11 @@ export function createBridgeServer(options = {}) {
       }),
     listen: (targetPort = port) =>
       new Promise((resolveListen) => {
-        server.listen(targetPort, () => {
+        server.on("error", (err) => {
+          console.error(`[bridge] server error: ${err.message}`)
+          process.exit(1)
+        })
+        server.listen(targetPort, "127.0.0.1", () => {
           const boundPort = server.address().port
           if (!quiet) {
             console.log(`=======================================================`)

@@ -155,7 +155,7 @@ export class WebGL2Adapter implements RenderAdapter {
   private shadowMapTex: WebGLTexture | null = null
   private shadowCubeMapTex: WebGLTexture | null = null
   private shadowSettings: ShadowSettings = {
-    enabled: true,
+    enabled: false,
     resolution: 2048,
     filterMode: "pcf",
     bias: 0.005,

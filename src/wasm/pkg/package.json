@@ -1,0 +1,21 @@
+{
+  "name": "shaderstudio_wasm",
+  "type": "module",
+  "description": "All-in-One Rust WebAssembly acceleration engine for ShaderStudio",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Binitpyro/ShaderStudio"
+  },
+  "files": [
+    "shaderstudio_wasm_bg.wasm",
+    "shaderstudio_wasm.js",
+    "shaderstudio_wasm.d.ts"
+  ],
+  "main": "shaderstudio_wasm.js",
+  "types": "shaderstudio_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

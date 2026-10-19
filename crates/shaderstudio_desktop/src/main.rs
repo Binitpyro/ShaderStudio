@@ -127,7 +127,7 @@ fn print_banner(port: u16, asset_count: usize) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mut port: u16 = 8642;
+    let mut port: u16 = 8650;
     let mut auto_open = true;
 
     let mut i = 1;
@@ -150,7 +150,7 @@ fn main() {
                 println!("Usage: ShaderStudio.exe [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  -p, --port <PORT>    Local HTTP port to bind (default: 8642)");
+                println!("  -p, --port <PORT>    Local HTTP port to bind (default: 8650)");
                 println!("      --no-open        Do not automatically open the default browser");
                 println!("      --headless       Run server in headless mode (same as --no-open)");
                 println!("  -h, --help           Show this help message");

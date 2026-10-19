@@ -35,7 +35,7 @@ fn collect_files(dir: &Path, base: &Path, list: &mut Vec<(String, PathBuf, &'sta
             let path = entry.path();
             if path.is_dir() {
                 collect_files(&path, base, list);
-            } else if path.is_file() {
+            } else if path.is_file() && path.extension().and_then(|e| e.to_str()) != Some("exe") {
                 if let Ok(rel) = path.strip_prefix(base) {
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
                     let ext = path

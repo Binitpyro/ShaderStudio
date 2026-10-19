@@ -51,7 +51,10 @@ function formatBytes(bytes) {
 
 function runCommand(command, args, cwd = ROOT) {
   const isWindows = process.platform === "win32";
-  const cmd = isWindows ? (command.endsWith(".cmd") || command.endsWith(".exe") ? command : `${command}.cmd`) : command;
+  let cmd = command;
+  if (isWindows && (command === "npm" || command === "npx")) {
+    cmd = `${command}.cmd`;
+  }
 
   console.log(`  ${colors.dim}$ ${command} ${args.join(" ")}${colors.reset}`);
   const startTime = Date.now();

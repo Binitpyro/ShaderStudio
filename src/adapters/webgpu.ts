@@ -64,7 +64,7 @@ interface WebGPUPostProcessPass {
 
 import { customModelRegistry } from "@/core/customModelRegistry"
 
-import { type GeometryKey, getVerticesForGeometry, setLookAtMatrix, multiplyMatricesInto } from "./math"
+import { type GeometryKey, getVerticesForGeometry, setLookAtMatrix, setRotationMatrix, multiplyMatricesInto } from "./math"
 export { createLookAtMatrix, createRotationMatrix, multiplyMatrices } from "./math"
 
 function setPerspectiveMatrixWebGPU(out: Float32Array, fov: number, aspect: number, near: number, far: number): Float32Array {
@@ -157,7 +157,7 @@ export class WebGPUAdapter implements RenderAdapter {
   }
 
   public shadowSettings: ShadowSettings = {
-    enabled: true,
+    enabled: false,
     resolution: 2048,
     filterMode: "pcf",
     bias: 0.005,
@@ -1092,6 +1092,7 @@ export class WebGPUAdapter implements RenderAdapter {
       this.projMatrix[8] += jitterX * 2.0
       this.projMatrix[9] += jitterY * 2.0
     }
+    setRotationMatrix(this.rotMatrix, this.angleX, this.angleY)
     multiplyMatricesInto(this.tempMatrix, this.viewMatrix, this.rotMatrix)
     multiplyMatricesInto(this.mvpMatrix, this.projMatrix, this.tempMatrix)
 
