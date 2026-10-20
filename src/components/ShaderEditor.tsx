@@ -1,14 +1,16 @@
-import { useRef, useCallback, useEffect } from "react"
-import Editor, { type OnMount } from "@monaco-editor/react"
+import { useRef, useCallback, useEffect, Suspense } from "react"
+import type { OnMount } from "@monaco-editor/react"
 import { useProjectStore, languageForBackend, type EditorTab, type BackendType, type ShaderLanguage } from "@/stores/projectStore"
 import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { useLayoutStore } from "@/stores/layoutStore"
 import { debounce, type Debounced } from "@/utils/throttle"
 import { renderCoordinator } from "@/core/renderCoordinator"
 import { Button } from "@/components/ui/button"
+import { LazyMonaco as Editor } from "./LazyMonaco"
 import { SyncStatusBanner } from "./SyncStatusBanner"
 import { cn } from "@/lib/utils"
-import { webgpuAdapter, getComputePresetCode } from "@/adapters/webgpu"
+import { getLoadedWebgpuAdapter } from "@/adapters/activeAdapter"
+import { getComputePresetCode } from "@/core/computePresets"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
 import defaultComputeWgsl from "@/shaders/compute/default.compute.wgsl?raw"
 import defaultVertSource from "@/shaders/default.vert?raw"
@@ -116,7 +118,7 @@ export function ShaderEditor() {
     computeDebounceRef.current = debounce((value: string) => {
       lastWrite.current.compute = value
       setComputeShaderSource(value)
-      webgpuAdapter.recompileComputeShader?.(value)
+      getLoadedWebgpuAdapter()?.recompileComputeShader?.(value)
       // Called on the adapter directly (bypassing Viewport's redraw wrapper): wake an idle loop ourselves.
       renderCoordinator.requestRender()
       triggerRecompile()
@@ -538,6 +540,7 @@ export function ShaderEditor() {
 
       {/* Editor Body */}
       <div className="flex-1 overflow-hidden">
+        <Suspense fallback={null}>
         <Editor
           height="100%"
           language={language}
@@ -562,6 +565,7 @@ export function ShaderEditor() {
             padding: { top: 8, bottom: 8 },
           }}
         />
+        </Suspense>
       </div>
     </div>
   )

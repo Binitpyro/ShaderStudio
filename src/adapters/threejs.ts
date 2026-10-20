@@ -24,6 +24,8 @@ import { parseGlslUniforms } from "@/parsers/glslUniforms"
 import type { PostProcessPassType } from "@/core/postProcessChain"
 import { customModelRegistry } from "@/core/customModelRegistry"
 import { generateEnvironmentCanvas, ENVIRONMENT_PRESETS } from "@/core/environmentGenerator"
+import { renderCoordinator } from "@/core/renderCoordinator"
+import { performanceTelemetry } from "@/core/performanceTelemetry"
 
 type GeometryKey = "cube" | "sphere" | "plane" | "torus_knot" | "custom"
 
@@ -54,6 +56,15 @@ export class ThreeJSAdapter implements RenderAdapter {
   private unsubscribeCustomModel: (() => void) | null = null
   private geometryCache = new Map<GeometryKey, THREE.BufferGeometry>()
   private isExternalLoopDriven = false
+  /** Bumped on dispose so async loads from a previous mount never touch the new one. */
+  private session = 0
+  /** Bumped whenever the environment preset changes; stale loader callbacks compare against it. */
+  private envGeneration = 0
+  private loadingTextures = new Set<string>()
+  private postPasses: ShaderPass[] = []
+  private postChainKey: string | null = null
+  private readonly tmpProj = new THREE.Matrix4()
+  private readonly tmpLightDir = new THREE.Vector3()
 
   // R2: Rendering Fidelity Parity State
   public state: MultiBackendParityState = {
@@ -138,6 +149,8 @@ export class ThreeJSAdapter implements RenderAdapter {
     try {
       this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
       this.renderer.setPixelRatio(window.devicePixelRatio || 1)
+      // Composer/deferred paths call render() several times per frame; we reset + read once per frame ourselves.
+      if (this.renderer.info) this.renderer.info.autoReset = false
       this.renderer.setClearColor(new THREE.Color(0.08, 0.08, 0.1), 1)
       this.scene = new THREE.Scene()
       const aspect = canvas.clientWidth / canvas.clientHeight
@@ -196,12 +209,14 @@ export class ThreeJSAdapter implements RenderAdapter {
   private async loadTexture(textureId: string) {
     if (!this.initialized) return
     const resource = useProjectStore.getState().textureResources.find((t) => t.id === textureId)
-    if (!resource || this.loadedTextures.has(textureId)) return
+    if (!resource || this.loadedTextures.has(textureId) || this.loadingTextures.has(textureId)) return
+    const session = this.session
+    this.loadingTextures.add(textureId)
     try {
       const response = await fetch(resource.src)
       const blob = await response.blob()
       const bitmap = await createImageBitmap(blob)
-      if (!this.initialized) {
+      if (!this.initialized || session !== this.session) {
         if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
         return
       }
@@ -209,8 +224,29 @@ export class ThreeJSAdapter implements RenderAdapter {
       tex.needsUpdate = true
       this.loadedTextures.set(textureId, tex)
       this.applyTextureBindings()
+      renderCoordinator.requestRender()
     } catch (e) {
-      if (this.initialized) console.error("Failed to load texture in Three.js:", e)
+      if (this.initialized && session === this.session) console.error("Failed to load texture in Three.js:", e)
+    } finally {
+      this.loadingTextures.delete(textureId)
+    }
+  }
+
+  /** Disposes graph textures that left the graph (not referenced by the queue, bindings or uniform values). */
+  private pruneTextures(keep: Set<string>) {
+    for (const v of this.cachedUniformValues.values()) if (v.type === "texture") keep.add(String(v.value))
+    for (const id of Object.values(this.textureBindings)) keep.add(id)
+    const pruned = new Set<THREE.Texture>()
+    for (const [id, tex] of this.loadedTextures) {
+      if (keep.has(id)) continue
+      tex.dispose()
+      pruned.add(tex)
+      this.loadedTextures.delete(id)
+    }
+    if (pruned.size && this.material) {
+      for (const u of Object.values(this.material.uniforms)) {
+        if (pruned.has(u.value)) u.value = this.createDefaultTexture()
+      }
     }
   }
 
@@ -332,17 +368,20 @@ export class ThreeJSAdapter implements RenderAdapter {
     if (!queue || queue.length === 0) return
     this.hasPostProcess = false
     this.textureBindings = {}
+    const keepTextures = new Set<string>()
     const ppSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
 
     for (const step of queue) {
       if (step.type === "mesh") {
         this.createMesh(step.geometry as GeometryKey)
       } else if (step.type === "texture") {
+        keepTextures.add(step.id)
         this.loadTexture(step.id)
       } else if (step.type === "material") {
         if (step.textureBindings) {
           this.textureBindings = { ...step.textureBindings }
           for (const texKey of Object.values(step.textureBindings)) {
+            keepTextures.add(texKey)
             this.loadTexture(texKey)
           }
           this.applyTextureBindings()
@@ -358,20 +397,31 @@ export class ThreeJSAdapter implements RenderAdapter {
         })
       }
     }
+    this.pruneTextures(keepTextures)
     if (this.hasPostProcess) {
+      const key = JSON.stringify(ppSteps)
+      if (this.composer && key === this.postChainKey) return // same chain: keep passes (and their GPU programs)
       this.setupPostProcess(ppSteps)
+      this.postChainKey = key
     } else {
-      this.composer?.dispose()
-      this.composer = null
-      this.postProcessPassesMap.clear()
+      this.disposePostChain()
     }
+    renderCoordinator.requestRender()
+  }
+
+  private disposePostChain() {
+    for (const pass of this.postPasses) pass.dispose()
+    this.postPasses = []
+    this.composer?.dispose()
+    this.composer = null
+    this.postProcessPassesMap.clear()
+    this.postChainKey = null
   }
 
   private setupPostProcess(steps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []) {
     if (!this.renderer || !this.scene || !this.camera) return
-    this.composer?.dispose()
+    this.disposePostChain()
     this.composer = new EffectComposer(this.renderer)
-    this.postProcessPassesMap.clear()
 
     const renderPass = new RenderPass(this.scene, this.camera)
     this.composer.addPass(renderPass)
@@ -845,6 +895,7 @@ export class ThreeJSAdapter implements RenderAdapter {
       if (isFinal) shaderPass.renderToScreen = true
       this.postProcessPassesMap.set(step.id, shaderPass)
       this.postProcessPassesMap.set(step.pass, shaderPass)
+      this.postPasses.push(shaderPass)
       this.composer.addPass(shaderPass)
     }
   }
@@ -861,23 +912,71 @@ export class ThreeJSAdapter implements RenderAdapter {
     }
   }
 
+  /**
+   * Compiles the candidate shaders on a throwaway material and returns the driver log (line numbers
+   * remapped to the user's source) or null when it compiles. The live material is untouched, so a broken
+   * edit keeps the last good frame on screen.
+   */
+  private validateShader(vertexShader: string, fragmentShader: string, glsl3: boolean): string | null {
+    const r = this.renderer
+    if (!r || !this.camera || !this.mesh || typeof r.compile !== "function") return null
+    const probe = new THREE.ShaderMaterial({ vertexShader, fragmentShader, glslVersion: glsl3 ? THREE.GLSL3 : null, side: THREE.DoubleSide })
+    const probeScene = new THREE.Scene()
+    probeScene.add(new THREE.Mesh(this.mesh.geometry, probe))
+    const dbg = r.debug
+    const prevCheck = dbg?.checkShaderErrors, prevCb = dbg?.onShaderError
+    const stage = (gl: WebGLRenderingContext, sh: WebGLShader | null, label: string, user: string) => {
+      const log = (sh && gl.getShaderInfoLog(sh)) || ""
+      if (!log.trim()) return ""
+      const body = user.replace(/^\s*#version[^\n]*\n/, "").trim()
+      const full = (sh && gl.getShaderSource(sh)) || ""
+      const at = body ? full.lastIndexOf(body) : -1
+      const offset = at > 0 ? full.slice(0, at).split("\n").length - 1 : 0
+      const mapped = log.trim().replace(/(ERROR|WARNING):\s*(\d+):(\d+)/g, (_m, sev, f, line) => `${sev}: ${f}:${Math.max(1, Number(line) - offset)}`)
+      return `${label} shader error:\n${mapped}`
+    }
+    let message = ""
+    if (dbg) {
+      dbg.checkShaderErrors = true
+      dbg.onShaderError = (gl: WebGLRenderingContext, program: WebGLProgram, glVs: WebGLShader, glFs: WebGLShader) => {
+        message = [stage(gl, glVs, "Vertex", vertexShader), stage(gl, glFs, "Fragment", fragmentShader)].filter(Boolean).join("\n")
+        if (!message) message = (gl.getProgramInfoLog(program) || "Program link error").trim()
+      }
+    }
+    try {
+      r.compile(probeScene, this.camera)
+      // With KHR_parallel_shader_compile three defers the status check until first use; force it.
+      ;(r as any).properties?.get(probe)?.currentProgram?.getUniforms?.()
+    } catch (e) {
+      message ||= e instanceof Error ? e.message : String(e)
+    } finally {
+      if (dbg) { dbg.checkShaderErrors = prevCheck as boolean; dbg.onShaderError = prevCb as typeof dbg.onShaderError }
+      probeScene.clear()
+      probe.dispose()
+    }
+    return message || null
+  }
+
   recompileShader(source: string) {
     if (!this.material || !this.initialized) return
     try {
       const customVert = useProjectStore.getState().vertexShaderSource
-      let vertexShader = customVert || this.defaultVertexShader, fragmentShader = source
-      if (source.includes("void main()") && source.includes("gl_Position")) fragmentShader = source
-      if (source.includes("#version 300 es") || (vertexShader && vertexShader.includes("#version 300 es"))) {
-        this.material.glslVersion = THREE.GLSL3
-      } else {
-        this.material.glslVersion = null
+      const vertexShader = customVert || this.defaultVertexShader
+      const fragmentShader = source
+      const glsl3 = source.includes("#version 300 es") || vertexShader.includes("#version 300 es")
+      const error = this.validateShader(vertexShader, fragmentShader, glsl3)
+      if (error) {
+        useProjectStore.getState().setLastCompileError(`Shader compile error:\n${error}`)
+        return
       }
+      this.material.glslVersion = glsl3 ? THREE.GLSL3 : null
       this.material.side = THREE.DoubleSide
       this.material.vertexShader = vertexShader
       this.material.fragmentShader = fragmentShader
       this.syncMaterialUniforms(fragmentShader)
       this.material.needsUpdate = true
       useProjectStore.getState().setLastCompileError(null)
+      renderCoordinator.requestRender()
     } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(`Shader compile error: ${msg}`) }
   }
 
@@ -914,7 +1013,12 @@ export class ThreeJSAdapter implements RenderAdapter {
         break
       }
       case "mat2": {
-        target.value = Array.isArray(value.value) ? value.value : [1, 0, 0, 1]
+        const src = Array.isArray(value.value) ? value.value : [1, 0, 0, 1]
+        if (Array.isArray(target.value) && target.value.length === src.length) {
+          for (let i = 0; i < src.length; i++) target.value[i] = src[i]
+        } else {
+          target.value = src.slice()
+        }
         break
       }
       case "vec4": {
@@ -984,7 +1088,14 @@ export class ThreeJSAdapter implements RenderAdapter {
     this.canvas.height = canvasHeight
     this.camera.aspect = safeWidth / safeHeight
     this.camera.updateProjectionMatrix()
-    if (this.composer) this.composer.setSize(safeWidth, safeHeight)
+    if (this.composer) {
+      this.composer.setPixelRatio(dpr)
+      this.composer.setSize(safeWidth, safeHeight)
+      for (const pass of this.postPasses) {
+        const res = pass.uniforms?.u_resolution?.value
+        if (res instanceof THREE.Vector2) res.set(canvasWidth, canvasHeight)
+      }
+    }
     if (this.state.pipelineMode === "deferred") {
       this.initGBuffer(canvasWidth, canvasHeight)
     }
@@ -993,14 +1104,18 @@ export class ThreeJSAdapter implements RenderAdapter {
   renderFrame(time: number, _delta: number = 16) {
     if (!this.initialized || !this.renderer || !this.scene || !this.camera || !this.mesh) return
     this.frameCount++
+    if (time < this.lastFrameTime) this.lastFrameTime = time // playback seeked backwards
     if (time - this.lastFrameTime >= 1000) {
       this.fps = this.frameCount
       this.frameCount = 0
       this.lastFrameTime = time
       if (this.onPerfUpdate) this.onPerfUpdate({ fps: this.fps, frameTime: 1000 / (this.fps || 1), timestamp: time })
     }
-    this.mesh.rotation.x += 0.01
-    this.mesh.rotation.y += 0.015
+    // Pure function of playback time (0.6 / 0.9 rad/s) so seeking and replay are deterministic.
+    const seconds = time / 1000
+    this.mesh.rotation.x = seconds * 0.6
+    this.mesh.rotation.y = seconds * 0.9
+    this.renderer.info?.reset()
 
     if (this.material) {
       const timeUniform = this.material.uniforms["u_time"] || this.material.uniforms["time"]
@@ -1010,38 +1125,45 @@ export class ThreeJSAdapter implements RenderAdapter {
     }
 
     // TAA Halton subpixel jitter
-    let savedProjElements: number[] | null = null
+    let jittered = false
     if (this.state.postProcessState.taa.enabled) {
       this.taaFrameIndex = (this.taaFrameIndex + 1) % 8
       const jX = (this.halton(this.taaFrameIndex, 2) - 0.5) / (this.canvas?.width || 800)
       const jY = (this.halton(this.taaFrameIndex, 3) - 0.5) / (this.canvas?.height || 600)
-      this.state.postProcessState.taa.jitterSample = [jX, jY]
-      savedProjElements = [...this.camera.projectionMatrix.elements]
+      const js = this.state.postProcessState.taa.jitterSample // in place: no per-frame allocation
+      js[0] = jX
+      js[1] = jY
+      this.tmpProj.copy(this.camera.projectionMatrix)
+      jittered = true
       this.camera.projectionMatrix.elements[8] += jX * 2.0
       this.camera.projectionMatrix.elements[9] += jY * 2.0
     }
 
-    if (this.state.pipelineMode === "deferred") {
-      if (!this.gBufferRenderTarget) {
-        this.initGBuffer(this.canvas?.width || 800, this.canvas?.height || 600)
-      }
-      this.renderer.setRenderTarget(this.gBufferRenderTarget)
-      this.renderer.clear()
-      this.renderer.render(this.scene, this.camera)
-      this.renderer.setRenderTarget(null)
+    try {
+      if (this.state.pipelineMode === "deferred") {
+        if (!this.gBufferRenderTarget) {
+          this.initGBuffer(this.canvas?.width || 800, this.canvas?.height || 600)
+        }
+        this.renderer.setRenderTarget(this.gBufferRenderTarget)
+        this.renderer.clear()
+        this.renderer.render(this.scene, this.camera)
+        this.renderer.setRenderTarget(null)
 
-      this.updateDeferredLightingUniforms()
-      if (this.deferredLightingScene && this.deferredLightingCamera) {
-        this.renderer.render(this.deferredLightingScene, this.deferredLightingCamera)
+        this.updateDeferredLightingUniforms()
+        if (this.deferredLightingScene && this.deferredLightingCamera) {
+          this.renderer.render(this.deferredLightingScene, this.deferredLightingCamera)
+        }
+      } else {
+        if (this.composer && this.hasPostProcess) this.composer.render()
+        else this.renderer.render(this.scene, this.camera)
       }
-    } else {
-      if (this.composer && this.hasPostProcess) this.composer.render()
-      else this.renderer.render(this.scene, this.camera)
+    } finally {
+      // a throw in composer.render must not leave the camera jittered (it would compound next frame)
+      if (jittered) this.camera.projectionMatrix.copy(this.tmpProj)
     }
 
-    if (savedProjElements) {
-      this.camera.projectionMatrix.fromArray(savedProjElements)
-    }
+    const info = this.renderer.info
+    if (info) performanceTelemetry.reportFrameStats({ drawCalls: info.render.calls, triangles: info.render.triangles })
   }
 
   setExternalLoopDriven(external: boolean) {
@@ -1091,6 +1213,16 @@ export class ThreeJSAdapter implements RenderAdapter {
     // Generate or update environment texture if preset changed
     if (this.currentEnvPreset !== settings.preset || !this.currentEnvTexture) {
       this.currentEnvPreset = settings.preset
+      const gen = ++this.envGeneration
+      // Async loads apply only if no newer preset (or dispose) happened; otherwise the texture is freed.
+      const adopt = (tex: THREE.Texture) => {
+        if (gen !== this.envGeneration || !this.scene) { tex.dispose(); return }
+        tex.mapping = THREE.EquirectangularReflectionMapping
+        if (this.currentEnvTexture && this.currentEnvTexture !== tex) this.currentEnvTexture.dispose()
+        this.currentEnvTexture = tex
+        this.applyEnvToScene(settings)
+        renderCoordinator.requestRender()
+      }
       if (this.currentEnvTexture) {
         this.currentEnvTexture.dispose()
         this.currentEnvTexture = null
@@ -1098,22 +1230,14 @@ export class ThreeJSAdapter implements RenderAdapter {
 
       if (settings.preset === "custom" && settings.customTextureSrc) {
         const loader = new THREE.TextureLoader()
-        loader.load(settings.customTextureSrc, (tex) => {
-          tex.mapping = THREE.EquirectangularReflectionMapping
-          this.currentEnvTexture = tex
-          this.applyEnvToScene(settings)
-        })
+        loader.load(settings.customTextureSrc, adopt)
         return
       } else {
         const presetMeta = ENVIRONMENT_PRESETS.find((p) => p.id === settings.preset)
         const imgSrc = presetMeta?.imageSrc
         if (imgSrc && typeof window !== "undefined") {
           const loader = new THREE.TextureLoader()
-          loader.load(imgSrc, (tex) => {
-            tex.mapping = THREE.EquirectangularReflectionMapping
-            this.currentEnvTexture = tex
-            this.applyEnvToScene(settings)
-          }, undefined, () => {})
+          loader.load(imgSrc, adopt, undefined, () => {})
         }
         const canvas = generateEnvironmentCanvas(settings.preset)
         if (canvas) {
@@ -1329,12 +1453,12 @@ export class ThreeJSAdapter implements RenderAdapter {
         this.deferredLightingMaterial.uniforms["u_lightIntensity"].value = dirLight.intensity ?? 1.0
       }
       if (dirLight.position && dirLight.target) {
-        const dir = new THREE.Vector3(
+        this.tmpLightDir.set(
           dirLight.position[0] - dirLight.target[0],
           dirLight.position[1] - dirLight.target[1],
           dirLight.position[2] - dirLight.target[2]
         ).normalize()
-        this.deferredLightingMaterial.uniforms["u_lightDir"].value.copy(dir)
+        this.deferredLightingMaterial.uniforms["u_lightDir"].value.copy(this.tmpLightDir)
       }
       if (dirLight.color) {
         this.deferredLightingMaterial.uniforms["u_lightColor"].value.setRGB(
@@ -1521,6 +1645,9 @@ export class ThreeJSAdapter implements RenderAdapter {
   }
 
   dispose() {
+    this.session++
+    this.envGeneration++
+    this.loadingTextures.clear()
     if (this.animationId) { cancelAnimationFrame(this.animationId); this.animationId = null }
     this.isExternalLoopDriven = false
     if (this.mesh) {
@@ -1534,9 +1661,14 @@ export class ThreeJSAdapter implements RenderAdapter {
     }
     this.geometryCache.clear()
     if (this.scene) this.scene.traverse((obj) => { if (obj instanceof THREE.Mesh) { obj.geometry.dispose(); if (obj.material instanceof THREE.Material) obj.material.dispose() } })
-    if (this.renderer) this.renderer.dispose()
-    this.composer?.dispose(); this.composer = null
-    this.postProcessPassesMap.clear()
+    this.disposePostChain()
+    this.directionalLight?.shadow.dispose()
+    this.pointLight?.shadow.dispose()
+    if (this.renderer) {
+      this.renderer.dispose()
+      // dispose() alone leaves the GL context alive; release it so contexts don't pile up across backend switches.
+      this.renderer.forceContextLoss()
+    }
     for (const tex of this.loadedTextures.values()) {
       tex.dispose()
     }

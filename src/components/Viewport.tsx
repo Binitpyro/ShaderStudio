@@ -1,7 +1,5 @@
-import { useEffect, useRef, useCallback, useState } from "react"
-import { webgpuAdapter } from "@/adapters/webgpu"
-import { webgl2Adapter } from "@/adapters/webgl2"
-import { threejsAdapter } from "@/adapters/threejs"
+import { useEffect, useRef, useState } from "react"
+import { loadAdapter } from "@/adapters/activeAdapter"
 import type { RenderAdapter } from "@/adapters/types"
 import { useProjectStore, type AudioBand, type AudioBinding, type UniformValue } from "@/stores/projectStore"
 import { useRenderSettingsStore } from "@/stores/renderSettingsStore"
@@ -9,7 +7,7 @@ import { performanceTelemetry } from "@/core/performanceTelemetry"
 import { throttle } from "@/utils/throttle"
 import { cn } from "@/lib/utils"
 import { PerfOverlay, ScreenshotButton } from "./PerfOverlay"
-import { audioEngine } from "@/audio/audioEngine"
+import { getAudioEngine, loadAudioEngine } from "@/audio/audioRegistry"
 import { viewportCapture } from "@/utils/frameCapture"
 import { VideoLoopRecorderModal } from "./VideoLoopRecorderModal"
 import { renderCoordinator } from "@/core/renderCoordinator"
@@ -95,15 +93,6 @@ export function Viewport({ className }: ViewportProps) {
     return () => { unsub(); clearTimeout(timer) }
   }, [])
 
-  const getAdapter = useCallback((backend: string): RenderAdapter => {
-    switch (backend) {
-      case "webgpu": return webgpuAdapter
-      case "webgl2": return webgl2Adapter
-      case "threejs": return threejsAdapter
-      default: return webgpuAdapter
-    }
-  }, [])
-
   // Mount and switch adapter whenever activeBackend changes. resolutionScale is deliberately NOT a
   // dependency (the resize effect handles it), so DPR changes never recreate the adapter/GPU device.
   useEffect(() => {
@@ -112,9 +101,10 @@ export function Viewport({ className }: ViewportProps) {
     viewportCapture.registerCanvas(canvas)
     let isCancelled = false
     let unwrap: (() => void) | null = null
-    const adapter = getAdapter(activeBackend)
+    let session: ReturnType<typeof renderCoordinator.mountAdapter> | null = null
 
-    const session = renderCoordinator.mountAdapter(adapter, canvas, (mounted) => {
+    const start = (adapter: RenderAdapter) => {
+    session = renderCoordinator.mountAdapter(adapter, canvas, (mounted) => {
       const project = useProjectStore.getState()
       mounted.setRenderQueue(project.renderQueue)
       if (project.shaderSource) {
@@ -146,15 +136,27 @@ export function Viewport({ className }: ViewportProps) {
         console.error("[Viewport] Failed to mount adapter for", activeBackend)
       }
     })
+    }
+
+    loadAdapter(activeBackend).then(
+      (a) => { if (!isCancelled) start(a) },
+      (err) => {
+        if (isCancelled) return
+        const msg = `Failed to load the ${activeBackend} renderer: ${err instanceof Error ? err.message : String(err)}. Switch backend or reload to retry.`
+        console.error("[Viewport]", msg)
+        useProjectStore.getState().setLastCompileError(msg)
+        setFallbackNotice(msg)
+      },
+    )
 
     return () => {
       isCancelled = true
       viewportCapture.unregisterCanvas()
       unwrap?.()
       adapterRef.current = null
-      session.cancel()
+      session?.cancel()
     }
-  }, [activeBackend, getAdapter])
+  }, [activeBackend])
 
   // Handle recompile
   useEffect(() => {
@@ -247,6 +249,8 @@ export function Viewport({ className }: ViewportProps) {
         })
       }
       bindings = next
+      // audio chunk only loads once something is bound to it; a failure retries on the next binding change
+      if (next.length > 0) loadAudioEngine().catch((err) => console.error("[Viewport] audio engine chunk failed to load", err))
     }
     rebuild(useProjectStore.getState().audioBindings)
     const unsubBindings = useProjectStore.subscribe((state, prev) => {
@@ -257,7 +261,8 @@ export function Viewport({ className }: ViewportProps) {
       const adapter = adapterRef.current
       if (!adapter || bindings.length === 0) return
       const uniformValues = useProjectStore.getState().uniformValues
-      const signals = audioEngine.uniforms
+      const signals = getAudioEngine()?.uniforms
+      if (!signals) return
       for (let i = 0; i < bindings.length; i++) {
         const bd = bindings[i]
         const base = uniformValues[bd.keys[0]] ?? uniformValues[bd.keys[1]] ?? uniformValues[bd.keys[2]]
@@ -270,7 +275,7 @@ export function Viewport({ className }: ViewportProps) {
 
     // Live audio keeps modulating while paused; poll the engine state at 4Hz (it has no event).
     const poll = setInterval(() => {
-      renderCoordinator.setContinuousRender("audio-modulation", bindings.length > 0 && audioEngine.getIsPlaying())
+      renderCoordinator.setContinuousRender("audio-modulation", bindings.length > 0 && !!getAudioEngine()?.getIsPlaying())
     }, 250)
 
     return () => {

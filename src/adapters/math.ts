@@ -1,10 +1,20 @@
-import * as THREE from "three"
 import { customModelRegistry } from "@/core/customModelRegistry"
 
 export type GeometryKey = "cube" | "sphere" | "plane" | "torus_knot" | "custom"
 
-function generateCubeVertices(): Float32Array {
-  return new Float32Array([-1,-1,1,1,-1,1,1,1,1,-1,-1,1,1,1,1,-1,1,1,1,-1,-1,-1,-1,-1,-1,1,-1,1,-1,-1,-1,1,-1,1,1,-1,-1,1,1,1,1,1,1,1,-1,-1,1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,-1,1,-1,-1,1,-1,1,1,-1,1,-1,1,1,1,-1,1,1,1,1,1,1,-1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,-1])
+// 6 faces x 2 tris x 3 verts = 36 vertices (108 floats), CCW when viewed from outside.
+const CUBE_FACES: number[][] = [
+  [-1,-1,1, 1,-1,1, 1,1,1, -1,1,1],     // +Z
+  [1,-1,-1, -1,-1,-1, -1,1,-1, 1,1,-1], // -Z
+  [1,-1,1, 1,-1,-1, 1,1,-1, 1,1,1],     // +X
+  [-1,-1,-1, -1,-1,1, -1,1,1, -1,1,-1], // -X
+  [-1,1,1, 1,1,1, 1,1,-1, -1,1,-1],     // +Y
+  [-1,-1,-1, 1,-1,-1, 1,-1,1, -1,-1,1], // -Y
+]
+export function generateCubeVertices(): Float32Array {
+  const out: number[] = []
+  for (const f of CUBE_FACES) for (const k of [0, 1, 2, 0, 2, 3]) out.push(f[k * 3], f[k * 3 + 1], f[k * 3 + 2])
+  return new Float32Array(out)
 }
 function generatePlaneVertices(): Float32Array { return new Float32Array([-1,0,-1,1,0,-1,1,0,1,-1,0,-1,1,0,1,-1,0,1]) }
 function generateSphereVertices(segments: number = 16): Float32Array {
@@ -20,15 +30,40 @@ function generateSphereVertices(segments: number = 16): Float32Array {
   return new Float32Array(vertices)
 }
 let cachedTorusKnotVertices: Float32Array | null = null
+/** Non-indexed torus knot (same construction as three's TorusKnotGeometry): positions + normals, 3 floats/vertex. */
+export function generateTorusKnot(radius = 0.8, tube = 0.25, tubularSegments = 64, radialSegments = 16, p = 2, q = 3): { positions: Float32Array; normals: Float32Array } {
+  const curve = (u: number): [number, number, number] => {
+    const qp = (q / p) * u, cs = Math.cos(qp)
+    return [radius * (2 + cs) * 0.5 * Math.cos(u), radius * (2 + cs) * Math.sin(u) * 0.5, radius * Math.sin(qp) * 0.5]
+  }
+  const nrm = (v: number[]): number[] => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l] }
+  const crs = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+  const vp: number[] = [], vn: number[] = []
+  for (let i = 0; i <= tubularSegments; i++) {
+    const u = (i / tubularSegments) * p * Math.PI * 2
+    const P1 = curve(u), P2 = curve(u + 0.01)
+    const T = [P2[0] - P1[0], P2[1] - P1[1], P2[2] - P1[2]]
+    const B = nrm(crs(T, [P2[0] + P1[0], P2[1] + P1[1], P2[2] + P1[2]]))
+    const N = nrm(crs(B, T))
+    for (let j = 0; j <= radialSegments; j++) {
+      const v = (j / radialSegments) * Math.PI * 2, cx = -tube * Math.cos(v), cy = tube * Math.sin(v)
+      const x = P1[0] + cx * N[0] + cy * B[0], y = P1[1] + cx * N[1] + cy * B[1], z = P1[2] + cx * N[2] + cy * B[2]
+      vp.push(x, y, z)
+      const n = nrm([x - P1[0], y - P1[1], z - P1[2]])
+      vn.push(n[0], n[1], n[2])
+    }
+  }
+  const positions: number[] = [], normals: number[] = []
+  const w = radialSegments + 1
+  const push = (idx: number) => { positions.push(vp[idx * 3], vp[idx * 3 + 1], vp[idx * 3 + 2]); normals.push(vn[idx * 3], vn[idx * 3 + 1], vn[idx * 3 + 2]) }
+  for (let j = 1; j <= tubularSegments; j++) for (let i = 1; i <= radialSegments; i++) {
+    const a = w * (j - 1) + (i - 1), b = w * j + (i - 1), c = w * j + i, d = w * (j - 1) + i
+    push(a); push(b); push(d); push(b); push(c); push(d)
+  }
+  return { positions: new Float32Array(positions), normals: new Float32Array(normals) }
+}
 function generateTorusKnotVertices(): Float32Array {
-  if (cachedTorusKnotVertices) return cachedTorusKnotVertices
-  const geom = new THREE.TorusKnotGeometry(0.8, 0.25, 64, 16)
-  const nonIndexed = geom.toNonIndexed()
-  const arr = new Float32Array(nonIndexed.getAttribute("position").array)
-  geom.dispose()
-  nonIndexed.dispose()
-  cachedTorusKnotVertices = arr
-  return cachedTorusKnotVertices
+  return (cachedTorusKnotVertices ??= generateTorusKnot().positions)
 }
 function spherePoint(theta: number, phi: number): [number, number, number] { return [Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)] }
 export function getVerticesForGeometry(geometry: GeometryKey): Float32Array {

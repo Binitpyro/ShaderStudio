@@ -25,6 +25,10 @@ class ViewportCaptureService {
     this.getPerfMetricsFn = fn
   }
 
+  public unregisterPerfMetrics() {
+    this.getPerfMetricsFn = null
+  }
+
   public getPerfMetrics(): { fps: number; frameTimeMs: number } {
     if (this.getPerfMetricsFn) {
       return this.getPerfMetricsFn()

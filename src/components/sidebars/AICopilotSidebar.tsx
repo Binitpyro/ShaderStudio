@@ -1,7 +1,8 @@
 import { useState } from "react"
 import { useAISettingsStore } from "@/core/ai/aiSettingsStore"
-import { runAIShaderGeneration } from "@/core/ai/aiAgentRunner"
-import type { GenerationSession, IterationStep, AIProvider } from "@/core/ai/types"
+import { useShallow } from "zustand/react/shallow"
+import { useCopilotSessionStore } from "@/stores/copilotSessionStore"
+import type { AIProvider } from "@/core/ai/types"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
@@ -25,44 +26,15 @@ const PRESET_PROMPTS = [
 ]
 
 export function AICopilotSidebar() {
-  const aiSettings = useAISettingsStore()
+  const activeProvider = useAISettingsStore((s) => s.activeProvider)
+  const setActiveProvider = useAISettingsStore((s) => s.setActiveProvider)
+  const visualCritique = useAISettingsStore((s) => s.visualCritique)
+  const setVisualCritique = useAISettingsStore((s) => s.setVisualCritique)
 
-  const [prompt, setPrompt] = useState("")
-  const [isRunning, setIsRunning] = useState(false)
+  const { prompt, setPrompt, isRunning, currentSession, run: handleGenerate } = useCopilotSessionStore(
+    useShallow((s) => ({ prompt: s.prompt, setPrompt: s.setPrompt, isRunning: s.isRunning, currentSession: s.currentSession, run: s.run }))
+  )
   const [showSettings, setShowSettings] = useState(false)
-  const [currentSession, setCurrentSession] = useState<GenerationSession | null>(null)
-
-  const handleGenerate = async (customPrompt?: string) => {
-    const textToRun = customPrompt || prompt
-    if (!textToRun.trim() || isRunning) return
-
-    setIsRunning(true)
-    setCurrentSession(null)
-
-    try {
-      await runAIShaderGeneration(textToRun, aiSettings, {
-        onStepUpdate: (step: IterationStep) => {
-          setCurrentSession((prev) => {
-            if (!prev) return null
-            const updatedSteps = [...prev.steps]
-            const index = updatedSteps.findIndex((s) => s.stepNumber === step.stepNumber)
-            if (index !== -1) {
-              updatedSteps[index] = step
-            } else {
-              updatedSteps.push(step)
-            }
-            return { ...prev, steps: updatedSteps }
-          })
-        },
-        onComplete: (session: GenerationSession) => {
-          setCurrentSession(session)
-          setIsRunning(false)
-        },
-      })
-    } catch {
-      setIsRunning(false)
-    }
-  }
 
   const setLeftSidebarOpen = useLayoutStore((state) => state.setLeftSidebarOpen)
 
@@ -106,8 +78,8 @@ export function AICopilotSidebar() {
             <div className="space-y-1">
               <Label className="text-[11px] text-muted-foreground">Provider</Label>
               <select
-                value={aiSettings.activeProvider}
-                onChange={(e) => aiSettings.setActiveProvider(e.target.value as AIProvider)}
+                value={activeProvider}
+                onChange={(e) => setActiveProvider(e.target.value as AIProvider)}
                 className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
               >
                 <option value="gemini">Google Gemini</option>
@@ -121,8 +93,8 @@ export function AICopilotSidebar() {
               </Label>
               <Switch
                 id="sidebar-autofix"
-                checked={aiSettings.visualCritique}
-                onCheckedChange={aiSettings.setVisualCritique}
+                checked={visualCritique}
+                onCheckedChange={setVisualCritique}
               />
             </div>
           </div>

@@ -152,6 +152,9 @@ export class MockGPUShaderModule {
     this.code = descriptor.code
     this.label = descriptor.label
   }
+  getCompilationInfo(): Promise<{ messages: any[] }> {
+    return Promise.resolve({ messages: [] })
+  }
 }
 
 export class MockGPURenderPipeline {
@@ -329,6 +332,10 @@ export class MockGPUQueue {
     this.submittedCommands.push(...commandBuffers)
   }
 
+  writeTexture(_destination?: any, _data?: any, _layout?: any, _size?: any): void {
+    // no-op stub
+  }
+
   copyExternalImageToTexture(
     source: { source: any },
     destination: { texture: MockGPUTexture },
@@ -355,6 +362,11 @@ export class MockGPUDevice {
     this.lost = new Promise((resolve) => {
       this.lostResolve = resolve
     })
+  }
+
+  pushErrorScope(_filter?: string): void {}
+  popErrorScope(): Promise<null> {
+    return Promise.resolve(null)
   }
 
   createBuffer(descriptor: { size: number; usage: number; label?: string }): MockGPUBuffer {

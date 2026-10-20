@@ -18,7 +18,6 @@ export function TemplatesModal({ isOpen, onClose }: TemplatesModalProps) {
   const setUniformValue = useProjectStore((state) => state.setUniformValue)
   const triggerRecompile = useProjectStore((state) => state.triggerRecompile)
   const setGraphNodes = useProjectStore((state) => state.setGraphNodes)
-  const graphNodes = useProjectStore((state) => state._graphNodes)
 
   if (!isOpen) return null
 
@@ -29,8 +28,9 @@ export function TemplatesModal({ isOpen, onClose }: TemplatesModalProps) {
     : SHADER_TEMPLATES.filter((t) => t.category === selectedCategory)
 
   const handleApplyTemplate = (template: ShaderTemplate) => {
-    setActiveBackend(template.backend)
-    setShaderSource(template.shaderSource)
+    // Templates are GLSL: write the glsl slot and never leave a WebGPU (WGSL) backend active.
+    setActiveBackend(template.backend === "webgpu" ? "webgl2" : template.backend)
+    setShaderSource(template.shaderSource, "glsl")
 
     // Set uniform values in store
     for (const [key, val] of Object.entries(template.uniforms)) {
@@ -38,6 +38,7 @@ export function TemplatesModal({ isOpen, onClose }: TemplatesModalProps) {
     }
 
     // Update geometry on mesh node in graph
+    const graphNodes = useProjectStore.getState()._graphNodes
     if (graphNodes.length > 0) {
       const updatedNodes = graphNodes.map((n) => {
         if (n.type === "mesh") {

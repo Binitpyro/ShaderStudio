@@ -13,6 +13,9 @@ import path from "path"
 import zlib from "zlib"
 import { RenderCoordinator } from "@/core/renderCoordinator"
 
+// WebGPU shader compilation resolves via device error scope + getCompilationInfo (async): flush before asserting.
+const flushGpu = () => new Promise<void>((r) => setTimeout(r, 0))
+
 vi.mock("three", async (importOriginal) => {
   const actual = await importOriginal<typeof import("three")>()
   const { MockThreeRenderer } = await import("../e2e/mocks/mockThreeJS")
@@ -906,6 +909,7 @@ describe("Tier 5: Adversarial Stress Testing — Dynamic Uniforms & UI Synchroni
       const canvas = env.createCanvas()
       await adapter.mount(canvas as any)
       adapter.recompileShader(complexWgsl)
+      await flushGpu()
 
       const device = env.webgpu.getDevice()!
       const uniformBuffer = device.createdBuffers.find(
@@ -962,6 +966,7 @@ describe("Tier 5: Adversarial Stress Testing — Dynamic Uniforms & UI Synchroni
       const canvas = env.createCanvas()
       await adapter.mount(canvas as any)
       adapter.recompileShader(complexWgsl)
+      await flushGpu()
 
       const device = env.webgpu.getDevice()!
       const uniformBuffer = device.createdBuffers.find(
@@ -1002,6 +1007,7 @@ describe("Tier 5: Adversarial Stress Testing — Dynamic Uniforms & UI Synchroni
       const canvas = env.createCanvas()
       await adapter.mount(canvas as any)
       adapter.recompileShader(complexWgsl)
+      await flushGpu()
 
       adapter.updateUniform("roughness", { type: "float", value: 0.85 })
       adapter.updateUniform("tint", { type: "vec4", value: [0.9, 0.4, 0.2, 1.0] })
@@ -1009,6 +1015,7 @@ describe("Tier 5: Adversarial Stress Testing — Dynamic Uniforms & UI Synchroni
       // Recompile with the same or slightly tweaked shader
       const tweakedWgsl = complexWgsl.replace("scene.roughness + scene.time", "scene.roughness * 2.0")
       adapter.recompileShader(tweakedWgsl)
+      await flushGpu()
 
       const device = env.webgpu.getDevice()!
       const activeBuffer = device.createdBuffers.find(
@@ -1046,6 +1053,7 @@ describe("Tier 5: Adversarial Stress Testing — Dynamic Uniforms & UI Synchroni
       const canvas = env.createCanvas()
       await adapter.mount(canvas as any)
       adapter.recompileShader(arrayWgsl)
+      await flushGpu()
 
       adapter.updateUniform("weights", {
         type: "float" as any,
@@ -1508,6 +1516,7 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u_data: Uniforms;
 @fragment fn fs() -> @location(0) vec4f { return u_data.u_color; }
 `)
+      await flushGpu()
 
       const device = env.webgpu.getDevice()
       expect(device).not.toBeNull()
@@ -1564,6 +1573,7 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u_data: Uniforms;
 @fragment fn fs() -> @location(0) vec4f { return u_data.u_tint; }
 `)
+      await flushGpu()
 
       const device = env.webgpu.getDevice()!
       adapter.updateUniform("u_tint", { type: "vec4", value: [0.125, 0.25, 0.5, 1.0] })

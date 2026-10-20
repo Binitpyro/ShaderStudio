@@ -1,11 +1,50 @@
-import { memo, useRef, useEffect, useState, useCallback } from "react"
+import { memo, useRef, useState, useCallback, useEffect } from "react"
 import { Handle, Position } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { AudioNodeData } from "@/core/graphCompiler"
-import { audioEngine, type AudioSourceType } from "@/audio/audioEngine"
+import type { AudioSourceType } from "@/audio/audioEngine"
+import { getAudioEngine, loadAudioEngine, withAudioEngine } from "@/audio/audioRegistry"
 import { useProjectStore } from "@/stores/projectStore"
 import { Button } from "@/components/ui/button"
+import { useAudioGauges, useThrottledAudioFrame, CANVAS_HZ } from "./useAudioFrame"
+
+const NUM_BARS = 24
+// Fixed per-bar bin index and beat-glow colour table: no per-frame string building.
+const BIN_IDX = Array.from({ length: NUM_BARS }, (_, i) => Math.floor(Math.pow(i / NUM_BARS, 1.5) * 240))
+const BEAT_STYLE = Array.from({ length: 11 }, (_, i) => `rgba(255, 255, 255, ${(i / 10) * 0.8})`)
+const gradients = new WeakMap<CanvasRenderingContext2D, { h: number; grad: CanvasGradient }>()
+
+function drawSpectrum(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, playing: boolean) {
+  const w = canvas.width
+  const h = canvas.height
+  ctx.fillStyle = "rgba(10, 15, 25, 0.95)"
+  ctx.fillRect(0, 0, w, h)
+  if (!playing) return
+  let cached = gradients.get(ctx)
+  if (!cached || cached.h !== h) { // gradient geometry is height-bound: rebuild on canvas resize
+    const g = ctx.createLinearGradient(0, h, 0, 0)
+    g.addColorStop(0, "rgb(0, 200, 240)")
+    g.addColorStop(1, "rgb(220, 60, 200)")
+    cached = { h, grad: g }
+    gradients.set(ctx, cached)
+  }
+  const grad = cached.grad
+  const barWidth = (w - (NUM_BARS - 1) * 2) / NUM_BARS
+  const audioEngine = getAudioEngine()
+  if (!audioEngine) return
+  const buf = audioEngine.textureBuffer
+  ctx.fillStyle = grad
+  for (let i = 0; i < NUM_BARS; i++) {
+    const barHeight = Math.max(2, (buf[BIN_IDX[i]] / 255) * (h - 4))
+    ctx.fillRect(i * (barWidth + 2), h - barHeight - 2, barWidth, barHeight)
+  }
+  const beat = audioEngine.uniforms.beat
+  if (beat > 0.1) {
+    ctx.fillStyle = BEAT_STYLE[Math.min(10, Math.round(beat * 10))]
+    ctx.fillRect(0, h - 2, w, 2)
+  }
+}
 
 function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>) {
   const isAudioPlaying = useProjectStore((s) => s.isAudioPlaying)
@@ -17,35 +56,22 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
 
   const [sourceType, setSourceType] = useState<AudioSourceType>(data.sourceType || "builtin")
   const [volume, setVolume] = useState<number>(data.volume ?? 0.8)
-  const [gauges, setGauges] = useState({ bass: 0, mid: 0, treble: 0, beat: 0, level: 0 })
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    if (!selected) return
-    let animId: number
-    const tick = () => {
-      const u = audioEngine.uniforms
-      setGauges({
-        bass: Math.min(100, Math.round(u.bass * 100)),
-        mid: Math.min(100, Math.round(u.mid * 100)),
-        treble: Math.min(100, Math.round(u.treble * 100)),
-        beat: Math.min(100, Math.round(u.beat * 100)),
-        level: Math.min(100, Math.round(u.level * 100)),
-      })
-      animId = requestAnimationFrame(tick)
-    }
-    animId = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(animId)
-  }, [selected])
+  useEffect(() => { loadAudioEngine().catch((err) => console.error("[AudioNode] audio engine chunk failed to load", err)) }, [])
+
+  const gauge = useAudioGauges(`audio-gauges:${id}`, isAudioPlaying && !!selected)
 
   // Synchronize playing state
   const handleTogglePlay = useCallback(async () => {
+    const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
     const isPlaying = audioEngine.togglePlay()
     setIsAudioPlaying(isPlaying)
   }, [setIsAudioPlaying])
 
   const handleSourceChange = async (newSource: AudioSourceType) => {
+    const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
     if (newSource === "file" && !audioEngine.getContext()) {
       fileInputRef.current?.click()
     }
@@ -63,6 +89,7 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
+      const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
       const ok = await audioEngine.loadCustomAudioFile(file)
       if (ok) {
         setSourceType("file")
@@ -73,59 +100,17 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
 
   const handleVolumeChange = (vol: number) => {
     setVolume(vol)
-    audioEngine.setVolume(vol)
+    withAudioEngine((e) => e.setVolume(vol))
     useProjectStore.getState().setAudioVolume(vol)
   }
 
-  // Mini VU meter visualizer loop on the node canvas
-  useEffect(() => {
+  // Spectrum canvas: drawn from the render coordinator at <=30Hz, only while audio plays (+ one idle frame).
+  useThrottledAudioFrame(`audio-spectrum:${id}`, isAudioPlaying, CANVAS_HZ, () => {
     const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    let animId: number
-    const draw = () => {
-      const w = canvas.width
-      const h = canvas.height
-      ctx.clearRect(0, 0, w, h)
-
-      // Background subtle grid
-      ctx.fillStyle = "rgba(10, 15, 25, 0.95)"
-      ctx.fillRect(0, 0, w, h)
-
-      const numBars = 24
-      const barWidth = (w - (numBars - 1) * 2) / numBars
-      const uniforms = audioEngine.uniforms
-
-      // Draw frequency spectrum bars
-      for (let i = 0; i < numBars; i++) {
-        // Sample bins across the 512-bin spectrum
-        const binIdx = Math.floor(Math.pow(i / numBars, 1.5) * 240)
-        const val = audioEngine.textureBuffer[binIdx] / 255
-        const barHeight = Math.max(2, val * (h - 4))
-
-        // Heatmap color: Cyan -> Magenta -> Yellow on kick beat
-        const r = Math.floor(uniforms.beat * 255 * (i / numBars))
-        const g = Math.floor(val * 220 + uniforms.mid * 35)
-        const b = Math.floor((1 - val) * 240 + uniforms.bass * 15)
-
-        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
-        ctx.fillRect(i * (barWidth + 2), h - barHeight - 2, barWidth, barHeight)
-      }
-
-      // Draw beat pulse glow bar on bottom
-      if (uniforms.beat > 0.1) {
-        ctx.fillStyle = `rgba(255, 255, 255, ${uniforms.beat * 0.8})`
-        ctx.fillRect(0, h - 2, w, 2)
-      }
-
-      animId = requestAnimationFrame(draw)
-    }
-
-    animId = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(animId)
-  }, [])
+    const ctx = canvas?.getContext("2d")
+    if (!canvas || !ctx) return
+    drawSpectrum(canvas, ctx, isAudioPlaying)
+  })
 
   return (
     <div
@@ -235,30 +220,30 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
             <div className="grid grid-cols-4 gap-1">
               <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
                 <span className="text-[8px] text-muted-foreground block">BASS</span>
-                <span className="font-bold text-amber-400">{gauges.bass}%</span>
+                <span ref={gauge.text("bass")} className="font-bold text-amber-400">0%</span>
                 <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div className="h-full bg-amber-400 transition-all duration-75" style={{ width: `${gauges.bass}%` }} />
+                  <div ref={gauge.bar("bass")} className="h-full bg-amber-400" style={{ width: "0%" }} />
                 </div>
               </div>
               <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
                 <span className="text-[8px] text-muted-foreground block">MID</span>
-                <span className="font-bold text-cyan-400">{gauges.mid}%</span>
+                <span ref={gauge.text("mid")} className="font-bold text-cyan-400">0%</span>
                 <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div className="h-full bg-cyan-400 transition-all duration-75" style={{ width: `${gauges.mid}%` }} />
+                  <div ref={gauge.bar("mid")} className="h-full bg-cyan-400" style={{ width: "0%" }} />
                 </div>
               </div>
               <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
                 <span className="text-[8px] text-muted-foreground block">TREBLE</span>
-                <span className="font-bold text-pink-400">{gauges.treble}%</span>
+                <span ref={gauge.text("treble")} className="font-bold text-pink-400">0%</span>
                 <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div className="h-full bg-pink-400 transition-all duration-75" style={{ width: `${gauges.treble}%` }} />
+                  <div ref={gauge.bar("treble")} className="h-full bg-pink-400" style={{ width: "0%" }} />
                 </div>
               </div>
               <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
                 <span className="text-[8px] text-muted-foreground block">BEAT</span>
-                <span className="font-bold text-purple-400">{gauges.beat}%</span>
+                <span ref={gauge.text("beat")} className="font-bold text-purple-400">0%</span>
                 <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div className="h-full bg-purple-400 transition-all duration-75" style={{ width: `${gauges.beat}%` }} />
+                  <div ref={gauge.bar("beat")} className="h-full bg-purple-400" style={{ width: "0%" }} />
                 </div>
               </div>
             </div>
@@ -280,7 +265,7 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
                   onChange={(e) => {
                     const g = parseFloat(e.target.value)
                     setAudioGain(g)
-                    audioEngine.setGainMultiplier(g)
+                    withAudioEngine((e) => e.setGainMultiplier(g))
                   }}
                   onPointerDown={(e) => e.stopPropagation()}
                   onMouseDown={(e) => e.stopPropagation()}
@@ -298,7 +283,7 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
                   onChange={(e) => {
                     const s = parseFloat(e.target.value)
                     setAudioSmoothing(s)
-                    audioEngine.setSmoothing(s)
+                    withAudioEngine((e) => e.setSmoothing(s))
                   }}
                   onPointerDown={(e) => e.stopPropagation()}
                   onMouseDown={(e) => e.stopPropagation()}

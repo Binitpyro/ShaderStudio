@@ -16,10 +16,15 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [isPlaying, setIsPlaying] = useState(true)
   const [channel, setChannel] = useState<PreviewChannel>("rgba")
-  const animFrameRef = useRef<number | null>(null)
-  const timeRef = useRef(0)
+  const imgRef = useRef<ImageData | null>(null)
+  const visibleRef = useRef(true)
 
-  const isAnnotation = node.data.type === "comment" || node.data.type === "frame"
+  const nodeType = node.data.type
+  const isAnnotation = nodeType === "comment" || nodeType === "frame"
+  // Only the fields the preview draws: depending on the whole `node` re-created renderFrame (and reset the
+  // interval) on every drag/select that produced a new node object.
+  const expression: string | undefined = (node.data as any).expression
+  const geometry: string | undefined = (node.data as any).geometry
 
   // Rendering logic for isolated preview
   const renderFrame = useCallback(
@@ -31,7 +36,6 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
 
       const width = canvas.width
       const height = canvas.height
-      const nodeType = node.data.type
 
       // Clear canvas
       ctx.fillStyle = "#121316"
@@ -53,12 +57,17 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
         ctx.stroke()
       }
 
-      const imgData = ctx.createImageData(width, height)
+      let imgData = imgRef.current
+      if (!imgData || imgData.width !== width || imgData.height !== height) {
+        imgData = imgRef.current = ctx.createImageData(width, height)
+      } else {
+        imgData.data.fill(0)
+      }
       const data = imgData.data
 
       if (nodeType === "math_expression") {
         // Evaluate math formula over [0, 1] domain
-        const expr = ((node.data as any).expression || "sin(uv.x * 10.0) * 0.5 + 0.5").toLowerCase()
+        const expr = (expression || "sin(uv.x * 10.0) * 0.5 + 0.5").toLowerCase()
         const freq = expr.includes("20") ? 20.0 : expr.includes("5") ? 5.0 : 10.0
         for (let py = 0; py < height; py++) {
           const v = 1.0 - py / height
@@ -150,7 +159,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
         const cx = width / 2
         const cy = height / 2
         const t = isPlaying ? time * 0.001 : 0.8
-        const geom = (node.data as any).geometry || "torus_knot"
+        const geom = geometry || "torus_knot"
 
         ctx.strokeStyle = "#38bdf8"
         ctx.lineWidth = 1.5
@@ -197,30 +206,29 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
         ctx.putImageData(imgData, 0, 0)
       }
     },
-    [node, isPlaying, channel]
+    [nodeType, expression, geometry, isPlaying, channel]
   )
 
+  // One frame on selection/data/channel change; ~10Hz timer only while playing AND visible (no rAF).
   useEffect(() => {
     if (isAnnotation) return
+    renderFrame(performance.now())
+    if (!isPlaying) return
+    const timer = setInterval(() => {
+      if (visibleRef.current && !document.hidden) renderFrame(performance.now())
+    }, 100)
+    return () => clearInterval(timer)
+  }, [renderFrame, isAnnotation, isPlaying])
 
-    let running = true
-    const loop = (timestamp: number) => {
-      timeRef.current = timestamp
-      renderFrame(timestamp)
-      if (running) {
-        animFrameRef.current = requestAnimationFrame(loop)
-      }
-    }
-
-    animFrameRef.current = requestAnimationFrame(loop)
-
-    return () => {
-      running = false
-      if (animFrameRef.current !== null) {
-        cancelAnimationFrame(animFrameRef.current)
-      }
-    }
-  }, [renderFrame, isAnnotation])
+  useEffect(() => {
+    const el = canvasRef.current
+    if (!el || typeof IntersectionObserver === "undefined") return
+    const io = new IntersectionObserver((entries) => {
+      visibleRef.current = entries[entries.length - 1]?.isIntersecting ?? true
+    })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [isAnnotation])
 
   return (
     <div

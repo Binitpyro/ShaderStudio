@@ -1,3 +1,4 @@
+import { registerAudioEngine } from "./audioRegistry"
 /**
  * Shader Studio — Web Audio DSP Engine
  * Provides real-time FFT frequency spectrum, waveform data,
@@ -411,3 +412,5 @@ export class AudioEngine {
 }
 
 export const audioEngine = new AudioEngine()
+
+registerAudioEngine(audioEngine)

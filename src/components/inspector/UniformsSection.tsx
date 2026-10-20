@@ -8,29 +8,13 @@ import {
   type AudioBand,
   type GraphUniform,
 } from "@/stores/projectStore"
-import { webgpuAdapter } from "@/adapters/webgpu"
-import { webgl2Adapter } from "@/adapters/webgl2"
-import { threejsAdapter } from "@/adapters/threejs"
+import { getActiveAdapter } from "@/adapters/activeAdapter"
 import { cn } from "@/lib/utils"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { Search, X, RotateCcw, Activity } from "lucide-react"
-
-function getAdapter() {
-  const backend = useProjectStore.getState().activeBackend
-  switch (backend) {
-    case "webgpu":
-      return webgpuAdapter
-    case "webgl2":
-      return webgl2Adapter
-    case "threejs":
-      return threejsAdapter
-    default:
-      return webgpuAdapter
-  }
-}
 
 function getDefaultValueFor(
   uniform: ParsedUniform,
@@ -79,7 +63,7 @@ function MatrixControl({ uniform, value, onChange, onReset }: MatrixControlProps
   const applyUpdate = (updated: number[]) => {
     const newValue: UniformValue = { type: valType, value: updated }
     onChange(newValue)
-    getAdapter().updateUniform(uniform.name, newValue)
+    getActiveAdapter()?.updateUniform(uniform.name, newValue)
   }
 
   const updateCell = (index: number, val: number) => {
@@ -210,7 +194,7 @@ function ScalarControl({
             onCheckedChange={(checked) => {
               const newValue: UniformValue = { type: "bool", value: checked }
               onChange(newValue)
-              getAdapter().updateUniform(uniform.name, newValue)
+              getActiveAdapter()?.updateUniform(uniform.name, newValue)
             }}
           />
           <button
@@ -252,7 +236,7 @@ function ScalarControl({
       value: finalVal,
     }
     onChange(newValue)
-    getAdapter().updateUniform(uniform.name, newValue)
+    getActiveAdapter()?.updateUniform(uniform.name, newValue)
   }
 
   return (
@@ -427,7 +411,7 @@ function ColorControl({ uniform, value, onChange, onReset }: ParameterControlPro
         value: isVec4 ? [nr, ng, nb, a] : [nr, ng, nb],
       }
       onChange(newValue)
-      getAdapter().updateUniform(uniform.name, newValue)
+      getActiveAdapter()?.updateUniform(uniform.name, newValue)
     }
   }
 
@@ -437,7 +421,7 @@ function ColorControl({ uniform, value, onChange, onReset }: ParameterControlPro
       value: [r, g, b, newAlpha],
     }
     onChange(newValue)
-    getAdapter().updateUniform(uniform.name, newValue)
+    getActiveAdapter()?.updateUniform(uniform.name, newValue)
   }
 
   return (
@@ -536,7 +520,7 @@ function VectorControl({ uniform, value, onChange, onReset }: ParameterControlPr
       value: newVec.slice(0, components.length),
     }
     onChange(newValue)
-    getAdapter().updateUniform(uniform.name, newValue)
+    getActiveAdapter()?.updateUniform(uniform.name, newValue)
   }
 
   return (
@@ -654,14 +638,14 @@ export function UniformsSection() {
   const handleResetUniform = (uniform: ParsedUniform) => {
     const def = getDefaultValueFor(uniform, graphUniforms)
     setUniformValue(uniform.name, def)
-    getAdapter().updateUniform(uniform.name, def)
+    getActiveAdapter()?.updateUniform(uniform.name, def)
   }
 
   const handleResetAll = () => {
     for (const u of combined) {
       const def = getDefaultValueFor(u, graphUniforms)
       setUniformValue(u.name, def)
-      getAdapter().updateUniform(u.name, def)
+      getActiveAdapter()?.updateUniform(u.name, def)
     }
   }
 

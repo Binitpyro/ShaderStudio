@@ -3,7 +3,7 @@
  * ConsoleDrawer diagnostic parsing/jump, WebGL2/Three/WebGPU compile-error routing, ErrorBoundary and diagnosticParser.
  * Consolidated by fleet w1-b-ui; harness re-implementations of ShaderEditor logic were rewritten against the real component.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 import * as React from "react"
 import { ShaderEditor, COMPILER_MARKER_OWNER, getErrorTargetTab, doesTabMatch } from "@/components/ShaderEditor"
@@ -12,11 +12,14 @@ import { useProjectStore, type EditorTab, type BackendType } from "@/stores/proj
 import { useLayoutStore } from "@/stores/layoutStore"
 import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { webgpuAdapter, WebGPUAdapter } from "@/adapters/webgpu"
+import { loadAdapter } from "@/adapters/activeAdapter"
 import { webgl2Adapter, WebGL2Adapter } from "@/adapters/webgl2"
 import { threejsAdapter } from "@/adapters/threejs"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
 import { ErrorBoundary } from "@/components/common/ErrorBoundary"
+
+beforeAll(async () => { await loadAdapter("webgpu") }) // webgpu registers lazily
 
 let capturedOnMount: ((editor: any, monaco: any) => void) | null = null
 let capturedOnChange: ((value: string | undefined) => void) | null = null
@@ -47,6 +50,12 @@ vi.mock("@monaco-editor/react", () => ({
       </div>
     )
   },
+}))
+
+// ShaderEditor loads Monaco through React.lazy; renderToStaticMarkup cannot resolve a lazy component, so
+// resolve LazyMonaco synchronously to the mocked Monaco component above (ShaderEditor itself is real).
+vi.mock("@/components/LazyMonaco", async () => ({
+  LazyMonaco: (await import("@monaco-editor/react")).default,
 }))
 
 vi.mock("@/components/SyncStatusBanner", () => ({

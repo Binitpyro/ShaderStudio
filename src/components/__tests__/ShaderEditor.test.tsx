@@ -32,6 +32,12 @@ vi.mock("@monaco-editor/react", () => ({
   },
 }))
 
+// ShaderEditor loads Monaco through React.lazy; renderToStaticMarkup cannot resolve a lazy component, so
+// resolve LazyMonaco synchronously to the mocked Monaco component above (ShaderEditor itself is real).
+vi.mock("@/components/LazyMonaco", async () => ({
+  LazyMonaco: (await import("@monaco-editor/react")).default,
+}))
+
 // Mock sync status banner
 vi.mock("../SyncStatusBanner", () => ({
   SyncStatusBanner: () => <div data-testid="sync-status-banner">Sync Status</div>,

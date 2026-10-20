@@ -197,7 +197,7 @@ export class WebGL2Framebuffer {
     if (this.gl) {
       if (this.framebuffer) this.gl.deleteFramebuffer(this.framebuffer)
       if (this.texture) this.gl.deleteTexture(this.texture)
-      if (this.depthBuffer) this.gl.deleteRenderbuffer?.(this.depthBuffer) // optional: test doubles may omit it
+      if (this.depthBuffer) this.gl.deleteRenderbuffer(this.depthBuffer)
     }
     this.framebuffer = null
     this.texture = null

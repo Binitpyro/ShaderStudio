@@ -17,7 +17,9 @@ import type { RenderQueue, ComputePreset } from "@/core/graphCompiler"
 import type { UniformValue, EnvironmentSettings } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
 import { generateEnvironmentRGBA, ENVIRONMENT_PRESETS } from "@/core/environmentGenerator"
-import { computeUniformBufferLayout, type UniformBufferLayout, type UniformFieldLayout } from "@/core/uniformLayout"
+import { computeUniformBufferLayout, writeFieldData, type UniformBufferLayout, type UniformFieldLayout } from "@/core/uniformLayout"
+import { performanceTelemetry } from "@/core/performanceTelemetry"
+import { renderCoordinator } from "@/core/renderCoordinator"
 import { parseWgslUniforms } from "@/parsers/wgslUniforms"
 import { WebGPUPingPong, CUSTOM_WGSL_TEMPLATE, type PostProcessPassType } from "@/core/postProcessChain"
 import defaultShader from "../shaders/default.wgsl?raw"
@@ -32,25 +34,11 @@ import fxaaWgsl from "../shaders/postprocess/fxaa.wgsl?raw"
 import taaWgsl from "../shaders/postprocess/taa.wgsl?raw"
 import ssrWgsl from "../shaders/postprocess/ssr.wgsl?raw"
 import curlNoiseWgsl from "../shaders/compute/curl_noise.wgsl?raw"
-import gravityWgsl from "../shaders/compute/gravity_attractor.wgsl?raw"
-import boidsWgsl from "../shaders/compute/boids.wgsl?raw"
-import galaxyWgsl from "../shaders/compute/galaxy.wgsl?raw"
-import defaultComputeWgsl from "../shaders/compute/default.compute.wgsl?raw"
 import particleRenderWgsl from "../shaders/compute/particle_render.wgsl?raw"
-import audioVortexWgsl from "../shaders/compute/audio_vortex.wgsl?raw"
+import { getComputePresetCode } from "@/core/computePresets"
 import skyboxWgsl from "../shaders/skybox.wgsl?raw"
 
-export function getComputePresetCode(preset: ComputePreset, customSource?: string): string {
-  switch (preset) {
-    case "curl_noise": return curlNoiseWgsl
-    case "gravity": return gravityWgsl
-    case "boids": return boidsWgsl
-    case "galaxy": return galaxyWgsl
-    case "audio_vortex": return audioVortexWgsl
-    case "custom": return customSource || defaultComputeWgsl
-    default: return curlNoiseWgsl
-  }
-}
+export { getComputePresetCode }
 
 interface WebGPUPostProcessPass {
   id: string
@@ -62,22 +50,104 @@ interface WebGPUPostProcessPass {
   bindGroupCache?: Map<GPUTextureView, GPUBindGroup>
 }
 
+interface PostProcessStep {
+  id: string
+  pass: PostProcessPassType
+  customSource?: string
+  uniforms: Record<string, number | number[]>
+}
+
 import { customModelRegistry } from "@/core/customModelRegistry"
 
-import { type GeometryKey, getVerticesForGeometry, setLookAtMatrix, setRotationMatrix, multiplyMatricesInto } from "./math"
-export { createLookAtMatrix, createRotationMatrix, multiplyMatrices } from "./math"
+import {
+  type GeometryKey, getVerticesForGeometry, setLookAtMatrix, setRotationMatrix, multiplyMatricesInto,
+  setPerspectiveMatrixWebGPU, halton, setTexMeta,
+} from "./math"
+// Fixed camera: shared constants, no per-frame array literals.
+const CAM_EYE: [number, number, number] = [0, 2, 4]
+const CAM_TARGET: [number, number, number] = [0, 0, 0]
+const CAM_UP: [number, number, number] = [0, 1, 0]
 
-function setPerspectiveMatrixWebGPU(out: Float32Array, fov: number, aspect: number, near: number, far: number): Float32Array {
-  const f = 1.0 / Math.tan(fov / 2), nf = 1 / (near - far)
-  out[0] = f / aspect; out[1] = 0; out[2] = 0; out[3] = 0
-  out[4] = 0; out[5] = f; out[6] = 0; out[7] = 0
-  out[8] = 0; out[9] = 0; out[10] = far * nf; out[11] = -1
-  out[12] = 0; out[13] = 0; out[14] = far * near * nf; out[15] = 0
-  return out
-}
+export { createLookAtMatrix, createRotationMatrix, multiplyMatrices } from "./math"
 
 export function createPerspectiveMatrix(fov: number, aspect: number, near: number, far: number): Float32Array {
   return setPerspectiveMatrixWebGPU(new Float32Array(16), fov, aspect, near, far)
+}
+
+
+interface FrameFields {
+  mvp: number
+  time: number
+  audio: Array<{ offset: number; key: keyof AudioUniforms }>
+  envExposure: number
+  envRotation: number
+}
+
+interface UniformResources {
+  layout: UniformBufferLayout
+  buffer: GPUBuffer
+  cpu: ArrayBuffer
+  view: DataView
+}
+
+const stripU = (n: string) => n.replace(/^u_/, "")
+
+/** Finds the layout field for `name` (u_ prefix optional, `name[i]` element, or whole `name[0..n]` array). */
+function resolveField(layout: UniformBufferLayout, name: string): UniformFieldLayout | null {
+  const f = layout.fields
+  const lookup = (n: string) => f[n] || f[stripU(n)] || f[`u_${n}`]
+  const direct = lookup(name)
+  if (direct) return direct
+
+  const match = name.match(/^(.+?)\[(\d+)\]$/)
+  if (match) {
+    const baseField = lookup(match[1])
+    const index = parseInt(match[2], 10)
+    if (baseField && baseField.arrayCount && baseField.arrayStride && index < baseField.arrayCount) {
+      return {
+        name,
+        type: baseField.type,
+        offset: baseField.offset + index * baseField.arrayStride,
+        size: baseField.arrayStride,
+        alignment: baseField.alignment,
+      }
+    }
+  }
+
+  const elem0 = lookup(`${name}[0]`)
+  if (elem0) {
+    const prefix = elem0.name.replace(/\[0\]$/, "")
+    let count = 0
+    while (f[`${prefix}[${count}]`]) count++
+    const elem1 = f[`${prefix}[1]`]
+    const stride = elem1 ? elem1.offset - elem0.offset : Math.max(16, elem0.size)
+    return {
+      name,
+      type: elem0.type,
+      offset: elem0.offset,
+      size: count > 0 ? count * stride : elem0.size,
+      alignment: elem0.alignment,
+      arrayCount: count,
+      arrayStride: stride,
+    }
+  }
+  return null
+}
+
+/** Writes `value` into the CPU uniform block through uniformLayout's writer; returns the field written (or null). */
+function writeUniformValue(layout: UniformBufferLayout, view: DataView, name: string, value: UniformValue): UniformFieldLayout | null {
+  const field = resolveField(layout, name)
+  if (!field) return null
+  let raw: any = value.value
+  if (field.arrayCount && field.arrayStride) {
+    if (!Array.isArray(raw)) raw = [raw]
+  } else if (field.type === "vec4f" && value.type === "color" && (Array.isArray(raw) || raw instanceof Float32Array) && raw.length === 3) {
+    raw = [raw[0], raw[1], raw[2], 1]
+  } else if (field.type === "i32" || field.type === "u32") {
+    raw = Math.round(Number(raw) || 0)
+  }
+  writeFieldData(view, field, raw)
+  return field
 }
 
 
@@ -104,7 +174,6 @@ export class WebGPUAdapter implements RenderAdapter {
   private rotMatrix = new Float32Array(16)
   private tempMatrix = new Float32Array(16)
   private mvpMatrix = new Float32Array(16)
-  private timeArray = new Float32Array(1)
   private simDataArray = new Float32Array(12)
   private particleRenderArray = new Float32Array(20)
   private isExternalLoopDriven = false
@@ -183,6 +252,8 @@ export class WebGPUAdapter implements RenderAdapter {
   private gBufferRoughnessTex: GPUTexture | null = null
   private gBufferDepthTex: GPUTexture | null = null
   private gBufferMotionTex: GPUTexture | null = null
+  // Cached views of the G-buffer textures; rebuilt in initGBuffer (resize/rebuild), dropped on destroy.
+  private gBufferViews: { albedo: GPUTextureView; normal: GPUTextureView; roughness: GPUTextureView; depth: GPUTextureView; motion: GPUTextureView } | null = null
   private shadowDepthTex: GPUTexture | null = null
   private shadowCubeTex: GPUTexture | null = null
   private deferredLightingPipeline: GPURenderPipeline | null = null
@@ -250,198 +321,167 @@ export class WebGPUAdapter implements RenderAdapter {
 
   private uniformLayout: UniformBufferLayout | null = null
   private cpuUniformBuffer: ArrayBuffer | null = null
+  private cpuUniformView: DataView | null = null
   private cachedUniformValues = new Map<string, UniformValue>()
+  // Field offsets for the per-frame writes, resolved once per compile (never looked up by name in the frame loop).
+  private frameFields: FrameFields = { mvp: -1, time: -1, audio: [], envExposure: -1, envRotation: -1 }
+  private mvpView: Float32Array | null = null
+  private timeView: Float32Array | null = null
+  private uniformDirtyMin = Infinity
+  private uniformDirtyMax = 0
+  private audioShadow = new Uint8Array(1024)
+  // Structured compile error handling: latest compile wins; stale async results are discarded.
+  private renderCompileGen = 0
+  private computeCompileGen = 0
+  private failedComputeSource: string | null = null
+  // Per-frame draw statistics reported to performanceTelemetry (plain counters, no allocation).
+  private statDraws = 0
+  private statTriangles = 0
+  private frameStats = { drawCalls: 0, triangles: 0 }
+  private deferredArray = new Float32Array(16)
+  private deferredInts = new Int32Array(this.deferredArray.buffer)
+  private skyboxArray = new Float32Array(16)
+  private ppScratch = new Float32Array(4)
+  private loadingTextures = new Set<string>()
+  private postProcessSignature = ""
+  /** Shadow depth pass is disabled until W4 provides a depth-only pipeline (see encodeShadowPass). */
+  private readonly shadowPassReady: boolean = false
 
-  private setupDynamicUniformBuffer(source: string) {
-    if (!this.device) return
-    const parsed = parseWgslUniforms(source)
-    const bufferUniforms = parsed.filter(u => u.kind !== "texture")
-    this.uniformLayout = computeUniformBufferLayout(bufferUniforms)
+  private resolveFrameFields(layout: UniformBufferLayout): FrameFields {
+    const pick = (...names: string[]) => {
+      for (const n of names) if (layout.fields[n]) return layout.fields[n].offset
+      return -1
+    }
+    const audio: FrameFields["audio"] = []
+    for (const key of ["bass", "mid", "treble", "level", "beat"] as const) {
+      const cap = key[0].toUpperCase() + key.slice(1)
+      for (const n of [key, `u_${key}`, `audio_${key}`, `u_audio_${key}`, `audio${cap}`]) {
+        if (layout.fields[n]) audio.push({ offset: layout.fields[n].offset, key })
+      }
+    }
+    return {
+      mvp: pick("mvp", "u_mvp"),
+      time: pick("time", "u_time"),
+      audio,
+      envExposure: pick("envExposure", "u_envExposure"),
+      envRotation: pick("envRotation", "u_envRotation"),
+    }
+  }
 
-    const bufferSize = this.uniformLayout.totalSize
-
-    this.uniformBuffer?.destroy()
-    this.uniformBuffer = this.device.createBuffer({
-      size: bufferSize,
+  /** Builds layout + GPU buffer + CPU shadow for `source` without touching live state (throws on unsupported types). */
+  private buildUniformResources(source: string): UniformResources {
+    const device = this.device!
+    const parsed = parseWgslUniforms(source).filter(u => u.kind !== "texture")
+    const layout = computeUniformBufferLayout(parsed)
+    const buffer = device.createBuffer({
+      size: layout.totalSize,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: "ShaderStudio_DynamicUniformBuffer",
     })
-
-    this.cpuUniformBuffer = new ArrayBuffer(bufferSize)
+    const cpu = new ArrayBuffer(layout.totalSize)
+    const view = new DataView(cpu)
 
     // Seed with existing uniform values from store or cache
     const storeValues = useProjectStore.getState().uniformValues
-    for (const [name, val] of Object.entries(storeValues)) {
-      this.writeUniformToCpuBuffer(name, val)
-    }
-    for (const [name, val] of this.cachedUniformValues.entries()) {
-      this.writeUniformToCpuBuffer(name, val)
-    }
+    for (const [name, val] of Object.entries(storeValues)) writeUniformValue(layout, view, name, val)
+    for (const [name, val] of this.cachedUniformValues.entries()) writeUniformValue(layout, view, name, val)
 
     // Default color if color field exists but wasn't populated
-    const colorField = this.uniformLayout.fields["color"] || this.uniformLayout.fields["u_color"]
+    const colorField = layout.fields["color"] || layout.fields["u_color"]
     if (colorField && !storeValues["color"] && !storeValues["u_color"] && !this.cachedUniformValues.has("color") && !this.cachedUniformValues.has("u_color")) {
-      this.writeUniformToCpuBuffer(colorField.name, { type: "color", value: [0.4, 0.6, 0.9] })
+      writeUniformValue(layout, view, colorField.name, { type: "color", value: [0.4, 0.6, 0.9] })
     }
 
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.cpuUniformBuffer)
+    device.queue.writeBuffer(buffer, 0, cpu)
+    return { layout, buffer, cpu, view }
   }
 
-  private getFieldLayout(name: string): UniformFieldLayout | null {
-    if (!this.uniformLayout) return null
-    const direct = this.uniformLayout.fields[name] ||
-                   this.uniformLayout.fields[name.replace(/^u_/, "")] ||
-                   this.uniformLayout.fields[`u_${name}`]
-    if (direct) return direct
-
-    const match = name.match(/^(.+?)\[(\d+)\]$/)
-    if (match) {
-      const baseName = match[1]
-      const index = parseInt(match[2], 10)
-      const baseField = this.uniformLayout.fields[baseName] ||
-                        this.uniformLayout.fields[baseName.replace(/^u_/, "")] ||
-                        this.uniformLayout.fields[`u_${baseName}`]
-      if (baseField && baseField.arrayCount && baseField.arrayStride && index < baseField.arrayCount) {
-        return {
-          name,
-          type: baseField.type,
-          offset: baseField.offset + index * baseField.arrayStride,
-          size: baseField.arrayStride,
-          alignment: baseField.alignment,
-        }
-      }
-    }
-
-    const elem0 = this.uniformLayout.fields[`${name}[0]`] ||
-                  this.uniformLayout.fields[`${name.replace(/^u_/, "")}[0]`] ||
-                  this.uniformLayout.fields[`u_${name}[0]`]
-    if (elem0) {
-      const prefix = elem0.name.replace(/\[0\]$/, "")
-      let count = 0
-      while (this.uniformLayout.fields[`${prefix}[${count}]`]) {
-        count++
-      }
-      const elem1 = this.uniformLayout.fields[`${prefix}[1]`]
-      const stride = elem1 ? elem1.offset - elem0.offset : Math.max(16, elem0.size)
-      return {
-        name,
-        type: elem0.type,
-        offset: elem0.offset,
-        size: count > 0 ? count * stride : elem0.size,
-        alignment: elem0.alignment,
-        arrayCount: count,
-        arrayStride: stride,
-      }
-    }
-
-    return null
+  /** Makes `res` the live uniform block and destroys the previous GPU buffer. */
+  private applyUniformResources(res: UniformResources) {
+    const old = this.uniformBuffer
+    this.uniformLayout = res.layout
+    this.uniformBuffer = res.buffer
+    this.cpuUniformBuffer = res.cpu
+    this.cpuUniformView = res.view
+    this.frameFields = this.resolveFrameFields(res.layout)
+    this.mvpView = this.frameFields.mvp >= 0 ? new Float32Array(res.cpu, this.frameFields.mvp, 16) : null
+    this.timeView = this.frameFields.time >= 0 ? new Float32Array(res.cpu, this.frameFields.time, 1) : null
+    this.uniformDirtyMin = Infinity
+    this.uniformDirtyMax = 0
+    if (old && old !== res.buffer) { try { old.destroy() } catch {} }
   }
 
-  private writeElement(
-    view: DataView,
-    type: string,
-    offset: number,
-    rawVal: any,
-    isColor = false
+  private markUniformDirty(offset: number, size: number) {
+    if (offset < this.uniformDirtyMin) this.uniformDirtyMin = offset
+    if (offset + size > this.uniformDirtyMax) this.uniformDirtyMax = offset + size
+  }
+
+  /** The single queue.writeBuffer for the uniform block: only the dirty byte range. */
+  private flushUniforms() {
+    if (this.uniformDirtyMax <= this.uniformDirtyMin || !this.device || !this.uniformBuffer || !this.cpuUniformBuffer) return
+    const start = this.uniformDirtyMin & ~3
+    const end = (this.uniformDirtyMax + 3) & ~3
+    this.device.queue.writeBuffer(this.uniformBuffer, start, this.cpuUniformBuffer, start, end - start)
+    this.uniformDirtyMin = Infinity
+    this.uniformDirtyMax = 0
+  }
+
+  /** Writes a float into the CPU block and marks it dirty only when the value changed. */
+  private setCpuFloat(offset: number, value: number): boolean {
+    const view = this.cpuUniformView
+    if (!view || offset < 0) return false
+    if (view.getFloat32(offset, true) === Math.fround(value)) return false
+    view.setFloat32(offset, value, true)
+    this.markUniformDirty(offset, 4)
+    return true
+  }
+
+  private writeUniformToCpuBuffer(name: string, value: UniformValue): UniformFieldLayout | null {
+    if (!this.cpuUniformView || !this.uniformLayout) return null
+    return writeUniformValue(this.uniformLayout, this.cpuUniformView, name, value)
+  }
+
+  /**
+   * Creates GPU objects through `create` and validates them. WGSL/pipeline errors are asynchronous, so when the
+   * device exposes error scopes / compilation info the result is delivered later; `onOk` runs only for valid
+   * objects and `onFail` receives the structured error text (`:line:col error: message`, one per line) or null
+   * when the result is stale. Without those APIs (headless mocks) everything resolves synchronously.
+   */
+  private compileChecked<T>(
+    create: (device: GPUDevice) => { value: T; module: GPUShaderModule },
+    isStale: () => boolean,
+    onOk: (value: T) => void,
+    onFail: (value: T | null, error: string | null) => void,
   ) {
-    switch (type) {
-      case "f32": {
-        const v = typeof rawVal === "number" ? rawVal : Number(rawVal) || 0
-        view.setFloat32(offset, isNaN(v) ? 0 : v, true)
-        break
-      }
-      case "i32": {
-        const v = Math.round(Number(rawVal) || 0)
-        view.setInt32(offset, isNaN(v) ? 0 : v, true)
-        break
-      }
-      case "u32": {
-        const v = Math.max(0, Math.round(Number(rawVal) || 0))
-        view.setUint32(offset, isNaN(v) ? 0 : v, true)
-        break
-      }
-      case "bool": {
-        view.setUint32(offset, rawVal ? 1 : 0, true)
-        break
-      }
-      case "vec2f": {
-        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0]
-        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
-        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
-        break
-      }
-      case "vec3f": {
-        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0, 0]
-        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
-        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
-        view.setFloat32(offset + 8, Number(arr[2] ?? 0) || 0, true)
-        break
-      }
-      case "vec4f": {
-        const arr = Array.isArray(rawVal) || rawVal instanceof Float32Array ? rawVal : [0, 0, 0, 0]
-        view.setFloat32(offset, Number(arr[0] ?? 0) || 0, true)
-        view.setFloat32(offset + 4, Number(arr[1] ?? 0) || 0, true)
-        view.setFloat32(offset + 8, Number(arr[2] ?? 0) || 0, true)
-        view.setFloat32(offset + 12, Number(arr[3] ?? (isColor ? 1 : 0)) || 0, true)
-        break
-      }
-      case "mat4x4f": {
-        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) && (rawVal as any).length === 16
-          ? rawVal
-          : [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
-        for (let i = 0; i < 16; i++) {
-          view.setFloat32(offset + i * 4, Number(arr[i] ?? (i % 5 === 0 ? 1 : 0)) || 0, true)
-        }
-        break
-      }
-      case "mat3x3f": {
-        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) ? rawVal : [1,0,0, 0,1,0, 0,0,1]
-        if ((arr as any).length >= 12) {
-          for (let col = 0; col < 3; col++) {
-            for (let row = 0; row < 3; row++) {
-              view.setFloat32(offset + col * 16 + row * 4, Number(arr[col * 4 + row] ?? 0) || 0, true)
-            }
-          }
-        } else {
-          for (let col = 0; col < 3; col++) {
-            for (let row = 0; row < 3; row++) {
-              const idx = col * 3 + row
-              view.setFloat32(offset + col * 16 + row * 4, Number(arr[idx] ?? (col === row ? 1 : 0)) || 0, true)
-            }
-          }
-        }
-        break
-      }
-      case "mat2x2f": {
-        const arr = (Array.isArray(rawVal) || rawVal instanceof Float32Array) && (rawVal as any).length === 4
-          ? rawVal
-          : [1,0, 0,1]
-        for (let i = 0; i < 4; i++) {
-          view.setFloat32(offset + i * 4, Number(arr[i] ?? (i % 3 === 0 ? 1 : 0)) || 0, true)
-        }
-        break
-      }
-    }
-  }
-
-  private writeUniformToCpuBuffer(name: string, value: UniformValue) {
-    if (!this.cpuUniformBuffer || !this.uniformLayout) return
-    const field = this.getFieldLayout(name)
-    if (!field) return
-
-    const view = new DataView(this.cpuUniformBuffer)
-    const rawVal = value.value
-
-    if (field.arrayCount && field.arrayCount > 0 && field.arrayStride) {
-      const arr = Array.isArray(rawVal) ? rawVal : [rawVal]
-      for (let i = 0; i < field.arrayCount; i++) {
-        const elemOffset = field.offset + i * field.arrayStride
-        this.writeElement(view, field.type, elemOffset, arr[i], value.type === "color")
-      }
+    const device = this.device
+    if (!device) return
+    const scoped = typeof device.pushErrorScope === "function" && typeof device.popErrorScope === "function"
+    let built: { value: T; module: GPUShaderModule } | null = null
+    let thrown: unknown = null
+    if (scoped) device.pushErrorScope("validation")
+    try { built = create(device) } catch (e) { thrown = e }
+    const popped = scoped ? device.popErrorScope() : null
+    if (!built) {
+      popped?.catch(() => {})
+      onFail(null, isStale() ? null : (thrown instanceof Error ? thrown.message : String(thrown)))
       return
     }
-
-    this.writeElement(view, field.type, field.offset, rawVal, value.type === "color")
+    const info = typeof built.module.getCompilationInfo === "function" ? built.module.getCompilationInfo() : null
+    if (!popped && !info) {
+      if (isStale()) onFail(built.value, null)
+      else onOk(built.value)
+      return
+    }
+    const value = built.value
+    Promise.all([info, popped]).then(([ci, scopeErr]) => {
+      if (isStale() || this.device !== device) return onFail(value, null)
+      const lines = (ci?.messages ?? [])
+        .filter(m => m.type === "error")
+        .map(m => `:${m.lineNum}:${m.linePos} error: ${m.message}`)
+      if (lines.length === 0 && scopeErr) lines.push(scopeErr.message || "WebGPU validation error")
+      if (lines.length > 0) onFail(value, lines.join("\n"))
+      else onOk(value)
+    }, (err) => onFail(value, isStale() ? null : (err instanceof Error ? err.message : String(err))))
   }
 
   async mount(canvas: HTMLCanvasElement): Promise<boolean> {
@@ -469,7 +509,9 @@ export class WebGPUAdapter implements RenderAdapter {
 
     this.createDefaultTexture()
     this.currentShaderSource = defaultShader
-    this.setupDynamicUniformBuffer(defaultShader)
+    try {
+      this.applyUniformResources(this.buildUniformResources(defaultShader))
+    } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(msg); return false }
 
     const shaderModule = this.device.createShaderModule({ code: defaultShader })
     try {
@@ -527,69 +569,47 @@ export class WebGPUAdapter implements RenderAdapter {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       label: "AudioDataTexture",
     })
+    this.audioShadow.fill(0) // fresh textures are zero-initialised
   }
 
   updateAudioData(textureBuffer: Uint8Array, uniforms: AudioUniforms) {
     this.audioUniforms = uniforms
     if (!this.device || !this.initialized) return
+    let changed = false
 
     if (!this.audioTexture) {
       this.createAudioTexture()
       this.updateBindGroup()
     }
 
+    // Upload the 1KB spectrum texture only when its contents actually changed (idle/silent audio costs nothing).
     if (this.audioTexture && textureBuffer.length >= 1024) {
-      try {
-        this.device.queue.writeTexture(
-          { texture: this.audioTexture },
-          textureBuffer as any,
-          { bytesPerRow: 512, rowsPerImage: 2 },
-          [512, 2, 1]
-        )
-      } catch {
-        // Safe write fallback in headless tests
+      const shadow = this.audioShadow
+      let differs = false
+      for (let i = 0; i < 1024; i++) {
+        if (shadow[i] !== textureBuffer[i]) { differs = true; break }
       }
-    }
-
-    if (this.uniformBuffer && this.uniformLayout) {
-      const audioFieldMap: Record<string, number> = {
-        bass: uniforms.bass,
-        u_bass: uniforms.bass,
-        audio_bass: uniforms.bass,
-        u_audio_bass: uniforms.bass,
-        audioBass: uniforms.bass,
-        mid: uniforms.mid,
-        u_mid: uniforms.mid,
-        audio_mid: uniforms.mid,
-        u_audio_mid: uniforms.mid,
-        audioMid: uniforms.mid,
-        treble: uniforms.treble,
-        u_treble: uniforms.treble,
-        audio_treble: uniforms.treble,
-        u_audio_treble: uniforms.treble,
-        audioTreble: uniforms.treble,
-        level: uniforms.level,
-        u_level: uniforms.level,
-        audio_level: uniforms.level,
-        u_audio_level: uniforms.level,
-        audioLevel: uniforms.level,
-        beat: uniforms.beat,
-        u_beat: uniforms.beat,
-        audio_beat: uniforms.beat,
-        u_audio_beat: uniforms.beat,
-        audioBeat: uniforms.beat,
-      }
-      for (const [key, val] of Object.entries(audioFieldMap)) {
-        const field = this.uniformLayout.fields[key]
-        if (field) {
-          this.device.queue.writeBuffer(
-            this.uniformBuffer,
-            field.offset,
-            new Float32Array([val]).buffer as ArrayBuffer
+      if (differs) {
+        shadow.set(textureBuffer.subarray(0, 1024))
+        try {
+          this.device.queue.writeTexture(
+            { texture: this.audioTexture },
+            textureBuffer as any,
+            { bytesPerRow: 512, rowsPerImage: 2 },
+            [512, 2, 1]
           )
+          changed = true
+        } catch {
+          // Safe write fallback in headless tests
         }
       }
     }
+
+    // Audio scalars go into the persistent CPU block; the dirty range is flushed with the frame's single write.
+    for (const f of this.frameFields.audio) {
+      if (this.setCpuFloat(f.offset, uniforms[f.key])) changed = true
+    }
+    if (changed) renderCoordinator.requestRender()
   }
 
   updateEnvironment(settings: EnvironmentSettings) {
@@ -631,30 +651,16 @@ export class WebGPUAdapter implements RenderAdapter {
           this.envTexture = tex
           this.updateBindGroup()
           this.updateSkyboxBindGroup()
+          renderCoordinator.requestRender()
         } catch {
           // Safe fallback for mock/headless tests
         }
       }
     }
 
-    if (this.uniformBuffer && this.uniformLayout) {
-      const expField = this.uniformLayout.fields["envExposure"] || this.uniformLayout.fields["u_envExposure"]
-      if (expField) {
-        this.device.queue.writeBuffer(
-          this.uniformBuffer,
-          expField.offset,
-          new Float32Array([settings.exposure]).buffer as ArrayBuffer
-        )
-      }
-      const rotField = this.uniformLayout.fields["envRotation"] || this.uniformLayout.fields["u_envRotation"]
-      if (rotField) {
-        this.device.queue.writeBuffer(
-          this.uniformBuffer,
-          rotField.offset,
-          new Float32Array([(settings.rotation * Math.PI) / 180]).buffer as ArrayBuffer
-        )
-      }
-    }
+    this.setCpuFloat(this.frameFields.envExposure, settings.exposure)
+    this.setCpuFloat(this.frameFields.envRotation, (settings.rotation * Math.PI) / 180)
+    this.flushUniforms()
 
     if (settings.showSkybox) {
       if (!this.skyboxPipeline) {
@@ -701,6 +707,7 @@ export class WebGPUAdapter implements RenderAdapter {
         this.envTexture = tex
         this.updateBindGroup()
         this.updateSkyboxBindGroup()
+        renderCoordinator.requestRender()
       } finally {
         if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
       }
@@ -789,10 +796,10 @@ export class WebGPUAdapter implements RenderAdapter {
     }
   }
 
-  private buildBindGroupEntries(wgslSource?: string): GPUBindGroupEntry[] {
+  private buildBindGroupEntries(wgslSource?: string, uniformBuffer: GPUBuffer | null = this.uniformBuffer): GPUBindGroupEntry[] {
     const entries: GPUBindGroupEntry[] = []
-    if (this.uniformBuffer) {
-      entries.push({ binding: 0, resource: { buffer: this.uniformBuffer } })
+    if (uniformBuffer) {
+      entries.push({ binding: 0, resource: { buffer: uniformBuffer } })
     }
     if (!this.device) return entries
 
@@ -878,6 +885,10 @@ export class WebGPUAdapter implements RenderAdapter {
         pass.bindGroupCache?.clear()
       }
     }
+    // Blur/FXAA/TAA uniforms bake the canvas size: refresh them for the new dimensions.
+    for (const pass of this.postProcessPasses) {
+      if (pass.passType === "blur" || pass.passType === "fxaa" || pass.passType === "taa") this.writePostProcessUniforms(pass)
+    }
     if (this.state.pipelineMode === "deferred") {
       this.initGBuffer(canvasWidth, canvasHeight)
     }
@@ -889,6 +900,10 @@ export class WebGPUAdapter implements RenderAdapter {
     const bufferSize = count * 32 // 32 bytes per particle
 
     this.particleStorageBuffer?.destroy()
+    // Bind groups still reference the buffer being replaced: drop them until the pipelines are rebuilt.
+    this.computePipeline = null
+    this.computeBindGroup = null
+    this.particleRenderBindGroup = null
     this.particleStorageBuffer = this.device.createBuffer({
       size: bufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
@@ -929,47 +944,57 @@ export class WebGPUAdapter implements RenderAdapter {
     this.device.queue.writeBuffer(this.particleStorageBuffer, 0, data)
   }
 
+  /** Builds the compute pipeline into locals; the previous pipeline keeps running until the new one validates. */
   private setupComputePipeline(source: string) {
     if (!this.device || !this.particleStorageBuffer) return
-    try {
-      this.currentComputeSource = source
-      const computeModule = this.device.createShaderModule({ code: source })
-
-      if (!this.simUniformBuffer) {
-        this.simUniformBuffer = this.device.createBuffer({
+    const gen = ++this.computeCompileGen
+    const device = this.device
+    const storage = this.particleStorageBuffer
+    this.compileChecked<{ simBuffer: GPUBuffer; created: boolean; bindGroup: GPUBindGroup; pipeline: GPUComputePipeline }>(
+      (dev) => {
+        const module = dev.createShaderModule({ code: source })
+        const created = !this.simUniformBuffer
+        const simBuffer = this.simUniformBuffer ?? dev.createBuffer({
           size: 48,
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
           label: "SimUniformBuffer",
         })
-      }
-
-      const computeBindGroupLayout = this.device.createBindGroupLayout({
-        entries: [
-          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-          { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        ],
-      })
-
-      this.computeBindGroup = this.device.createBindGroup({
-        layout: computeBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this.simUniformBuffer } },
-          { binding: 1, resource: { buffer: this.particleStorageBuffer } },
-        ],
-      })
-
-      const pipelineLayout = this.device.createPipelineLayout({
-        bindGroupLayouts: [computeBindGroupLayout],
-      })
-
-      this.computePipeline = this.device.createComputePipeline({
-        layout: pipelineLayout,
-        compute: { module: computeModule, entryPoint: "main" },
-      })
-    } catch (err: any) {
-      console.warn("Compute pipeline compilation error:", err)
-      useProjectStore.getState().setLastCompileError(err?.message || "Compute shader compilation failed")
-    }
+        const bindGroupLayout = dev.createBindGroupLayout({
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          ],
+        })
+        const bindGroup = dev.createBindGroup({
+          layout: bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: simBuffer } },
+            { binding: 1, resource: { buffer: storage } },
+          ],
+        })
+        const pipeline = dev.createComputePipeline({
+          layout: dev.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+          compute: { module, entryPoint: "main" },
+        })
+        return { value: { simBuffer, created, bindGroup, pipeline }, module }
+      },
+      () => gen !== this.computeCompileGen || this.device !== device || this.particleStorageBuffer !== storage,
+      (v) => {
+        this.simUniformBuffer = v.simBuffer
+        this.computeBindGroup = v.bindGroup
+        this.computePipeline = v.pipeline
+        this.currentComputeSource = source
+        this.failedComputeSource = null
+        renderCoordinator.requestRender()
+      },
+      (v, err) => {
+        if (v?.created && v.simBuffer !== this.simUniformBuffer) { try { v.simBuffer.destroy() } catch {} }
+        if (err === null) return
+        this.failedComputeSource = source
+        console.warn("Compute pipeline compilation error:", err)
+        useProjectStore.getState().setLastCompileError(err || "Compute shader compilation failed")
+      },
+    )
   }
 
   private setupParticleRenderPipeline() {
@@ -1059,6 +1084,31 @@ export class WebGPUAdapter implements RenderAdapter {
     }
   }
 
+  /**
+   * TODO(W4): the shadow depth pass is invalid today (it reuses the colour pipeline inside a depth-only pass),
+   * so it can never run: `shadowPassReady` stays false until W4 builds a depth-only shadow pipeline + light MVP.
+   */
+  private encodeShadowPass(encoder: GPUCommandEncoder, vertexBuffer: GPUBuffer, vertexCount: number) {
+    if (!this.shadowPassReady || !this.shadowSettings?.enabled || !this.shadowDepthTex || !this.pipeline || !this.bindGroup) return
+    const shadowPass = encoder.beginRenderPass({
+      label: "ShadowDepthPass",
+      colorAttachments: [],
+      depthStencilAttachment: {
+        view: this.shadowDepthTex.createView(),
+        depthClearValue: 1.0,
+        depthLoadOp: "clear",
+        depthStoreOp: "store",
+      },
+    })
+    shadowPass.setPipeline(this.pipeline)
+    shadowPass.setBindGroup(0, this.bindGroup)
+    shadowPass.setVertexBuffer(0, vertexBuffer)
+    shadowPass.draw(vertexCount)
+    shadowPass.end()
+    this.statDraws++
+    this.statTriangles += vertexCount / 3
+  }
+
   renderFrame(time: number, delta: number = 16) {
     if (!this.initialized || !this.canvas || !this.device || !this.context) return
     this.frameCount++
@@ -1068,27 +1118,22 @@ export class WebGPUAdapter implements RenderAdapter {
       this.lastFrameTime = time
       if (this.onPerfUpdate) this.onPerfUpdate({ fps: this.fps, frameTime: 1000 / (this.fps || 1), timestamp: time })
     }
-    this.angleX += 0.01
-    this.angleY += 0.015
+    this.statDraws = 0
+    this.statTriangles = 0
+    // Mesh rotation is a pure function of playback time (0.6 / 0.9 rad/s): pause, seek and recording are deterministic.
+    const seconds = time / 1000
+    this.angleX = seconds * 0.6
+    this.angleY = seconds * 0.9
     const aspect = this.canvas.width / (this.canvas.height || 1)
     setPerspectiveMatrixWebGPU(this.projMatrix, Math.PI / 4, aspect, 0.1, 100)
-    setLookAtMatrix(this.viewMatrix, [0, 2, 4], [0, 0, 0], [0, 1, 0])
+    setLookAtMatrix(this.viewMatrix, CAM_EYE, CAM_TARGET, CAM_UP)
     if (this.state.postProcessState.taa.enabled) {
-      this.taaFrameIndex = (this.taaFrameIndex + 1) % 16
-      const halton = (index: number, base: number) => {
-        let f = 1
-        let r = 0
-        let i = index
-        while (i > 0) {
-          f /= base
-          r += f * (i % base)
-          i = Math.floor(i / base)
-        }
-        return r
-      }
+      this.taaFrameIndex = Math.floor(time / (1000 / 60)) % 16
       const jitterX = (halton(this.taaFrameIndex + 1, 2) - 0.5) / this.canvas.width
       const jitterY = (halton(this.taaFrameIndex + 1, 3) - 0.5) / this.canvas.height
-      this.state.postProcessState.taa.jitterSample = [jitterX, jitterY]
+      const jitter = this.state.postProcessState.taa.jitterSample
+      jitter[0] = jitterX
+      jitter[1] = jitterY
       this.projMatrix[8] += jitterX * 2.0
       this.projMatrix[9] += jitterY * 2.0
     }
@@ -1096,17 +1141,26 @@ export class WebGPUAdapter implements RenderAdapter {
     multiplyMatricesInto(this.tempMatrix, this.viewMatrix, this.rotMatrix)
     multiplyMatricesInto(this.mvpMatrix, this.projMatrix, this.tempMatrix)
 
-    // Update per-frame uniforms (mvp and time only, without stomping other uniforms)
-    if (this.uniformBuffer && this.uniformLayout) {
-      const mvpField = this.uniformLayout.fields["mvp"] || this.uniformLayout.fields["u_mvp"]
-      if (mvpField) {
-        this.device.queue.writeBuffer(this.uniformBuffer, mvpField.offset, this.mvpMatrix.buffer as ArrayBuffer)
+    // Per-frame uniforms (mvp + time) go into the persistent CPU block; everything dirty (plus any audio writes)
+    // leaves in ONE writeBuffer. Unchanged values (paused) cost no GPU write.
+    if (this.uniformBuffer && this.cpuUniformBuffer) {
+      const mvp = this.mvpView
+      if (mvp) {
+        const src = this.mvpMatrix
+        let differs = false
+        for (let i = 0; i < 16; i++) {
+          if (mvp[i] !== src[i]) { differs = true; break }
+        }
+        if (differs) {
+          mvp.set(src)
+          this.markUniformDirty(this.frameFields.mvp, 64)
+        }
       }
-      const timeField = this.uniformLayout.fields["time"] || this.uniformLayout.fields["u_time"]
-      if (timeField) {
-        this.timeArray[0] = time / 1000
-        this.device.queue.writeBuffer(this.uniformBuffer, timeField.offset, this.timeArray.buffer as ArrayBuffer)
+      if (this.timeView && this.timeView[0] !== Math.fround(seconds)) {
+        this.timeView[0] = seconds
+        this.markUniformDirty(this.frameFields.time, 4)
       }
+      this.flushUniforms()
     }
 
     const geometry = this.currentGeometry
@@ -1117,30 +1171,16 @@ export class WebGPUAdapter implements RenderAdapter {
     if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup && this.skyboxUniformBuffer && this.canvas) {
       const halfTan = Math.tan(Math.PI / 8)
       const V = this.viewMatrix
-
-      const camRightX = V[0] * aspect * halfTan
-      const camRightY = V[4] * aspect * halfTan
-      const camRightZ = V[8] * aspect * halfTan
-
-      const camUpX = V[1] * halfTan
-      const camUpY = V[5] * halfTan
-      const camUpZ = V[9] * halfTan
-
-      const camFwdX = -V[2]
-      const camFwdY = -V[6]
-      const camFwdZ = -V[10]
-
       const rotRad = ((this.envSettings.rotation || 0) * Math.PI) / 180
       const blur = this.envSettings.backgroundBlur || 0.0
       const exposure = this.envSettings.exposure ?? 1.0
 
-      const skyboxData = new Float32Array([
-        camRightX, camRightY, camRightZ, aspect,
-        camUpX, camUpY, camUpZ, 0,
-        camFwdX, camFwdY, camFwdZ, 0,
-        rotRad, blur, exposure, 0,
-      ])
-      this.device.queue.writeBuffer(this.skyboxUniformBuffer, 0, skyboxData)
+      const sky = this.skyboxArray
+      sky[0] = V[0] * aspect * halfTan; sky[1] = V[4] * aspect * halfTan; sky[2] = V[8] * aspect * halfTan; sky[3] = aspect
+      sky[4] = V[1] * halfTan; sky[5] = V[5] * halfTan; sky[6] = V[9] * halfTan; sky[7] = 0
+      sky[8] = -V[2]; sky[9] = -V[6]; sky[10] = -V[10]; sky[11] = 0
+      sky[12] = rotRad; sky[13] = blur; sky[14] = exposure; sky[15] = 0
+      this.device.queue.writeBuffer(this.skyboxUniformBuffer, 0, sky)
     }
 
     const commandEncoder = this.device.createCommandEncoder()
@@ -1149,35 +1189,38 @@ export class WebGPUAdapter implements RenderAdapter {
     const targetView = usePostProcess
       ? this.pingPong!.getCurrent()!
       : textureView
+    const skybox = !!(this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup)
 
     if (this.hasCompute && this.computePipeline && this.computeBindGroup && this.particleStorageBuffer && this.particleRenderPipeline && this.particleRenderBindGroup) {
-      // 1. Dispatch Compute Pass
-      this.simDataArray[0] = delta > 0 ? delta / 1000 : 0.016
-      this.simDataArray[1] = time / 1000
-      this.simDataArray[2] = this.simParams.speed
-      this.simDataArray[3] = this.simParams.damping
-      this.simDataArray[4] = this.simParams.strength
-      this.simDataArray[5] = this.particleCount
-      this.simDataArray[6] = this.simParams.noiseScale
-      this.simDataArray[7] = this.simParams.reset
-      this.simDataArray[8] = this.audioUniforms.bass
-      this.simDataArray[9] = this.audioUniforms.mid
-      this.simDataArray[10] = this.audioUniforms.treble
-      this.simDataArray[11] = this.audioUniforms.beat
+      // 1. Compute pass: skipped while paused (delta === 0) so the simulation is frozen, except to honour a reseed.
+      if (delta > 0 || this.simParams.reset > 0) {
+        this.simDataArray[0] = delta > 0 ? delta / 1000 : 0
+        this.simDataArray[1] = seconds
+        this.simDataArray[2] = this.simParams.speed
+        this.simDataArray[3] = this.simParams.damping
+        this.simDataArray[4] = this.simParams.strength
+        this.simDataArray[5] = this.particleCount
+        this.simDataArray[6] = this.simParams.noiseScale
+        this.simDataArray[7] = this.simParams.reset
+        this.simDataArray[8] = this.audioUniforms.bass
+        this.simDataArray[9] = this.audioUniforms.mid
+        this.simDataArray[10] = this.audioUniforms.treble
+        this.simDataArray[11] = this.audioUniforms.beat
 
-      if (this.simUniformBuffer) {
-        this.device.queue.writeBuffer(this.simUniformBuffer, 0, this.simDataArray)
-      }
-      if (this.simParams.reset > 0) {
-        this.simParams.reset = 0.0
-      }
+        if (this.simUniformBuffer) {
+          this.device.queue.writeBuffer(this.simUniformBuffer, 0, this.simDataArray)
+        }
+        if (this.simParams.reset > 0) {
+          this.simParams.reset = 0.0
+        }
 
-      const computePass = commandEncoder.beginComputePass({ label: "ParticleSimComputePass" })
-      computePass.setPipeline(this.computePipeline)
-      computePass.setBindGroup(0, this.computeBindGroup)
-      const workgroups = Math.ceil(this.particleCount / 64)
-      computePass.dispatchWorkgroups(workgroups)
-      computePass.end()
+        const computePass = commandEncoder.beginComputePass({ label: "ParticleSimComputePass" })
+        computePass.setPipeline(this.computePipeline)
+        computePass.setBindGroup(0, this.computeBindGroup)
+        const workgroups = Math.ceil(this.particleCount / 64)
+        computePass.dispatchWorkgroups(workgroups)
+        computePass.end()
+      }
 
       // 2. Render Pass for Particles
       if (this.particleRenderUniformBuffer) {
@@ -1191,15 +1234,19 @@ export class WebGPUAdapter implements RenderAdapter {
         colorAttachments: [{ view: targetView, clearValue: { r: 0.02, g: 0.02, b: 0.04, a: 1 }, loadOp: "clear", storeOp: "store" }],
         depthStencilAttachment: { view: this.depthTextureView!, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" },
       })
-      if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup) {
-        renderPass.setPipeline(this.skyboxPipeline)
-        renderPass.setBindGroup(0, this.skyboxBindGroup)
+      if (skybox) {
+        renderPass.setPipeline(this.skyboxPipeline!)
+        renderPass.setBindGroup(0, this.skyboxBindGroup!)
         renderPass.draw(3)
+        this.statDraws++
+        this.statTriangles++
       }
       renderPass.setPipeline(this.particleRenderPipeline)
       renderPass.setBindGroup(0, this.particleRenderBindGroup)
       renderPass.draw(6, this.particleCount, 0, 0)
       renderPass.end()
+      this.statDraws++
+      this.statTriangles += 2 * this.particleCount
     } else if (vertexBuffer && this.pipeline && this.bindGroup) {
       if (this.state.pipelineMode === "deferred") {
         if (!this.gBufferAlbedoTex || !this.gBufferNormalTex || !this.gBufferRoughnessTex || !this.gBufferDepthTex || !this.gBufferMotionTex) {
@@ -1209,51 +1256,39 @@ export class WebGPUAdapter implements RenderAdapter {
           this.initDeferredLightingPipeline()
         }
 
-        // 1. Directional Light Shadow Depth Render Pass
-        if (this.shadowSettings?.enabled && this.shadowDepthTex) {
-          const shadowPass = commandEncoder.beginRenderPass({
-            label: "ShadowDepthPass",
-            colorAttachments: [],
-            depthStencilAttachment: {
-              view: this.shadowDepthTex.createView(),
-              depthClearValue: 1.0,
-              depthLoadOp: "clear",
-              depthStoreOp: "store",
-            },
-          })
-          shadowPass.setPipeline(this.pipeline)
-          shadowPass.setBindGroup(0, this.bindGroup)
-          shadowPass.setVertexBuffer(0, vertexBuffer)
-          shadowPass.draw(vertexCount)
-          shadowPass.end()
-        }
+        // 1. Directional Light Shadow Depth Render Pass (guarded, see encodeShadowPass)
+        this.encodeShadowPass(commandEncoder, vertexBuffer, vertexCount)
 
         // 2. GBuffer Geometry Pass
         const gBufferPass = commandEncoder.beginRenderPass({
           label: "GBufferGeometryPass",
           colorAttachments: [
-            { view: this.gBufferAlbedoTex!.createView(), clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, loadOp: "clear", storeOp: "store" },
-            { view: this.gBufferNormalTex!.createView(), clearValue: { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
-            { view: this.gBufferRoughnessTex!.createView(), clearValue: { r: 0.5, g: 0.0, b: 0.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
-            { view: this.gBufferMotionTex!.createView(), clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
+            { view: this.gBufferViews!.albedo, clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, loadOp: "clear", storeOp: "store" },
+            { view: this.gBufferViews!.normal, clearValue: { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
+            { view: this.gBufferViews!.roughness, clearValue: { r: 0.5, g: 0.0, b: 0.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
+            { view: this.gBufferViews!.motion, clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, loadOp: "clear", storeOp: "store" },
           ],
           depthStencilAttachment: {
-            view: this.gBufferDepthTex!.createView(),
+            view: this.gBufferViews!.depth,
             depthClearValue: 1.0,
             depthLoadOp: "clear",
             depthStoreOp: "store",
           },
         })
-        if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup) {
-          gBufferPass.setPipeline(this.skyboxPipeline)
-          gBufferPass.setBindGroup(0, this.skyboxBindGroup)
+        if (skybox) {
+          gBufferPass.setPipeline(this.skyboxPipeline!)
+          gBufferPass.setBindGroup(0, this.skyboxBindGroup!)
           gBufferPass.draw(3)
+          this.statDraws++
+          this.statTriangles++
         }
         gBufferPass.setPipeline(this.deferredGeometryPipeline || this.pipeline)
         gBufferPass.setBindGroup(0, this.bindGroup)
         gBufferPass.setVertexBuffer(0, vertexBuffer)
         gBufferPass.draw(vertexCount)
         gBufferPass.end()
+        this.statDraws++
+        this.statTriangles += vertexCount / 3
 
         // 3. Fullscreen Deferred Lighting Pass
         this.updateDeferredLightingUniforms()
@@ -1270,41 +1305,31 @@ export class WebGPUAdapter implements RenderAdapter {
           lightingPass.setPipeline(this.deferredLightingPipeline)
           lightingPass.setBindGroup(0, this.deferredLightingBindGroup)
           lightingPass.draw(3)
+          this.statDraws++
+          this.statTriangles++
         }
         lightingPass.end()
       } else {
-        if (this.shadowSettings?.enabled && this.shadowDepthTex) {
-          const shadowPass = commandEncoder.beginRenderPass({
-            label: "ShadowDepthPass",
-            colorAttachments: [],
-            depthStencilAttachment: {
-              view: this.shadowDepthTex.createView(),
-              depthClearValue: 1.0,
-              depthLoadOp: "clear",
-              depthStoreOp: "store",
-            },
-          })
-          shadowPass.setPipeline(this.pipeline)
-          shadowPass.setBindGroup(0, this.bindGroup)
-          shadowPass.setVertexBuffer(0, vertexBuffer)
-          shadowPass.draw(vertexCount)
-          shadowPass.end()
-        }
+        this.encodeShadowPass(commandEncoder, vertexBuffer, vertexCount)
 
         const renderPass = commandEncoder.beginRenderPass({
           colorAttachments: [{ view: targetView, clearValue: { r: 0.08, g: 0.08, b: 0.1, a: 1 }, loadOp: "clear", storeOp: "store" }],
           depthStencilAttachment: { view: this.depthTextureView!, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" },
         })
-        if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup) {
-          renderPass.setPipeline(this.skyboxPipeline)
-          renderPass.setBindGroup(0, this.skyboxBindGroup)
+        if (skybox) {
+          renderPass.setPipeline(this.skyboxPipeline!)
+          renderPass.setBindGroup(0, this.skyboxBindGroup!)
           renderPass.draw(3)
+          this.statDraws++
+          this.statTriangles++
         }
         renderPass.setPipeline(this.pipeline)
         renderPass.setBindGroup(0, this.bindGroup)
         renderPass.setVertexBuffer(0, vertexBuffer)
         renderPass.draw(vertexCount)
         renderPass.end()
+        this.statDraws++
+        this.statTriangles += vertexCount / 3
       }
     }
 
@@ -1329,16 +1354,16 @@ export class WebGPUAdapter implements RenderAdapter {
             bindEntries.push({ binding: 2, resource: { buffer: pass.uniformBuffer } })
           }
           if (pass.passType === "ssao" || pass.passType === "ssr") {
-            const depthV = this.gBufferDepthTex?.createView() || this.depthTextureView || this.defaultTexture!.createView()
-            const normV = this.gBufferNormalTex?.createView() || this.defaultTexture!.createView()
+            const depthV = this.gBufferViews?.depth || this.depthTextureView || this.defaultTexture!.createView()
+            const normV = this.gBufferViews?.normal || this.defaultTexture!.createView()
             bindEntries.push({ binding: 3, resource: depthV })
             bindEntries.push({ binding: 4, resource: normV })
           } else if (pass.passType === "dof") {
-            const depthV = this.gBufferDepthTex?.createView() || this.depthTextureView || this.defaultTexture!.createView()
+            const depthV = this.gBufferViews?.depth || this.depthTextureView || this.defaultTexture!.createView()
             bindEntries.push({ binding: 3, resource: depthV })
           } else if (pass.passType === "taa") {
             const histV = this.defaultTexture!.createView()
-            const motV = this.gBufferMotionTex?.createView() || this.defaultTexture!.createView()
+            const motV = this.gBufferViews?.motion || this.defaultTexture!.createView()
             bindEntries.push({ binding: 3, resource: histV })
             bindEntries.push({ binding: 4, resource: motV })
           }
@@ -1356,6 +1381,8 @@ export class WebGPUAdapter implements RenderAdapter {
         ppPass.setBindGroup(0, passBindGroup)
         ppPass.draw(6)
         ppPass.end()
+        this.statDraws++
+        this.statTriangles += 2
 
         if (!isFinal) {
           this.pingPong!.swap()
@@ -1364,6 +1391,9 @@ export class WebGPUAdapter implements RenderAdapter {
     }
 
     this.device.queue.submit([commandEncoder.finish()])
+    this.frameStats.drawCalls = this.statDraws
+    this.frameStats.triangles = this.statTriangles
+    performanceTelemetry.reportFrameStats(this.frameStats)
   }
 
   setExternalLoopDriven(external: boolean) {
@@ -1392,13 +1422,15 @@ export class WebGPUAdapter implements RenderAdapter {
   }
 
   setRenderQueue(queue: RenderQueue | null) {
-    if (!queue || queue.length === 0) return
+    // An empty/null queue is a real state (graph emptied): reset every flag it could leave stuck on.
+    const steps = queue ?? []
     this.hasPostProcess = false
     this.queueTextures = []
+    this.textureBindings = {}
     let foundCompute = false
-    const ppSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
+    const ppSteps: PostProcessStep[] = []
 
-    for (const step of queue) {
+    for (const step of steps) {
       if (step.type === "mesh") {
         this.currentGeometry = step.geometry as GeometryKey
         this.ensureGeometryBuffer(this.currentGeometry)
@@ -1420,7 +1452,7 @@ export class WebGPUAdapter implements RenderAdapter {
             this.initializeParticleStorage(count, preset)
             this.setupComputePipeline(code)
             this.setupParticleRenderPipeline()
-          } else if (this.currentComputeSource !== code) {
+          } else if (this.currentComputeSource !== code && this.failedComputeSource !== code) {
             this.setupComputePipeline(code)
           }
         }
@@ -1450,17 +1482,104 @@ export class WebGPUAdapter implements RenderAdapter {
     if (!foundCompute) {
       this.hasCompute = false
     }
+    this.pruneTextures()
     if (this.hasPostProcess && this.device && this.canvas) {
       if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device, this.format)
       this.pingPong.resize(this.canvas.width, this.canvas.height)
-      this.rebuildPostProcessPasses(ppSteps)
+      this.syncPostProcessPasses(ppSteps)
     } else {
+      this.postProcessSignature = ""
       this.cleanupPostProcessPasses()
     }
     this.updateBindGroup()
   }
 
-  private rebuildPostProcessPasses(steps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }>) {
+  /** Destroys graph textures that are no longer referenced by the render queue. */
+  private pruneTextures() {
+    const wanted = new Set(this.queueTextures.map(t => t.id))
+    for (const [id, tex] of this.textureResources) {
+      if (wanted.has(id)) continue
+      try { tex.destroy() } catch {}
+      this.textureResources.delete(id)
+    }
+  }
+
+  /** Rebuilds the post chain only when its structure changed; value-only changes just rewrite the pass uniforms. */
+  private syncPostProcessPasses(steps: PostProcessStep[]) {
+    const signature = JSON.stringify(steps.map(s => [s.id, s.pass, s.customSource ?? ""]))
+    if (signature !== this.postProcessSignature || this.postProcessPasses.length === 0) {
+      this.postProcessSignature = signature
+      this.rebuildPostProcessPasses(steps)
+      return
+    }
+    for (let i = 0; i < steps.length; i++) {
+      const pass = this.postProcessPasses.find(p => p.id === steps[i].id)
+      if (!pass) continue
+      const next = steps[i].uniforms
+      let changed = false
+      for (const k of Object.keys(next)) {
+        if (!Object.is(pass.uniformValues[k], next[k]) && JSON.stringify(pass.uniformValues[k]) !== JSON.stringify(next[k])) { changed = true; break }
+      }
+      if (changed) {
+        pass.uniformValues = { ...next }
+        this.writePostProcessUniforms(pass)
+      }
+    }
+  }
+
+  /** Packs a pass's vec4 uniform block into the shared scratch array and uploads it (canvas size read live). */
+  private writePostProcessUniforms(pass: WebGPUPostProcessPass) {
+    if (!this.device || !pass.uniformBuffer) return
+    const u = pass.uniformValues
+    const n = (v: unknown, d: number) => { const x = Number(Array.isArray(v) ? v[0] : v); return Number.isFinite(x) ? x : d }
+    const out = this.ppScratch
+    out.fill(0)
+    switch (pass.passType) {
+      case "vignette":
+        out[0] = n(u.intensity ?? u.u_vignetteIntensity, 0.5)
+        out[1] = n(u.radius ?? u.u_vignetteRadius, 0.8)
+        break
+      case "blur":
+        out[0] = this.canvas?.width || 800
+        out[1] = this.canvas?.height || 600
+        out[2] = n(u.amount ?? u.u_blurAmount, 2.0)
+        break
+      case "chromatic_aberration":
+        out[0] = n(u.offset ?? u.u_aberrationOffset, 0.008)
+        break
+      case "bloom":
+        out[0] = n(u.threshold ?? u.u_bloomThreshold, 0.7)
+        out[1] = n(u.intensity ?? u.u_bloomIntensity, 0.5)
+        break
+      case "ssao":
+        out[0] = n(u.radius ?? u.u_radius, 0.5)
+        out[1] = n(u.intensity ?? u.u_intensity, 1.5)
+        out[2] = n(u.sampleCount ?? u.u_sampleCount, 16)
+        out[3] = n(u.bias ?? u.u_bias, 0.025)
+        break
+      case "dof":
+        out[0] = n(u.focalDistance ?? u.u_focalDistance, 5.0)
+        out[1] = n(u.aperture ?? u.u_aperture, 0.05)
+        out[2] = n(u.maxBlur ?? u.u_maxBlur, 1.0)
+        break
+      case "fxaa":
+      case "taa":
+        out[0] = 1.0 / (this.canvas?.width || 800)
+        out[1] = 1.0 / (this.canvas?.height || 600)
+        break
+      case "ssr":
+        out[0] = n(u.maxSteps ?? u.u_maxSteps, 64)
+        out[1] = n(u.thickness ?? u.u_thickness, 0.02)
+        out[2] = n(u.falloff ?? u.u_falloff, 0.8)
+        out[3] = n(u.iblBlend ?? u.u_iblBlend, 0.5)
+        break
+      default:
+        return
+    }
+    this.device.queue.writeBuffer(pass.uniformBuffer, 0, out)
+  }
+
+  private rebuildPostProcessPasses(steps: PostProcessStep[]) {
     if (!this.device) return
     this.cleanupPostProcessPasses()
 
@@ -1473,6 +1592,7 @@ export class WebGPUAdapter implements RenderAdapter {
       })
     }
 
+    const withUniforms: PostProcessPassType[] = ["vignette", "blur", "chromatic_aberration", "bloom", "ssao", "dof", "fxaa", "taa", "ssr"]
     for (const step of steps) {
       try {
         let code = passthroughWgsl
@@ -1491,78 +1611,9 @@ export class WebGPUAdapter implements RenderAdapter {
         }
 
         const shaderModule = this.device.createShaderModule({ code })
-        let uniformBuffer: GPUBuffer | null = null
-
-        if (step.pass === "vignette") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_vignetteIntensity ?? 0.5)
-          const radius = Number(step.uniforms.radius ?? step.uniforms.u_vignetteRadius ?? 0.8)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([intensity, radius, 0, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "blur") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const w = this.canvas?.width || 800
-          const h = this.canvas?.height || 600
-          const amount = Number(step.uniforms.amount ?? step.uniforms.u_blurAmount ?? 2.0)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([w, h, amount, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "chromatic_aberration") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const offset = Number(step.uniforms.offset ?? step.uniforms.u_aberrationOffset ?? 0.008)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([offset, 0, 0, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "bloom") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const threshold = Number(step.uniforms.threshold ?? step.uniforms.u_bloomThreshold ?? 0.7)
-          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_bloomIntensity ?? 0.5)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([threshold, intensity, 0, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "ssao") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const radius = Number(step.uniforms.radius ?? step.uniforms.u_radius ?? 0.5)
-          const intensity = Number(step.uniforms.intensity ?? step.uniforms.u_intensity ?? 1.5)
-          const sampleCount = Number(step.uniforms.sampleCount ?? step.uniforms.u_sampleCount ?? 16)
-          const bias = Number(step.uniforms.bias ?? step.uniforms.u_bias ?? 0.025)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([radius, intensity, sampleCount, bias]).buffer as ArrayBuffer)
-        } else if (step.pass === "dof") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const focalDistance = Number(step.uniforms.focalDistance ?? step.uniforms.u_focalDistance ?? 5.0)
-          const aperture = Number(step.uniforms.aperture ?? step.uniforms.u_aperture ?? 0.05)
-          const maxBlur = Number(step.uniforms.maxBlur ?? step.uniforms.u_maxBlur ?? 1.0)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([focalDistance, aperture, maxBlur, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "fxaa" || step.pass === "taa") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const w = this.canvas?.width || 800
-          const h = this.canvas?.height || 600
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([1.0 / w, 1.0 / h, 0, 0]).buffer as ArrayBuffer)
-        } else if (step.pass === "ssr") {
-          uniformBuffer = this.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          })
-          const maxSteps = Number(step.uniforms.maxSteps ?? step.uniforms.u_maxSteps ?? 64)
-          const thickness = Number(step.uniforms.thickness ?? step.uniforms.u_thickness ?? 0.02)
-          const falloff = Number(step.uniforms.falloff ?? step.uniforms.u_falloff ?? 0.8)
-          const iblBlend = Number(step.uniforms.iblBlend ?? step.uniforms.u_iblBlend ?? 0.5)
-          this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([maxSteps, thickness, falloff, iblBlend]).buffer as ArrayBuffer)
-        }
+        const uniformBuffer: GPUBuffer | null = withUniforms.includes(step.pass)
+          ? this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+          : null
 
         const entries: GPUBindGroupLayoutEntry[] = [
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
@@ -1589,7 +1640,7 @@ export class WebGPUAdapter implements RenderAdapter {
           primitive: { topology: "triangle-list" },
         })
 
-        this.postProcessPasses.push({
+        const pass: WebGPUPostProcessPass = {
           id: step.id,
           passType: step.pass,
           pipeline,
@@ -1597,7 +1648,9 @@ export class WebGPUAdapter implements RenderAdapter {
           uniformBuffer,
           uniformValues: { ...step.uniforms },
           bindGroupCache: new Map(),
-        })
+        }
+        this.writePostProcessUniforms(pass)
+        this.postProcessPasses.push(pass)
       } catch (e) {
         console.error("Failed to compile post-process pass:", step.pass, e)
       }
@@ -1615,14 +1668,16 @@ export class WebGPUAdapter implements RenderAdapter {
   private async loadTexture(textureId: string) {
     if (!this.device || !this.initialized) return
     const textureResource = useProjectStore.getState().textureResources.find(t => t.id === textureId)
-    if (!textureResource || this.textureResources.has(textureId)) return
+    if (!textureResource || this.textureResources.has(textureId) || this.loadingTextures.has(textureId)) return
+    this.loadingTextures.add(textureId)
     try {
       const response = await fetch(textureResource.src)
       if (!this.device || !this.initialized) return
       const blob = await response.blob()
       if (!this.device || !this.initialized) return
       const bitmap = await createImageBitmap(blob)
-      if (!this.device || !this.initialized) {
+      if (!this.device || !this.initialized || !this.queueTextures.some(t => t.id === textureId)) {
+        // Adapter went away or the node left the graph while the image was loading.
         if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
         return
       }
@@ -1635,32 +1690,59 @@ export class WebGPUAdapter implements RenderAdapter {
         this.device.queue.copyExternalImageToTexture({ source: bitmap }, { texture }, [bitmap.width, bitmap.height])
         this.textureResources.set(textureId, texture)
         this.updateBindGroup()
+        renderCoordinator.requestRender()
       } finally {
         if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
       }
     } catch (e) {
       if (this.initialized) console.error("Failed to load texture:", e)
+    } finally {
+      this.loadingTextures.delete(textureId)
     }
   }
 
+  /**
+   * Compiles `wgslSource` into fresh objects (module, pipeline, uniform block, bind group). Only a valid result
+   * replaces the live ones (and destroys the old uniform buffer); on a compile error the previous pipeline keeps
+   * rendering and the error (`:line:col error: message`) is published for the editor diagnostics.
+   */
   recompileShader(wgslSource: string) {
     if (!this.device || !this.initialized) return
-    try {
-      this.currentShaderSource = wgslSource
-      this.setupDynamicUniformBuffer(wgslSource)
-      const shaderModule = this.device.createShaderModule({ code: wgslSource })
-      const newPipeline = this.device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: shaderModule, entryPoint: "vertex_main", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }] },
-        fragment: { module: shaderModule, entryPoint: "fragment_main", targets: [{ format: this.format }] },
-        primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
-      })
-      const newBindGroup = this.device.createBindGroup({ layout: newPipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgslSource) })
-      this.pipeline = newPipeline
-      this.bindGroup = newBindGroup
-      useProjectStore.getState().setLastCompileError(null)
-    } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(msg) }
+    const device = this.device
+    const gen = ++this.renderCompileGen
+    this.compileChecked<{ res: UniformResources; pipeline: GPURenderPipeline; bindGroup: GPUBindGroup }>(
+      (dev) => {
+        const res = this.buildUniformResources(wgslSource)
+        try {
+          const module = dev.createShaderModule({ code: wgslSource })
+          const pipeline = dev.createRenderPipeline({
+            layout: "auto",
+            vertex: { module, entryPoint: "vertex_main", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }] },
+            fragment: { module, entryPoint: "fragment_main", targets: [{ format: this.format }] },
+            primitive: { topology: "triangle-list", cullMode: "none" },
+            depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+          })
+          const bindGroup = dev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgslSource, res.buffer) })
+          return { value: { res, pipeline, bindGroup }, module }
+        } catch (e) {
+          try { res.buffer.destroy() } catch {}
+          throw e
+        }
+      },
+      () => gen !== this.renderCompileGen || this.device !== device || !this.initialized,
+      (v) => {
+        this.currentShaderSource = wgslSource
+        this.applyUniformResources(v.res)
+        this.pipeline = v.pipeline
+        this.bindGroup = v.bindGroup
+        useProjectStore.getState().setLastCompileError(null)
+        renderCoordinator.requestRender()
+      },
+      (v, err) => {
+        if (v) { try { v.res.buffer.destroy() } catch {} }
+        if (err !== null) useProjectStore.getState().setLastCompileError(err)
+      },
+    )
   }
 
   updateUniform(name: string, value: UniformValue) {
@@ -1669,10 +1751,8 @@ export class WebGPUAdapter implements RenderAdapter {
     this.cachedUniformValues.set(name, value)
     if (!this.device || !this.uniformBuffer || !this.uniformLayout || !this.cpuUniformBuffer) return
 
-    const field = this.getFieldLayout(name)
+    const field = this.writeUniformToCpuBuffer(name, value)
     if (!field) return
-
-    this.writeUniformToCpuBuffer(name, value)
     this.device.queue.writeBuffer(this.uniformBuffer, field.offset, this.cpuUniformBuffer, field.offset, field.size)
   }
 
@@ -1681,41 +1761,14 @@ export class WebGPUAdapter implements RenderAdapter {
     const pass = this.postProcessPasses.find(p => p.id === nodeId || p.passType === nodeId)
     if (!pass || !pass.uniformBuffer) return
     pass.uniformValues[name] = value
-
+    pass.uniformValues[name.replace(/^u_/, "")] = value
+    const lower = name.toLowerCase()
+    for (const key of ["intensity", "radius", "threshold"]) if (lower.includes(key)) pass.uniformValues[key] = value
+    // blur/chromatic nodes expose a single value whatever it is named.
     const val = typeof value === "number" ? value : Number(value[0]) || 0
-    switch (pass.passType) {
-      case "vignette": {
-        const intensity = name.includes("Intensity") || name === "intensity"
-          ? val
-          : Number(pass.uniformValues.intensity ?? pass.uniformValues.u_vignetteIntensity ?? 0.5)
-        const radius = name.includes("Radius") || name === "radius"
-          ? val
-          : Number(pass.uniformValues.radius ?? pass.uniformValues.u_vignetteRadius ?? 0.8)
-        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([intensity, radius, 0, 0]).buffer as ArrayBuffer)
-        break
-      }
-      case "blur": {
-        const amount = val
-        const w = this.canvas?.width || 800
-        const h = this.canvas?.height || 600
-        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([w, h, amount, 0]).buffer as ArrayBuffer)
-        break
-      }
-      case "chromatic_aberration": {
-        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([val, 0, 0, 0]).buffer as ArrayBuffer)
-        break
-      }
-      case "bloom": {
-        const threshold = name.includes("Threshold") || name === "threshold"
-          ? val
-          : Number(pass.uniformValues.threshold ?? pass.uniformValues.u_bloomThreshold ?? 0.7)
-        const intensity = name.includes("Intensity") || name === "intensity"
-          ? val
-          : Number(pass.uniformValues.intensity ?? pass.uniformValues.u_bloomIntensity ?? 0.5)
-        this.device.queue.writeBuffer(pass.uniformBuffer, 0, new Float32Array([threshold, intensity, 0, 0]).buffer as ArrayBuffer)
-        break
-      }
-    }
+    if (pass.passType === "blur") pass.uniformValues.amount = val
+    else if (pass.passType === "chromatic_aberration") pass.uniformValues.offset = val
+    this.writePostProcessUniforms(pass)
   }
 
   setPerfCallback(callback: (metrics: PerfMetrics) => void) { this.onPerfUpdate = callback }
@@ -1775,6 +1828,16 @@ export class WebGPUAdapter implements RenderAdapter {
     this.skyboxBindGroup = null
     this.skyboxUniformBuffer = null
     this.skyboxSampler = null
+    this.uniformLayout = null
+    this.cpuUniformBuffer = null
+    this.cpuUniformView = null
+    this.mvpView = null
+    this.timeView = null
+    this.queueTextures = []
+    this.loadingTextures.clear()
+    this.postProcessSignature = ""
+    this.renderCompileGen++
+    this.computeCompileGen++
     this.device = null
     this.context = null
   }
@@ -1811,6 +1874,7 @@ export class WebGPUAdapter implements RenderAdapter {
         if (success) {
           this.recoveryAttempts = 0
           this.isRecovering = false
+          renderCoordinator.requestRender()
           useProjectStore.getState().setDeviceLost(false)
           useProjectStore.getState().setLastCompileError(null)
           return
@@ -1880,25 +1944,13 @@ export class WebGPUAdapter implements RenderAdapter {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     })
 
-    const setTexMeta = (tex: any, format: string, width: number, height: number) => {
-      if (!tex) return
-      try {
-        Object.defineProperty(tex, "format", { value: format, configurable: true, writable: true })
-      } catch {
-        tex.format = format
-      }
-      try {
-        Object.defineProperty(tex, "width", { value: width, configurable: true, writable: true })
-      } catch {
-        tex.width = width
-      }
-      try {
-        Object.defineProperty(tex, "height", { value: height, configurable: true, writable: true })
-      } catch {
-        tex.height = height
-      }
+    this.gBufferViews = {
+      albedo: this.gBufferAlbedoTex.createView(),
+      normal: this.gBufferNormalTex.createView(),
+      roughness: this.gBufferRoughnessTex.createView(),
+      depth: this.gBufferDepthTex.createView(),
+      motion: this.gBufferMotionTex.createView(),
     }
-
     setTexMeta(this.gBufferAlbedoTex, "rgba8unorm", w, h)
     setTexMeta(this.gBufferNormalTex, "rgba16float", w, h)
     setTexMeta(this.gBufferRoughnessTex, "rg8unorm", w, h)
@@ -2074,11 +2126,11 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
   private updateDeferredLightingBindGroup() {
     if (!this.device || !this.deferredLightingPipeline || !this.deferredLightingUniformBuffer) return
     const defaultTexView = this.defaultTexture?.createView() || ({} as any)
-    const albView = this.gBufferAlbedoTex?.createView() || defaultTexView
-    const normView = this.gBufferNormalTex?.createView() || defaultTexView
-    const roughView = this.gBufferRoughnessTex?.createView() || defaultTexView
-    const depthView = this.gBufferDepthTex?.createView() || defaultTexView
-    const motView = this.gBufferMotionTex?.createView() || defaultTexView
+    const albView = this.gBufferViews?.albedo || defaultTexView
+    const normView = this.gBufferViews?.normal || defaultTexView
+    const roughView = this.gBufferViews?.roughness || defaultTexView
+    const depthView = this.gBufferViews?.depth || defaultTexView
+    const motView = this.gBufferViews?.motion || defaultTexView
 
     try {
       this.deferredLightingBindGroup = this.device.createBindGroup({
@@ -2137,11 +2189,10 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     const exp = useProjectStore.getState().environmentSettings?.exposure ?? 1.0
     const shadowEnabled = (this.shadowSettings?.enabled && this.shadowDepthTex) ? 1.0 : 0.0
 
-    const data = new Float32Array(16)
+    const data = this.deferredArray
     data[0] = lDirX; data[1] = lDirY; data[2] = lDirZ; data[3] = lInt
     data[4] = lColR; data[5] = lColG; data[6] = lColB; data[7] = exp
-    const intView = new Int32Array(data.buffer)
-    intView[8] = debugCode
+    this.deferredInts[8] = debugCode
     data[9] = shadowEnabled
     data[10] = 0.0; data[11] = 0.0
 
@@ -2316,6 +2367,8 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
 
   dispose() {
     this.isDisposed = true
+    this.renderCompileGen++ // pending async compiles must not commit into a disposed adapter
+    this.computeCompileGen++
     if (this.recoveryTimer !== null) {
       clearTimeout(this.recoveryTimer)
       this.recoveryTimer = null
@@ -2336,11 +2389,17 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     this.vertexBuffers.clear()
     try { this.uniformBuffer?.destroy() } catch {}
     this.uniformBuffer = null
+    this.uniformLayout = null; this.cpuUniformBuffer = null; this.cpuUniformView = null
+    this.mvpView = null; this.timeView = null
     this.bindGroup = null; this.pipeline = null
     for (const texture of this.textureResources.values()) {
       try { texture?.destroy() } catch {}
     }
     this.textureResources.clear()
+    this.queueTextures = []
+    this.textureBindings = {}
+    this.loadingTextures.clear()
+    this.postProcessSignature = ""
     try { this.defaultTexture?.destroy() } catch {}
     this.defaultTexture = null; this.defaultSampler = null
     try { this.cleanupPostProcessPasses() } catch {}
@@ -2372,6 +2431,7 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     try { this.gBufferRoughnessTex?.destroy() } catch {}
     try { this.gBufferDepthTex?.destroy() } catch {}
     try { this.gBufferMotionTex?.destroy() } catch {}
+    this.gBufferViews = null
     this.gBufferAlbedoTex = null
     this.gBufferNormalTex = null
     this.gBufferRoughnessTex = null

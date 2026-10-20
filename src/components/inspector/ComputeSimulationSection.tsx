@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useProjectStore } from "@/stores/projectStore"
-import { webgpuAdapter } from "@/adapters/webgpu"
+import { getLoadedWebgpuAdapter } from "@/adapters/activeAdapter"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
@@ -22,11 +22,11 @@ export function ComputeSimulationSection() {
 
   const updateParam = (name: string, val: number) => {
     setParams((prev) => ({ ...prev, [name]: val }))
-    webgpuAdapter.updateComputeUniform?.(name, val)
+    getLoadedWebgpuAdapter()?.updateComputeUniform?.(name, val)
   }
 
   const handleReseed = () => {
-    webgpuAdapter.reseedSimulation?.()
+    getLoadedWebgpuAdapter()?.reseedSimulation?.()
     useProjectStore.getState().triggerSimulationReset()
   }
 

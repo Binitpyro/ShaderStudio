@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react"
+import { useState, useEffect } from "react"
 import { useProjectStore } from "@/stores/projectStore"
 import { Button } from "@/components/ui/button"
 import {
@@ -35,10 +35,11 @@ interface ExportModalProps {
 }
 
 export function ExportModal({ isOpen, onClose }: ExportModalProps) {
-  const shaderSource = useProjectStore((state) => state.shaderSource)
+  const rawSource = useProjectStore((state) => state.shaderSource)
+  const glslSource = useProjectStore((state) => state.glslSource)
   const activeBackend = useProjectStore((state) => state.activeBackend)
-  const uniformValues = useProjectStore((state) => state.uniformValues)
-  const parsedUniforms = useProjectStore((state) => state.parsedUniforms)
+  const liveValues = useProjectStore((state) => state.uniformValues)
+  const liveUniforms = useProjectStore((state) => state.parsedUniforms)
 
   const [activeTab, setActiveTab] = useState<"r3f" | "html" | "raw" | "pbr" | "engine">("r3f")
   const [engineTarget, setEngineTarget] = useState<"unity" | "godot" | "unreal" | "osl" | "gltf" | "shadertoy">("unity")
@@ -55,8 +56,18 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
   const [isBaking, setIsBaking] = useState(false)
   const [bakeError, setBakeError] = useState<string | null>(null)
 
+  // Only the selected target is generated, from debounced inputs, so slider ticks don't run every
+  // transpiler. GLSL-based targets read the GLSL slot (under WebGPU shaderSource is WGSL).
+  const [deb, setDeb] = useState({ glsl: glslSource, parsedUniforms: liveUniforms, uniformValues: liveValues })
+  useEffect(() => {
+    const t = setTimeout(() => setDeb({ glsl: glslSource, parsedUniforms: liveUniforms, uniformValues: liveValues }), 250)
+    return () => clearTimeout(t)
+  }, [glslSource, liveUniforms, liveValues])
+  const shaderSource = deb.glsl
+  const { parsedUniforms, uniformValues } = deb
+
   // 1. Generate React Three Fiber Component Code
-  const r3fCode = useMemo(() => {
+  const r3fCode = (): string => {
     const glslFrag = shaderSource || `precision highp float; out vec4 fragColor; void main() { fragColor = vec4(1.0); }`
     const defaultVert = `
 varying vec2 vUv;
@@ -116,7 +127,7 @@ ${uniformInits}
         materialRef.current.uniforms[key].value = val
       }
     })
-  }, [props])
+  }
 
   // Real-time animation loop
   useFrame((_, delta) => {
@@ -141,10 +152,10 @@ ${uniformInits}
 
 export default CustomShaderMesh
 `
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
   // 2. Generate Standalone HTML / Webflow Embed Snippet
-  const htmlEmbedCode = useMemo(() => {
+  const htmlEmbedCode = (): string => {
     const glslFrag = shaderSource || `precision highp float; out vec4 fragColor; void main() { fragColor = vec4(1.0); }`
 
     return `<!-- ===================================================================== -->
@@ -208,53 +219,53 @@ export default CustomShaderMesh
 })();
 </script>
 `
-  }, [shaderSource])
+  }
 
   // 1b. Upgraded React Three Fiber with @react-three/drei shaderMaterial & Storybook
-  const dreiR3fCode = useMemo(() => {
+  const dreiR3fCode = (): string => {
     return generateR3FExport("CustomShader", {
       shaderSource: shaderSource || `void main() { gl_FragColor = vec4(1.0); }`,
       uniforms: parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
   // 3. Game Engine Shader Transpiled Codes
-  const unityCode = useMemo(() => {
+  const unityCode = (): string => {
     return transpileToUnityHLSL({
       shaderName: "Custom/ShaderStudioEffect",
       shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
       parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
-  const godotCode = useMemo(() => {
+  const godotCode = (): string => {
     return transpileToGodotShader({
       shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
       parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
-  const unrealCode = useMemo(() => {
+  const unrealCode = (): string => {
     return transpileToUnrealHLSL({
       shaderName: "Custom/ShaderStudioEffect",
       shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
       parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
-  const oslCode = useMemo(() => {
+  const oslCode = (): string => {
     return transpileToBlenderOSL({
       shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
       parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
-  const gltfCode = useMemo(() => {
+  const gltfCode = (): string => {
     return createGltfBundle("ShaderStudio_Material", false, {
       bakedMaps: bakeResult?.maps
         ? Object.fromEntries(
@@ -262,38 +273,43 @@ export default CustomShaderMesh
           )
         : undefined,
     })
-  }, [bakeResult])
+  }
 
-  const shadertoyCode = useMemo(() => {
+  const shadertoyCode = (): string => {
     return transpileToShadertoy({
       shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
       parsedUniforms,
       uniformValues,
     })
-  }, [shaderSource, parsedUniforms, uniformValues])
+  }
 
   if (!isOpen) return null
 
-  const activeCode =
+  const needsGlsl = activeTab === "r3f" || activeTab === "html" || (activeTab === "engine" && engineTarget !== "gltf")
+  const glslMissing = needsGlsl && !shaderSource.trim()
+  const activeCode = glslMissing
+    ? "// No GLSL source available for this export target. Use the WebGL2 or Three.js backend and write a GLSL shader (WGSL to GLSL conversion is not available yet)."
+    : (
     activeTab === "r3f"
       ? r3fFormat === "drei"
-        ? dreiR3fCode
-        : r3fCode
+        ? dreiR3fCode()
+        : r3fCode()
       : activeTab === "html"
-      ? htmlEmbedCode
+      ? htmlEmbedCode()
       : activeTab === "engine"
       ? engineTarget === "unity"
-        ? unityCode
+        ? unityCode()
         : engineTarget === "godot"
-        ? godotCode
+        ? godotCode()
         : engineTarget === "unreal"
-        ? unrealCode
+        ? unrealCode()
         : engineTarget === "osl"
-        ? oslCode
+        ? oslCode()
         : engineTarget === "gltf"
-        ? gltfCode
-        : shadertoyCode
-      : shaderSource
+        ? gltfCode()
+        : shadertoyCode()
+      : rawSource
+    )
 
   const handleCopy = () => {
     navigator.clipboard.writeText(activeCode)

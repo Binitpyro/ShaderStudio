@@ -508,6 +508,10 @@ export class MockWebGL2RenderingContext {
     return { isDestroyed: false }
   }
 
+  deleteRenderbuffer(rb: any): void {
+    if (rb) rb.isDestroyed = true
+  }
+
   bindRenderbuffer(_target: number, _rb: any): void {}
 
   renderbufferStorage(_target: number, _internalformat: number, _width: number, _height: number): void {}

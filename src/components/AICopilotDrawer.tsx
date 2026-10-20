@@ -1,7 +1,8 @@
 import { useState } from "react"
 import { useAISettingsStore } from "@/core/ai/aiSettingsStore"
-import { runAIShaderGeneration } from "@/core/ai/aiAgentRunner"
-import type { AIProvider, GenerationSession, IterationStep } from "@/core/ai/types"
+import { useShallow } from "zustand/react/shallow"
+import { useCopilotSessionStore } from "@/stores/copilotSessionStore"
+import type { AIProvider } from "@/core/ai/types"
 import { useProjectStore } from "@/stores/projectStore"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -29,47 +30,28 @@ const PRESET_PROMPTS = [
 
 export function AICopilotDrawer({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const activeBackend = useProjectStore((state) => state.activeBackend)
-  const aiSettings = useAISettingsStore()
+  const aiSettings = useAISettingsStore(
+    useShallow((s) => ({
+      activeProvider: s.activeProvider,
+      apiKeys: s.apiKeys,
+      endpoints: s.endpoints,
+      models: s.models,
+      visualCritique: s.visualCritique,
+      setActiveProvider: s.setActiveProvider,
+      setApiKey: s.setApiKey,
+      setEndpoint: s.setEndpoint,
+      setModel: s.setModel,
+      setVisualCritique: s.setVisualCritique,
+    }))
+  )
 
-  const [prompt, setPrompt] = useState("")
-  const [isRunning, setIsRunning] = useState(false)
+  const { prompt, setPrompt, isRunning, currentSession, run: handleGenerate } = useCopilotSessionStore(
+    useShallow((s) => ({ prompt: s.prompt, setPrompt: s.setPrompt, isRunning: s.isRunning, currentSession: s.currentSession, run: s.run }))
+  )
   const [showSettings, setShowSettings] = useState(false)
-  const [currentSession, setCurrentSession] = useState<GenerationSession | null>(null)
   const [testStatus, setTestStatus] = useState<string | null>(null)
 
   if (!isOpen) return null
-
-  const handleGenerate = async (customPrompt?: string) => {
-    const textToRun = customPrompt || prompt
-    if (!textToRun.trim() || isRunning) return
-
-    setIsRunning(true)
-    setCurrentSession(null)
-
-    try {
-      await runAIShaderGeneration(textToRun, aiSettings, {
-        onStepUpdate: (step: IterationStep) => {
-          setCurrentSession((prev) => {
-            if (!prev) return null
-            const updatedSteps = [...prev.steps]
-            const index = updatedSteps.findIndex((s) => s.stepNumber === step.stepNumber)
-            if (index !== -1) {
-              updatedSteps[index] = step
-            } else {
-              updatedSteps.push(step)
-            }
-            return { ...prev, steps: updatedSteps }
-          })
-        },
-        onComplete: (session: GenerationSession) => {
-          setCurrentSession(session)
-          setIsRunning(false)
-        },
-      })
-    } catch (err) {
-      setIsRunning(false)
-    }
-  }
 
   const handleTestConnection = async () => {
     setTestStatus("Testing...")

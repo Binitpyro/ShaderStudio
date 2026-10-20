@@ -2,7 +2,7 @@
  * Parameter inspector: accordion panel, uniforms (types, reset, presets, adapter sync), audio dynamics, variations, environment, compute.
  * Consolidated by fleet w1-b-ui; self-referential helpers (re-implemented filter/accordion simulators) were dropped, and w1-e removed the local getDefaultValueFor copy in favour of driving the real UniformsSection.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 import { ParameterPanel, type AccordionSectionKey } from "@/components/ParameterPanel"
 import { AccordionSection } from "@/components/inspector/AccordionSection"
@@ -14,6 +14,9 @@ import { VariationsSection } from "@/components/inspector/VariationsSection"
 import { useProjectStore, getDefaultUniformValue, type ParsedUniform, type UniformValue, type GraphUniform, type PresetVariation, type EditorTab, type BackendType } from "@/stores/projectStore"
 import { audioEngine } from "@/audio/audioEngine"
 import { webgpuAdapter } from "@/adapters/webgpu"
+import { loadAdapter } from "@/adapters/activeAdapter"
+
+beforeAll(async () => { await loadAdapter("webgpu") }) // webgpu registers lazily
 import { webgl2Adapter } from "@/adapters/webgl2"
 import { threejsAdapter } from "@/adapters/threejs"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
@@ -1237,7 +1240,9 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       })
     })
 
-    it("routes uniform changes to the currently active hardware adapter (WebGL2 & ThreeJS)", () => {
+    it("routes uniform changes to the currently active hardware adapter (WebGL2 & ThreeJS)", async () => {
+      await loadAdapter("webgl2")
+      await loadAdapter("threejs")
       const glSpy = vi.spyOn(webgl2Adapter, "updateUniform")
       const threeSpy = vi.spyOn(threejsAdapter, "updateUniform")
 
@@ -1446,7 +1451,8 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       expect(gpuSpy).toHaveBeenCalledWith("u_enabled", { type: "bool", value: true })
     })
 
-    it("synchronizes with newly selected backend when applying variation snapshot", () => {
+    it("synchronizes with newly selected backend when applying variation snapshot", async () => {
+      await loadAdapter("webgl2")
       const glSpy = vi.spyOn(webgl2Adapter, "updateUniform")
 
       useProjectStore.getState().setUniformValue("u_roughness", { type: "float", value: 0.65 })

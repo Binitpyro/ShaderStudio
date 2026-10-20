@@ -3,7 +3,7 @@ import { Handle, Position } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { ComputeNodeData, ComputePreset } from "@/core/graphCompiler"
-import { webgpuAdapter } from "@/adapters/webgpu"
+import { getLoadedWebgpuAdapter } from "@/adapters/activeAdapter"
 import { useProjectStore } from "@/stores/projectStore"
 import { Button } from "@/components/ui/button"
 
@@ -40,7 +40,7 @@ function ComputeNodeComponent({ id, data, selected }: FlowNodeProps<ComputeNodeD
   }
 
   const handleReset = useCallback(() => {
-    webgpuAdapter.reseedSimulation?.()
+    getLoadedWebgpuAdapter()?.reseedSimulation?.()
     useProjectStore.getState().triggerSimulationReset()
   }, [])
 

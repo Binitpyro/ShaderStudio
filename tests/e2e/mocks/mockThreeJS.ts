@@ -25,6 +25,10 @@ export class MockThreeRenderer {
   setRenderTarget = vi.fn()
   clear = vi.fn()
   autoClear = true
+  compile = vi.fn()
+  forceContextLoss = vi.fn()
+  debug: { checkShaderErrors: boolean; onShaderError: null | ((...a: any[]) => void) } = { checkShaderErrors: true, onShaderError: null }
+  info = { autoReset: true, render: { calls: 0, triangles: 0 }, reset: vi.fn() }
 
   shadowMap = {
     enabled: false,

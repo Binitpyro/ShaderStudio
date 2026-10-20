@@ -15,9 +15,7 @@ import { saveSnapshot } from "@/db"
 import { debounce } from "@/utils/throttle"
 import { viewportCapture } from "@/utils/frameCapture"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
-import { webgpuAdapter } from "@/adapters/webgpu"
-import { webgl2Adapter } from "@/adapters/webgl2"
-import { threejsAdapter } from "@/adapters/threejs"
+import { loadAdapter } from "@/adapters/activeAdapter"
 
 const BRIDGE_URL = "ws://localhost:8642"
 const RECONNECT_BASE_DELAY = 1000
@@ -165,12 +163,7 @@ export async function executeShaderLocally(
   store.setShaderSource(params.source)
   store.triggerRecompile()
 
-  const adapter =
-    store.activeBackend === "webgl2"
-      ? webgl2Adapter
-      : store.activeBackend === "threejs"
-      ? threejsAdapter
-      : webgpuAdapter
+  const adapter = await loadAdapter(useProjectStore.getState().activeBackend)
 
   try {
     adapter.recompileShader(params.source)

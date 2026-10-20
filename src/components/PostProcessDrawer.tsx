@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react"
-import Editor from "@monaco-editor/react"
+import { useState, useEffect, Suspense } from "react"
+import { LazyMonaco as Editor } from "@/components/LazyMonaco"
 import { Button } from "@/components/ui/button"
 import { useProjectStore } from "@/stores/projectStore"
 import { CUSTOM_WGSL_TEMPLATE, CUSTOM_GLSL_TEMPLATE } from "@/core/postProcessChain"
@@ -63,6 +63,7 @@ export function PostProcessDrawer({
       </div>
 
       <div className="flex-1 overflow-hidden">
+        <Suspense fallback={<div className="p-3 text-[10px] text-muted-foreground">Loading editor…</div>}>
         <Editor
           height="100%"
           language={language}
@@ -81,6 +82,7 @@ export function PostProcessDrawer({
             padding: { top: 6, bottom: 6 },
           }}
         />
+        </Suspense>
       </div>
     </div>
   )

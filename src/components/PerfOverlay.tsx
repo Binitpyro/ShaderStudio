@@ -24,8 +24,7 @@ export function PerfOverlay({ className }: { className?: string }) {
       fps: Math.round(performanceTelemetry.getAverageFps()),
       frameTimeMs: performanceTelemetry.getLastFrameTime(),
     }))
-    // frameCapture has no unregister: on unmount restore its no-provider defaults so it never calls into a dead overlay.
-    return () => viewportCapture.registerPerfMetrics(() => ({ fps: 60, frameTimeMs: 16.6 }))
+    return () => viewportCapture.unregisterPerfMetrics()
   }, [])
 
   // One throttled subscription, and none at all while the overlay is hidden.

@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef, type ChangeEvent } from "react"
+import { useEffect, useRef, type ChangeEvent } from "react"
 import { useProjectStore, type AudioSourceType } from "@/stores/projectStore"
-import { audioEngine } from "@/audio/audioEngine"
+import { getAudioEngine, loadAudioEngine, withAudioEngine } from "@/audio/audioRegistry"
+import { useAudioGauges } from "@/components/nodes/useAudioFrame"
 import { cn } from "@/lib/utils"
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
@@ -19,40 +20,19 @@ export function AudioDynamicsSection() {
   const audioBindings = useProjectStore((s) => s.audioBindings)
   const setAudioBinding = useProjectStore((s) => s.setAudioBinding)
 
-  const [gauges, setGauges] = useState({
-    bass: 0,
-    mid: 0,
-    treble: 0,
-    beat: 0,
-    level: 0,
-  })
-
   const fileInputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { void loadAudioEngine() }, [])
+  const gauge = useAudioGauges("audio-dynamics-gauges", isAudioPlaying)
 
-  useEffect(() => {
-    let animId: number
-    const tick = () => {
-      const u = audioEngine.uniforms
-      setGauges({
-        bass: Math.min(100, Math.round(u.bass * 100)),
-        mid: Math.min(100, Math.round(u.mid * 100)),
-        treble: Math.min(100, Math.round(u.treble * 100)),
-        beat: Math.min(100, Math.round(u.beat * 100)),
-        level: Math.min(100, Math.round(u.level * 100)),
-      })
-      animId = requestAnimationFrame(tick)
-    }
-    animId = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(animId)
-  }, [])
-
-  const handleTogglePlay = () => {
+  const handleTogglePlay = async () => {
+    const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
     const isPlaying = audioEngine.togglePlay()
     setIsAudioPlaying(isPlaying)
   }
 
   const handleSourceChange = async (type: AudioSourceType) => {
     setAudioSourceType(type)
+    const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
     await audioEngine.setSourceType(type)
     setIsAudioPlaying(audioEngine.getIsPlaying())
   }
@@ -60,6 +40,7 @@ export function AudioDynamicsSection() {
   const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
+      const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
       await audioEngine.loadCustomAudioFile(file)
       setAudioSourceType("file")
       setIsAudioPlaying(audioEngine.getIsPlaying())
@@ -67,6 +48,7 @@ export function AudioDynamicsSection() {
   }
 
   const handleStartMic = async () => {
+    const audioEngine = getAudioEngine() ?? (await loadAudioEngine())
     await audioEngine.startMicrophone()
     setAudioSourceType("mic")
     setIsAudioPlaying(audioEngine.getIsPlaying())
@@ -74,12 +56,12 @@ export function AudioDynamicsSection() {
 
   const handleGainChange = (g: number) => {
     setAudioGain(g)
-    audioEngine.setGainMultiplier(g)
+    withAudioEngine((e) => e.setGainMultiplier(g))
   }
 
   const handleSmoothingChange = (s: number) => {
     setAudioSmoothing(s)
-    audioEngine.setSmoothing(s)
+    withAudioEngine((e) => e.setSmoothing(s))
   }
 
   const bindingEntries = Object.entries(audioBindings)
@@ -178,12 +160,13 @@ export function AudioDynamicsSection() {
           <div className="bg-muted/20 rounded p-1.5 border border-border/50 flex flex-col justify-between">
             <div>
               <span className="text-[9px] text-muted-foreground font-semibold block">BASS</span>
-              <span className="text-xs font-bold text-amber-400">{gauges.bass}%</span>
+              <span ref={gauge.text("bass")} className="text-xs font-bold text-amber-400">0%</span>
             </div>
             <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden mt-1">
               <div
-                className="h-full bg-amber-400 rounded-full transition-all duration-75"
-                style={{ width: `${gauges.bass}%` }}
+                ref={gauge.bar("bass")}
+                className="h-full bg-amber-400 rounded-full"
+                style={{ width: "0%" }}
               />
             </div>
           </div>
@@ -192,12 +175,13 @@ export function AudioDynamicsSection() {
           <div className="bg-muted/20 rounded p-1.5 border border-border/50 flex flex-col justify-between">
             <div>
               <span className="text-[9px] text-muted-foreground font-semibold block">MID</span>
-              <span className="text-xs font-bold text-cyan-400">{gauges.mid}%</span>
+              <span ref={gauge.text("mid")} className="text-xs font-bold text-cyan-400">0%</span>
             </div>
             <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden mt-1">
               <div
-                className="h-full bg-cyan-400 rounded-full transition-all duration-75"
-                style={{ width: `${gauges.mid}%` }}
+                ref={gauge.bar("mid")}
+                className="h-full bg-cyan-400 rounded-full"
+                style={{ width: "0%" }}
               />
             </div>
           </div>
@@ -206,12 +190,13 @@ export function AudioDynamicsSection() {
           <div className="bg-muted/20 rounded p-1.5 border border-border/50 flex flex-col justify-between">
             <div>
               <span className="text-[9px] text-muted-foreground font-semibold block">TREBLE</span>
-              <span className="text-xs font-bold text-pink-400">{gauges.treble}%</span>
+              <span ref={gauge.text("treble")} className="text-xs font-bold text-pink-400">0%</span>
             </div>
             <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden mt-1">
               <div
-                className="h-full bg-pink-400 rounded-full transition-all duration-75"
-                style={{ width: `${gauges.treble}%` }}
+                ref={gauge.bar("treble")}
+                className="h-full bg-pink-400 rounded-full"
+                style={{ width: "0%" }}
               />
             </div>
           </div>
@@ -220,12 +205,13 @@ export function AudioDynamicsSection() {
           <div className="bg-muted/20 rounded p-1.5 border border-border/50 flex flex-col justify-between">
             <div>
               <span className="text-[9px] text-muted-foreground font-semibold block">BEAT</span>
-              <span className="text-xs font-bold text-purple-400">{gauges.beat}%</span>
+              <span ref={gauge.text("beat")} className="text-xs font-bold text-purple-400">0%</span>
             </div>
             <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden mt-1">
               <div
-                className="h-full bg-purple-400 rounded-full transition-all duration-75"
-                style={{ width: `${gauges.beat}%` }}
+                ref={gauge.bar("beat")}
+                className="h-full bg-purple-400 rounded-full"
+                style={{ width: "0%" }}
               />
             </div>
           </div>
@@ -234,12 +220,13 @@ export function AudioDynamicsSection() {
           <div className="bg-muted/20 rounded p-1.5 border border-border/50 flex flex-col justify-between">
             <div>
               <span className="text-[9px] text-muted-foreground font-semibold block">LEVEL</span>
-              <span className="text-xs font-bold text-emerald-400">{gauges.level}%</span>
+              <span ref={gauge.text("level")} className="text-xs font-bold text-emerald-400">0%</span>
             </div>
             <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden mt-1">
               <div
-                className="h-full bg-emerald-400 rounded-full transition-all duration-75"
-                style={{ width: `${gauges.level}%` }}
+                ref={gauge.bar("level")}
+                className="h-full bg-emerald-400 rounded-full"
+                style={{ width: "0%" }}
               />
             </div>
           </div>

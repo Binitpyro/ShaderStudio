@@ -1,13 +1,10 @@
-import { memo, useState, useCallback, useEffect } from "react"
+import { memo, useState, useEffect } from "react"
 import { Handle, Position } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { PostProcessNodeData } from "@/core/graphCompiler"
 import type { PostProcessPassType } from "@/core/postProcessChain"
-import { webgpuAdapter } from "@/adapters/webgpu"
-import { webgl2Adapter } from "@/adapters/webgl2"
-import { threejsAdapter } from "@/adapters/threejs"
-import { useProjectStore } from "@/stores/projectStore"
+import { getActiveAdapter } from "@/adapters/activeAdapter"
 
 const PASS_OPTIONS: { value: PostProcessPassType; label: string }[] = [
   { value: "vignette", label: "Vignette" },
@@ -19,7 +16,6 @@ const PASS_OPTIONS: { value: PostProcessPassType; label: string }[] = [
 ]
 
 function PostProcessNodeComponent({ id, data, selected }: FlowNodeProps<PostProcessNodeData>) {
-  const activeBackend = useProjectStore((s) => s.activeBackend)
   const passType: PostProcessPassType = data.passType || "vignette"
 
   const getInitialNumber = (key: string, fallback: number): number => {
@@ -49,15 +45,6 @@ function PostProcessNodeComponent({ id, data, selected }: FlowNodeProps<PostProc
     }
   }, [data.params])
 
-  const getAdapter = useCallback(() => {
-    switch (activeBackend) {
-      case "webgpu": return webgpuAdapter
-      case "webgl2": return webgl2Adapter
-      case "threejs": return threejsAdapter
-      default: return webgpuAdapter
-    }
-  }, [activeBackend])
-
   const handleTypeChange = (newType: PostProcessPassType) => {
     const event = new CustomEvent("postProcessTypeChange", {
       detail: { nodeId: id, passType: newType, params },
@@ -71,8 +58,8 @@ function PostProcessNodeComponent({ id, data, selected }: FlowNodeProps<PostProc
     setParams(next)
 
     // 1. Direct adapter call for 60 FPS update
-    const adapter = getAdapter()
-    if (adapter.updatePostProcessUniform) {
+    const adapter = getActiveAdapter()
+    if (adapter?.updatePostProcessUniform) {
       adapter.updatePostProcessUniform(id, paramName, val)
     }
 

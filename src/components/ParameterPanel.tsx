@@ -27,9 +27,7 @@ export function ParameterPanel() {
   const renderQueue = useProjectStore((state) => state.renderQueue)
   const selectedNodeId = useProjectStore((state) => state.selectedNodeId)
   const setSelectedNodeId = useProjectStore((state) => state.setSelectedNodeId)
-  const graphNodes = useProjectStore((state) => state._graphNodes)
-
-  const selectedNode = graphNodes.find((n) => n.id === selectedNodeId)
+  const selectedNode = useProjectStore((state) => state._graphNodes.find((n) => n.id === state.selectedNodeId))
 
   const hasCompute = renderQueue?.some((step) => step.type === "compute")
   const activeBindingCount = Object.keys(audioBindings).length

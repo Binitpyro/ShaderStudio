@@ -14,7 +14,6 @@ export function TemplatesSidebar() {
   const setUniformValue = useProjectStore((state) => state.setUniformValue)
   const triggerRecompile = useProjectStore((state) => state.triggerRecompile)
   const setGraphNodes = useProjectStore((state) => state.setGraphNodes)
-  const graphNodes = useProjectStore((state) => state._graphNodes)
 
   const categories = ["All", "Sci-Fi & VFX", "Atmospheric", "Surfaces & PBR", "Retro & Stylized"]
 
@@ -23,8 +22,9 @@ export function TemplatesSidebar() {
     : SHADER_TEMPLATES.filter((t) => t.category === selectedCategory)
 
   const handleApplyTemplate = (template: ShaderTemplate) => {
-    setActiveBackend(template.backend)
-    setShaderSource(template.shaderSource)
+    // Templates are GLSL: write the glsl slot and never leave a WebGPU (WGSL) backend active.
+    setActiveBackend(template.backend === "webgpu" ? "webgl2" : template.backend)
+    setShaderSource(template.shaderSource, "glsl")
 
     // Set uniform values in store
     for (const [key, val] of Object.entries(template.uniforms)) {
@@ -32,6 +32,7 @@ export function TemplatesSidebar() {
     }
 
     // Update geometry on mesh node in graph
+    const graphNodes = useProjectStore.getState()._graphNodes
     if (graphNodes.length > 0) {
       const updatedNodes = graphNodes.map((n) => {
         if (n.type === "mesh") {

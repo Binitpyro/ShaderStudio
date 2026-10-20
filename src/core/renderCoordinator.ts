@@ -1,4 +1,3 @@
-import { audioEngine } from "@/audio/audioEngine"
 import type { RenderAdapter } from "@/adapters/types"
 import { performanceTelemetry } from "@/core/performanceTelemetry"
 import { viewportCapture } from "@/utils/frameCapture"
@@ -47,7 +46,14 @@ export interface AdapterMountSession {
   cancel(): void
 }
 
+/** Minimal contract of the (lazily loaded) audio engine; it registers itself via setAudioSource(). */
+export interface AudioSource {
+  update(): { textureBuffer: Uint8Array; uniforms: unknown }
+}
+
 export class RenderCoordinator {
+  // Shared by all coordinators: the audio chunk registers once when first loaded.
+  private static audioSource: AudioSource | null = null
   private mountChain: Promise<void> = Promise.resolve()
   private activeAdapter: RenderAdapterContract | RenderAdapter | null = null
   private preRenderHooks = new Map<string, (time: number, delta: number) => void>()
@@ -141,6 +147,10 @@ export class RenderCoordinator {
       (adapter as any).setExternalLoopDriven(true)
     }
     if (adapter) this.requestRender()
+  }
+
+  setAudioSource(source: AudioSource | null): void {
+    RenderCoordinator.audioSource = source
   }
 
   getActiveAdapter(): RenderAdapterContract | RenderAdapter | null {
@@ -416,7 +426,8 @@ export class RenderCoordinator {
     // Phase 2: Audio Engine Update
     this.recordPhase("audio", now)
     try {
-      if (typeof audioEngine !== "undefined" && audioEngine?.update) {
+      const audioEngine = RenderCoordinator.audioSource
+      if (audioEngine?.update) {
         const audioData = audioEngine.update()
         if (this.activeAdapter && typeof (this.activeAdapter as any).updateAudioData === "function") {
           (this.activeAdapter as any).updateAudioData(audioData.textureBuffer, audioData.uniforms)

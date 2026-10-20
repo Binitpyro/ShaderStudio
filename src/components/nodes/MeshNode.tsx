@@ -4,7 +4,7 @@ import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { MeshNodeData } from "@/core/graphCompiler"
 import { customModelRegistry } from "@/core/customModelRegistry"
-import { loadModelFile, type ParsedGeometry } from "@/core/modelLoader"
+import type { ParsedGeometry } from "@/core/modelLoader"
 import { UploadCloud, Box, Loader2, CheckCircle2, AlertCircle, Layers } from "lucide-react"
 import { generateMeshLods, selectLodByDistance, type LodLevel } from "@/core/meshLod"
 
@@ -26,6 +26,7 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
     setIsLoading(true)
     setError(null)
     try {
+      const { loadModelFile } = await import("@/core/modelLoader")
       const parsed = await loadModelFile(file)
       customModelRegistry.setActiveModel(parsed)
       const event = new CustomEvent("meshGeometryChange", {

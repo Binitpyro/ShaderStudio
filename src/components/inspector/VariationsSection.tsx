@@ -1,25 +1,9 @@
 import { useState, useRef, type ChangeEvent, type KeyboardEvent } from "react"
 import { useProjectStore } from "@/stores/projectStore"
-import { webgpuAdapter } from "@/adapters/webgpu"
-import { webgl2Adapter } from "@/adapters/webgl2"
-import { threejsAdapter } from "@/adapters/threejs"
+import { getActiveAdapter } from "@/adapters/activeAdapter"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Plus, Trash2, Download, Upload, Check } from "lucide-react"
-
-function getAdapter() {
-  const backend = useProjectStore.getState().activeBackend
-  switch (backend) {
-    case "webgpu":
-      return webgpuAdapter
-    case "webgl2":
-      return webgl2Adapter
-    case "threejs":
-      return threejsAdapter
-    default:
-      return webgpuAdapter
-  }
-}
 
 export function VariationsSection() {
   const variations = useProjectStore((s) => s.variations)
@@ -49,9 +33,9 @@ export function VariationsSection() {
     applyVariation(id)
     const target = variations.find((v) => v.id === id)
     if (target) {
-      const adapter = getAdapter()
+      const adapter = getActiveAdapter()
       for (const [name, val] of Object.entries(target.uniformValues)) {
-        adapter.updateUniform(name, val)
+        adapter?.updateUniform(name, val)
       }
     }
   }

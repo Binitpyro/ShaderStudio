@@ -88,19 +88,11 @@ function App() {
           <WorkspaceLayout />
         </ErrorBoundary>
       </main>
+      {/* Mounted only while open so their chunks load on demand. */}
       <Suspense fallback={null}>
-        <AICopilotDrawer
-          isOpen={isCopilotOpen}
-          onClose={() => setIsCopilotOpen(false)}
-        />
-        <ExportModal
-          isOpen={isExportOpen}
-          onClose={() => setIsExportOpen(false)}
-        />
-        <TemplatesModal
-          isOpen={isTemplatesOpen}
-          onClose={() => setIsTemplatesOpen(false)}
-        />
+        {isCopilotOpen && <AICopilotDrawer isOpen onClose={() => setIsCopilotOpen(false)} />}
+        {isExportOpen && <ExportModal isOpen onClose={() => setIsExportOpen(false)} />}
+        {isTemplatesOpen && <TemplatesModal isOpen onClose={() => setIsTemplatesOpen(false)} />}
       </Suspense>
     </div>
   )

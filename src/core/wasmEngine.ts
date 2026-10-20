@@ -8,7 +8,7 @@ import {
   transpileToShadertoy,
   type EngineExportOptions,
 } from "@/core/engineTranspiler"
-import { parseOBJ, type ParsedGeometry } from "@/core/modelLoader"
+import type { ParsedGeometry } from "@/core/modelLoader"
 import type { ParsedUniform } from "@/stores/projectStore"
 
 export interface ReflectedUniform {
@@ -360,6 +360,7 @@ class WasmEngine {
     }
 
     // TypeScript Fallback
+    const { parseOBJ } = await import("@/core/modelLoader")
     return parseOBJ(objText, name)
   }
 

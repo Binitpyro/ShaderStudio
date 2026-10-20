@@ -82,12 +82,21 @@ export function parseWgslUniforms(source: string): ParsedUniform[] {
   while ((varMatch = TOP_LEVEL_VAR_REGEX.exec(clean)) !== null) {
     const name = varMatch[1]
     const typeStr = varMatch[2].trim()
-    if (!seen.has(name)) {
-      const parsed = parseType(typeStr, name, name)
-      if (parsed) {
-        seen.add(name)
-        uniforms.push(parsed)
+    if (seen.has(name)) continue
+    const arrayMatch = typeStr.replace(/\s+/g, "").match(ARRAY_REGEX)
+    if (arrayMatch) {
+      // Standalone `var<uniform> w: array<T, N>`: expand like struct array members.
+      for (let i = 0; i < parseInt(arrayMatch[2], 10); i++) {
+        const parsed = parseType(arrayMatch[1], `${name}[${i}]`, name)
+        if (parsed) uniforms.push(parsed)
       }
+      seen.add(name)
+      continue
+    }
+    const parsed = parseType(typeStr, name, name)
+    if (parsed) {
+      seen.add(name)
+      uniforms.push(parsed)
     }
   }
 
@@ -110,7 +119,8 @@ function parseType(typeStr: string, fieldName: string, originalName: string): Pa
     return { name: fieldName, type: normalizedType as "mat2x2f" | "mat3x3f" | "mat4x4f", kind: "matrix" }
   }
   if (normalizedType.startsWith("vec")) {
-    return { name: fieldName, type: normalizedType as "vec2f" | "vec3f" | "vec4f", kind: "vector" }
+    // Integer vectors (vec2i/vec3u/...) are not in the UniformType union yet but uniformLayout handles them.
+    return { name: fieldName, type: normalizedType, kind: "vector" }
   }
   return { name: fieldName, type: normalizedType as "f32" | "i32" | "u32" | "bool", kind: "scalar" }
 }
@@ -122,10 +132,9 @@ function normalizeWgslType(typeStr: string): UniformType | null {
   if (t === "u32") return "u32"
   if (t === "bool") return "bool"
 
-  // Vectors
-  if (t === "vec2<f32>" || t === "vec2f" || t === "vec2") return "vec2f"
-  if (t === "vec3<f32>" || t === "vec3f" || t === "vec3") return "vec3f"
-  if (t === "vec4<f32>" || t === "vec4f" || t === "vec4") return "vec4f"
+  // Vectors: vecN<f32|i32|u32> and the vecNf / vecNi / vecNu aliases (bare vecN means f32).
+  const vec = t.match(/^vec([234])(?:<(f32|i32|u32)>|([fiu]))?$/)
+  if (vec) return `vec${vec[1]}${vec[2] ? vec[2][0] : (vec[3] ?? "f")}` as UniformType
 
   // Matrices
   if (t === "mat2x2<f32>" || t === "mat2x2f" || t === "mat2x2") return "mat2x2f"
