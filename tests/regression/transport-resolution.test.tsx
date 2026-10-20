@@ -167,8 +167,11 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
         tagName = "div"
         isContentEditable = false
         insideMonaco = false
+        insideNodeGraph = false
         closest(selector: string) {
-          return selector === ".monaco-editor" && this.insideMonaco ? {} : null
+          if (this.insideMonaco && selector.includes(".monaco-editor")) return {}
+          if (this.insideNodeGraph && selector.includes(".react-flow")) return {}
+          return null
         }
       }
       const win = new FakeWindow()
@@ -204,6 +207,13 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
         win.insideMonaco = true
         press()
         win.insideMonaco = false
+        expect(isPlaying()).toBe(false)
+
+        // fleet(w2) item 12: focus inside the node-graph canvas (.react-flow) owns Space (palette), so
+        // the Toolbar must neither toggle playback nor swallow the event
+        win.insideNodeGraph = true
+        expect(press().defaultPrevented).toBe(false)
+        win.insideNodeGraph = false
         expect(isPlaying()).toBe(false)
 
         // F: regular button -> toggles back
@@ -307,7 +317,8 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
       expect(capturedMetrics).not.toBeNull()
       expect(capturedMetrics!.frameTimeMs).toBe(60000)
       expect(capturedMetrics!.fps).toBe(0) // 1000 / 60000 rounds to 0
-      expect(capturedMetrics!.currentTime).toBeCloseTo(60.0, 1)
+      // fleet(w2): simulated delta is capped at 100ms so a resume cannot explode virtual time
+      expect(capturedMetrics!.currentTime).toBeCloseTo(0.1, 1)
 
       unsub()
     })
@@ -319,7 +330,8 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
       renderCoordinator.tick(1000)
       renderCoordinator.tick(3601000) // 1 hour jump
 
-      expect(renderCoordinator.getPlaybackTime()).toBeCloseTo(3600.0, 1)
+      // fleet(w2): capped at 100ms of simulated time
+      expect(renderCoordinator.getPlaybackTime()).toBeCloseTo(0.1, 1)
       expect(Number.isFinite(renderCoordinator.getPlaybackTime())).toBe(true)
     })
 
@@ -502,10 +514,10 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
 
     it("verifies time advance rates scale proportionally under 0.5x, 1.0x, 2.0x, and 5.0x speeds", () => {
       const testCases = [
-        { speed: 0.5, deltaMs: 1000, expectedAdvance: 0.5 },
-        { speed: 1.0, deltaMs: 1000, expectedAdvance: 1.0 },
-        { speed: 2.0, deltaMs: 1000, expectedAdvance: 2.0 },
-        { speed: 5.0, deltaMs: 1000, expectedAdvance: 5.0 },
+        { speed: 0.5, deltaMs: 100, expectedAdvance: 0.05 },
+        { speed: 1.0, deltaMs: 100, expectedAdvance: 0.1 },
+        { speed: 2.0, deltaMs: 100, expectedAdvance: 0.2 },
+        { speed: 5.0, deltaMs: 100, expectedAdvance: 0.5 },
       ]
 
       for (const tc of testCases) {
@@ -874,6 +886,7 @@ describe("Milestone 2 Challenger 2: Resolution Scaling Transitions, Extreme DPRs
 
         // Tick loop while paused (simulating render coordinator background loop for camera/controls)
         clockTime += 16.666
+        coordinator.requestRender() // the app requests a redraw on resize; paused loops render on demand
         coordinator.tick(clockTime)
 
         // Verify time remained strictly frozen
@@ -1299,7 +1312,8 @@ describe("transport + resolution (w1-b-ui handoff)", () => {
         // Simulate waking from 60-second system sleep
         coordinator.tick(61000)
 
-        expect(coordinator.getPlaybackTime()).toBeCloseTo(60.0, 1)
+        // fleet(w2): capped at 100ms of simulated time
+        expect(coordinator.getPlaybackTime()).toBeCloseTo(0.1, 1)
         expect(Number.isFinite(coordinator.getPlaybackTime())).toBe(true)
       })
 

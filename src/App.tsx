@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from "react"
-import { useProjectStore } from "@/stores/projectStore"
+import { useProjectStore, type BackendType } from "@/stores/projectStore"
 import { parseWgslUniforms } from "@/parsers/wgslUniforms"
 import { parseGlslUniforms } from "@/parsers/glslUniforms"
 import { connect } from "@/bridge/wsBridgeClient"
@@ -11,13 +11,18 @@ const AICopilotDrawer = lazy(() => import("@/components/AICopilotDrawer").then((
 const ExportModal = lazy(() => import("@/components/ExportModal").then((m) => ({ default: m.ExportModal })))
 const TemplatesModal = lazy(() => import("@/components/TemplatesModal").then((m) => ({ default: m.TemplatesModal })))
 
+/** Re-parse inspector uniforms for the active source. Always applies the result so a shader without uniforms clears the previous shader's. */
+export function syncParsedUniforms(source: string, backend: BackendType) {
+  const uniforms = !source ? [] : backend === "webgpu" ? parseWgslUniforms(source) : parseGlslUniforms(source)
+  useProjectStore.getState().setParsedUniforms(uniforms)
+}
+
 function App() {
   const [isCopilotOpen, setIsCopilotOpen] = useState(false)
   const [isExportOpen, setIsExportOpen] = useState(false)
   const [isTemplatesOpen, setIsTemplatesOpen] = useState(false)
   const shaderSource = useProjectStore((state) => state.shaderSource)
   const activeBackend = useProjectStore((state) => state.activeBackend)
-  const setParsedUniforms = useProjectStore((state) => state.setParsedUniforms)
 
   // Connect to bridge on mount
   useEffect(() => {
@@ -64,12 +69,8 @@ function App() {
 
   // Parse uniforms based on backend and shader source changes
   useEffect(() => {
-    if (!shaderSource) return
-    const uniforms = activeBackend === "webgpu" ? parseWgslUniforms(shaderSource) : parseGlslUniforms(shaderSource)
-    if (uniforms.length > 0) {
-      setParsedUniforms(uniforms)
-    }
-  }, [shaderSource, activeBackend, setParsedUniforms])
+    syncParsedUniforms(shaderSource, activeBackend)
+  }, [shaderSource, activeBackend])
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground relative">

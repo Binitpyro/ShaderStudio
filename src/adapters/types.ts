@@ -189,6 +189,48 @@ export interface MemoryBudgetConfig {
 }
 
 // ----------------------------------------------------------------------------
+// W2 Contracts (adapters wire these in W4)
+// ----------------------------------------------------------------------------
+
+/**
+ * Fidelity settings owned by `useRenderSettingsStore`. The coordinator/Viewport pushes the whole
+ * object to the active adapter via `applyRenderSettings`; adapters diff and apply what they support.
+ */
+export interface RenderSettings {
+  renderMode: RenderingPipelineMode
+  shadows: {
+    enabled: boolean
+    resolution: 512 | 1024 | 2048 | 4096
+    filterMode: ShadowFilterMode
+    bias: number
+    normalBias: number
+    /** Omnidirectional (cube) point-light shadows. */
+    pointShadows: boolean
+  }
+  antiAliasing: AntiAliasingMode
+  ssao: SSAOSettings
+  ssr: SSRSettings
+  dof: DoFSettings
+  atmosphere: AtmosphereParams
+  gbufferDebugView: GBufferDebugView
+}
+
+/** Per-frame stats an adapter reports after drawing (see `performanceTelemetry.reportFrameStats`). */
+export interface FrameStats {
+  drawCalls: number
+  triangles: number
+  passTimings?: DetailedGpuMetrics["passTimings"]
+}
+
+/** Request for a one-off GPU preview of a single node's shader (inspector thumbnails). */
+export interface RenderToTargetRequest {
+  nodeId: string
+  source: { wgsl?: string; glsl?: string }
+  width: number
+  height: number
+}
+
+// ----------------------------------------------------------------------------
 // Core RenderAdapter Interface
 // ----------------------------------------------------------------------------
 export interface RenderAdapter {
@@ -207,6 +249,21 @@ export interface RenderAdapter {
   updateComputeUniform?(name: string, value: number | number[]): void
   updateAudioData?(textureBuffer: Uint8Array, uniforms: AudioUniforms): void
   updateEnvironment?(settings: EnvironmentSettings): void
+
+  /**
+   * When true the adapter must NOT run its own requestAnimationFrame loop: the RenderCoordinator is
+   * the single loop authority and calls `renderFrame`. Viewport sets this BEFORE `mount`.
+   */
+  setExternalLoopDriven?(external: boolean): void
+  /** Draws one frame. `delta` is 0 while paused (adapters should skip compute/simulation steps). */
+  renderFrame?(time: number, delta: number): void
+  /** Applies the full fidelity settings object (renderMode, shadows, AA, SSAO/SSR/DoF, atmosphere, G-buffer view). */
+  applyRenderSettings?(settings: RenderSettings): void
+  /**
+   * Renders `request.source` for one node into an offscreen target and returns the pixels.
+   * Resolves null when unsupported or the source fails to compile.
+   */
+  renderToTarget?(request: RenderToTargetRequest): Promise<ImageBitmap | ImageData | null>
 
   // R2 Extended Methods & Parity State
   state?: MultiBackendParityState

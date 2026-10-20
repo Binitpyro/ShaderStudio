@@ -3,12 +3,17 @@ import { Handle, Position } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import { useProjectStore } from "@/stores/projectStore"
+import { useLayoutStore } from "@/stores/layoutStore"
 import type { MaterialNodeData } from "@/core/graphCompiler"
 
 function MaterialNodeComponent({ data, selected }: FlowNodeProps<MaterialNodeData>) {
   const activeShaderPath = useProjectStore((s) => s.activeShaderPath)
   const shaderPath = data.shaderPath || activeShaderPath || "default.wgsl"
-  const handleShaderClick = () => { const event = new CustomEvent("focusShader", { detail: { path: shaderPath }, bubbles: true }); document.dispatchEvent(event) }
+  const handleOpenInEditor = () => {
+    const project = useProjectStore.getState()
+    project.setActiveEditorTab(project.activeBackend === "webgpu" ? "render" : "fragment")
+    useLayoutStore.getState().jumpToLine(1)
+  }
   const uniformValues = useProjectStore((s) => s.uniformValues)
   const activeBackend = useProjectStore((s) => s.activeBackend)
   const isWgsl = shaderPath.endsWith(".wgsl") || activeBackend === "webgpu"
@@ -29,13 +34,12 @@ function MaterialNodeComponent({ data, selected }: FlowNodeProps<MaterialNodeDat
           {isWgsl ? "WGSL" : "GLSL"}
         </span>
       </div>
-      <button
-        onClick={handleShaderClick}
-        className="w-full bg-background text-xs border border-border rounded px-2 py-1 text-left hover:border-primary transition-colors truncate font-mono nodrag"
+      <div
+        className="w-full bg-background text-xs border border-border rounded px-2 py-1 text-left truncate font-mono"
         title={shaderPath}
       >
         {shaderPath.split("/").pop() || "default.wgsl"}
-      </button>
+      </div>
 
       {selected && (
         <div className="mt-2 pt-2 border-t border-border/60 flex flex-col gap-1.5 font-mono text-[10px]">
@@ -61,7 +65,7 @@ function MaterialNodeComponent({ data, selected }: FlowNodeProps<MaterialNodeDat
 
           <button
             type="button"
-            onClick={handleShaderClick}
+            onClick={handleOpenInEditor}
             className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 rounded px-2 py-1 text-[10px] font-semibold text-center transition-colors cursor-pointer nodrag"
           >
             Open in Editor

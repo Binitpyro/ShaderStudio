@@ -1,48 +1,39 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { cn } from "@/lib/utils"
 import { viewportCapture } from "@/utils/frameCapture"
-import { renderCoordinator } from "@/core/renderCoordinator"
 import { performanceTelemetry, type DetailedGpuMetrics } from "@/core/performanceTelemetry"
 import { useProjectStore } from "@/stores/projectStore"
 import { Activity, AlertTriangle, ChevronDown, ChevronUp, Cpu, HardDrive } from "lucide-react"
+
+/** UI refresh cadence for the profiler (4Hz). */
+export const PERF_OVERLAY_INTERVAL_MS = 250
 
 export function PerfOverlay({ className }: { className?: string }) {
   const [metrics, setMetrics] = useState<DetailedGpuMetrics>(() => performanceTelemetry.getMetrics())
   const [visible, setVisible] = useState(true)
   const [expanded, setExpanded] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const metricsRef = useRef<DetailedGpuMetrics>(metrics)
-  metricsRef.current = metrics
 
   const memoryBudget = useProjectStore((s) => s.memoryBudget)
   const vramMB = Number((metrics.estimatedVramBytes / (1024 * 1024)).toFixed(1))
   const isVramOverBudget = vramMB > (memoryBudget.totalVramBudgetMB * memoryBudget.warnThresholdRatio)
 
+  // Capture reads the cheap telemetry getters directly, so it stays correct even while hidden.
   useEffect(() => {
     viewportCapture.registerPerfMetrics(() => ({
-      fps: metricsRef.current.fps,
-      frameTimeMs: metricsRef.current.frameTime,
+      fps: Math.round(performanceTelemetry.getAverageFps()),
+      frameTimeMs: performanceTelemetry.getLastFrameTime(),
     }))
-
-    // Subscribe to both renderCoordinator and performanceTelemetry
-    const unsubCoordinator = renderCoordinator.onMetrics((m) => {
-      const telemetryMetrics = performanceTelemetry.getMetrics()
-      setMetrics({
-        ...telemetryMetrics,
-        fps: m.fps || telemetryMetrics.fps,
-        frameTime: m.frameTimeMs || telemetryMetrics.frameTime,
-      })
-    })
-
-    const unsubTelemetry = performanceTelemetry.subscribe((m) => {
-      setMetrics(m)
-    })
-
-    return () => {
-      unsubCoordinator()
-      unsubTelemetry()
-    }
+    // frameCapture has no unregister: on unmount restore its no-provider defaults so it never calls into a dead overlay.
+    return () => viewportCapture.registerPerfMetrics(() => ({ fps: 60, frameTimeMs: 16.6 }))
   }, [])
+
+  // One throttled subscription, and none at all while the overlay is hidden.
+  useEffect(() => {
+    if (!visible) return
+    setMetrics(performanceTelemetry.getMetrics())
+    return performanceTelemetry.subscribe(setMetrics, PERF_OVERLAY_INTERVAL_MS)
+  }, [visible])
 
   // Draw 60-frame history timeline on canvas
   useEffect(() => {

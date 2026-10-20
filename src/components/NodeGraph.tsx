@@ -1,5 +1,25 @@
 import { useCallback, useEffect, useRef } from "react"
-import { ReactFlow, type Node, type Edge, type Connection, type OnConnect, type OnNodesChange, type OnEdgesChange, type NodeTypes, addEdge, applyNodeChanges, applyEdgeChanges, Controls, Background, BackgroundVariant, Panel } from "@xyflow/react"
+import {
+  ReactFlow,
+  type Node,
+  type Edge,
+  type Connection,
+  type OnConnect,
+  type OnNodesChange,
+  type OnEdgesChange,
+  type NodeChange,
+  type EdgeChange,
+  type NodeTypes,
+  addEdge,
+  applyNodeChanges,
+  applyEdgeChanges,
+  useNodesState,
+  useEdgesState,
+  Controls,
+  Background,
+  BackgroundVariant,
+  Panel,
+} from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 import { MeshNode } from "@/components/nodes/MeshNode"
 import { ComputeNode } from "@/components/nodes/ComputeNode"
@@ -19,8 +39,10 @@ import { MathExpressionNode } from "@/components/nodes/MathExpressionNode"
 import { CommentNode } from "@/components/nodes/CommentNode"
 import { FrameNode } from "@/components/nodes/FrameNode"
 import { Button } from "@/components/ui/button"
-import { compileGraph, type GraphNodeData, hasPostProcessNode, hasRaymarchNode } from "@/core/graphCompiler"
-import { useProjectStore } from "@/stores/projectStore"
+import { compileGraph, buildSdfTree, type GraphNodeData, type RenderQueue } from "@/core/graphCompiler"
+import { useProjectStore, registerLiveGraphProvider } from "@/stores/projectStore"
+import { collectSdfUniforms } from "@/core/sdf/sdfCompiler"
+import { debounce, type Debounced } from "@/utils/throttle"
 import { cn } from "@/lib/utils"
 import { Plus } from "lucide-react"
 
@@ -48,10 +70,235 @@ export const nodeTypes: NodeTypes = {
   frame: FrameNode,
 }
 
-import { STARTER_NODES, STARTER_EDGES } from "@/core/defaultStarterScene"
+// ---------------------------------------------------------------------------
+// Graph <-> store synchronisation (module level so it is unit-testable without a DOM).
+//
+// React Flow owns the live nodes/edges (positions included). The store only receives:
+//   - a serializable snapshot on structure/data edits (immediately) and after drags (debounced),
+//   - compile results (render queue / errors / generated raymarch sources) on structure/data edits.
+// Position / select / dimension changes never compile and never touch the GPU pipeline.
+// ---------------------------------------------------------------------------
 
-const DEFAULT_NODES: Node<GraphNodeData>[] = STARTER_NODES
-const DEFAULT_EDGES: Edge[] = STARTER_EDGES
+export interface NodeChangeKinds {
+  /** add / remove / structure-affecting replace: compile + publish. */
+  structural: boolean
+  /** position / explicit resize / no-op replace: layout only -> debounced snapshot + dirty flag, no compile. */
+  layout: boolean
+  /** replace that only changed parameter values (SDF params, uniform default): push values + debounced snapshot, no compile. */
+  params: boolean
+}
+
+/** Per node kind: the data keys that are pure parameter values (everything else in `data` is structure). */
+const PARAM_KEYS: Record<string, readonly string[]> = {
+  sdf_primitive: ["params"],
+  sdf_operator: ["params"],
+  uniform: ["defaultValue"],
+}
+
+type ReplaceKind = "structural" | "params" | "layout"
+
+function withoutKeys(data: Record<string, unknown>, keys: readonly string[]): string {
+  const rest: Record<string, unknown> = {}
+  for (const k of Object.keys(data)) if (!keys.includes(k)) rest[k] = data[k]
+  return JSON.stringify(rest)
+}
+
+/**
+ * React Flow's controlled setNodes diff (used by updateNodeData) emits "replace" for ANY data edit.
+ * Only a change to type / structural data (ports, kind, source path, expression, subgraph contents ...)
+ * needs a compile; value-only edits and no-op replaces must not.
+ */
+function classifyReplace(prev: Node<GraphNodeData> | undefined, next: Node<GraphNodeData>): ReplaceKind {
+  if (!prev || prev.type !== next.type || prev.data.type !== next.data.type) return "structural"
+  const keys = PARAM_KEYS[next.data.type]
+  if (!keys) return JSON.stringify(prev.data) === JSON.stringify(next.data) ? "layout" : "structural"
+  if (withoutKeys(prev.data, keys) !== withoutKeys(next.data, keys)) return "structural"
+  return "params"
+}
+
+/** `current` enables value-only replace detection; without it every replace is structural. */
+export function classifyNodeChanges(changes: NodeChange[], current?: Node<GraphNodeData>[]): NodeChangeKinds {
+  let structural = false
+  let layout = false
+  let params = false
+  // A subgraph flattens into the compiled graph, so any replace while one exists is treated as structural.
+  const hasSubgraph = !current || current.some((n) => n.data.type === "subgraph")
+  for (const c of changes) {
+    if (c.type === "add" || c.type === "remove") structural = true
+    else if (c.type === "replace") {
+      const kind = hasSubgraph ? "structural" : classifyReplace(current!.find((n) => n.id === c.id), c.item as Node<GraphNodeData>)
+      if (kind === "structural") structural = true
+      else if (kind === "params") params = true
+      else layout = true
+    } else if (c.type === "position" || (c.type === "dimensions" && c.setAttributes)) layout = true
+    // select / plain measurement (dimensions without setAttributes): ignored entirely
+  }
+  return { structural, layout, params }
+}
+
+export function isStructuralEdgeChange(c: EdgeChange): boolean {
+  return c.type === "add" || c.type === "remove" || c.type === "replace"
+}
+
+interface GraphSyncState {
+  publishedNodes: Node<GraphNodeData>[] | null
+  publishedEdges: Edge[] | null
+  /** Last generated raymarch sources pushed to the store (skip recompiles when unchanged). */
+  raymarchSources: string | null
+  /** Signature of the last queue pushed to the store, ignoring SDF uniform values. */
+  queueSignature: string | null
+}
+
+const sync: GraphSyncState = { publishedNodes: null, publishedEdges: null, raymarchSources: null, queueSignature: null }
+
+/** Test hook / project switch: forget what was last pushed so the next compile re-applies everything. */
+export function resetGraphSync() {
+  sync.publishedNodes = null
+  sync.publishedEdges = null
+  sync.raymarchSources = null
+  sync.queueSignature = null
+}
+
+function queueSignature(queue: RenderQueue): string {
+  // sdfUniforms are values, not structure: slider drags must not look like a queue change.
+  return JSON.stringify(queue, (key, value) => (key === "sdfUniforms" ? undefined : value))
+}
+
+function mergeSdfUniforms(values: Record<string, number>) {
+  const store = useProjectStore.getState()
+  const changed: Record<string, { type: "float"; value: number }> = {}
+  for (const [name, value] of Object.entries(values)) {
+    const existing = store.uniformValues[name]
+    if (!existing || existing.value !== value) changed[name] = { type: "float", value }
+  }
+  if (Object.keys(changed).length > 0) store.mergeUniformValues(changed)
+}
+
+/** Value-only edit: push SDF values (tree walk only: no source generation, no compileGraph) and uniform node defaults. */
+function pushParamValues(nodes: Node<GraphNodeData>[], edges: Edge[]) {
+  for (const n of nodes) {
+    if (n.data.type === "raymarch") {
+      const input = edges.find((e) => e.target === n.id)
+      if (input) mergeSdfUniforms(collectSdfUniforms(buildSdfTree(input.source, nodes, edges)))
+    } else if (n.data.type === "uniform") {
+      const u = n.data
+      const store = useProjectStore.getState()
+      const gu = store.graphUniforms.find((g) => g.id === (u.uniformId || `uniform_${n.id}`))
+      if (gu && JSON.stringify(gu.defaultValue) !== JSON.stringify(u.defaultValue)) {
+        store.updateGraphUniform(gu.id, { defaultValue: u.defaultValue })
+      }
+    }
+  }
+}
+
+/** Compile the graph and publish the result to the store, skipping work whose output is unchanged. */
+export function compileAndPublish(nodes: Node<GraphNodeData>[], edges: Edge[]) {
+  const store = useProjectStore.getState()
+  if (nodes.length === 0) {
+    // Empty graph: nothing to render, and "no output node" is not an error worth surfacing.
+    if (store.lastCompileError !== null) store.setLastCompileError(null)
+    if (store.renderQueue !== null) store.setRenderQueue(null)
+    sync.queueSignature = null
+    sync.raymarchSources = null
+    return
+  }
+
+  const result = compileGraph(nodes, edges)
+  if (result.error) {
+    store.setLastCompileError(result.error)
+    store.setRenderQueue(null)
+    sync.queueSignature = null
+    return
+  }
+  if (store.lastCompileError !== null) store.setLastCompileError(null)
+
+  const raymarch = result.queue.find((step) => step.type === "raymarch")
+  if (raymarch && raymarch.type === "raymarch") {
+    // 1. SDF parameter values flow through the normal uniform path (adapters read store.uniformValues).
+    if (raymarch.sdfUniforms) {
+      mergeSdfUniforms(raymarch.sdfUniforms)
+    }
+    // 2. Only a different generated source (graph structure) rebuilds the pipeline.
+    const key = raymarch.wgslSource + "\u0000" + raymarch.glslSource
+    if (key !== sync.raymarchSources) {
+      sync.raymarchSources = key
+      store.setGeneratedSources({ wgsl: raymarch.wgslSource, glsl: raymarch.glslSource })
+      store.triggerRecompile()
+    }
+  } else {
+    sync.raymarchSources = null
+  }
+
+  const signature = queueSignature(result.queue)
+  if (signature !== sync.queueSignature) {
+    sync.queueSignature = signature
+    store.setRenderQueue(result.queue)
+  }
+}
+
+function removedUniformIds(prev: Node<GraphNodeData>[], next: Node<GraphNodeData>[]): string[] {
+  const alive = new Set(next.map((n) => n.id))
+  const ids: string[] = []
+  for (const n of prev) {
+    if (n.data.type === "uniform" && !alive.has(n.id)) ids.push(n.data.uniformId || `uniform_${n.id}`)
+  }
+  return ids
+}
+
+/** A real structure/data edit: compile, publish the snapshot, drop deleted uniform nodes' graph uniforms, mark dirty. */
+export function publishStructure(prevNodes: Node<GraphNodeData>[], nextNodes: Node<GraphNodeData>[], edges: Edge[]) {
+  const store = useProjectStore.getState()
+  for (const id of removedUniformIds(prevNodes, nextNodes)) store.removeGraphUniform(id)
+  compileAndPublish(nextNodes, edges)
+  sync.publishedNodes = nextNodes
+  sync.publishedEdges = edges
+  store.setGraphNodes(nextNodes, { markDirty: false })
+  store.setGraphEdges(edges, { markDirty: false })
+  if (!useProjectStore.getState().hasUnsavedChanges) store.setHasUnsavedChanges(true)
+}
+
+/** Layout-only snapshot (after drags settle): no compile, but the project is dirty. */
+export function publishLayout(nodes: Node<GraphNodeData>[]) {
+  sync.publishedNodes = nodes
+  useProjectStore.getState().setGraphNodes(nodes) // marks dirty
+}
+
+/**
+ * Apply React Flow node changes. Pure with respect to React state: callers set the returned array.
+ * Position / select / dimension changes never compile; only structural changes do.
+ */
+export function processNodeChanges(
+  changes: NodeChange[],
+  current: Node<GraphNodeData>[],
+  edges: Edge[],
+  onLayout: () => void,
+  /** Debounced snapshot after value-only edits (defaults to onLayout). */
+  onData: () => void = onLayout
+): Node<GraphNodeData>[] {
+  const next = applyNodeChanges(changes, current) as Node<GraphNodeData>[]
+  const kinds = classifyNodeChanges(changes, current)
+  if (kinds.structural) publishStructure(current, next, edges)
+  else if (kinds.params) {
+    pushParamValues(next, edges)
+    onData()
+  } else if (kinds.layout) onLayout()
+  return next
+}
+
+export function processEdgeChanges(
+  changes: EdgeChange[],
+  nodes: Node<GraphNodeData>[],
+  current: Edge[]
+): Edge[] {
+  const next = applyEdgeChanges(changes, current)
+  if (changes.some(isStructuralEdgeChange)) publishStructure(nodes, nodes, next)
+  return next
+}
+
+/** Did the store receive a graph the NodeGraph did not publish itself (load / reset / template)? */
+export function isExternalGraphWrite(storeNodes: Node<GraphNodeData>[], storeEdges: Edge[]) {
+  return storeNodes !== sync.publishedNodes || storeEdges !== sync.publishedEdges
+}
 
 interface NodeGraphProps { className?: string }
 
@@ -61,127 +308,102 @@ export function NodeGraph({ className }: NodeGraphProps) {
     nodeId: null,
   })
   const [isPaletteOpen, setIsPaletteOpen] = useState(false)
-  const setCompileError = useProjectStore((s) => s.setLastCompileError)
-  const setRenderQueue = useProjectStore((s) => s.setRenderQueue)
-  const setGraphNodes = useProjectStore((s) => s.setGraphNodes)
-  const setGraphEdges = useProjectStore((s) => s.setGraphEdges)
   const setSelectedNodeId = useProjectStore((s) => s.setSelectedNodeId)
   const storeNodes = useProjectStore((s) => s._graphNodes)
   const storeEdges = useProjectStore((s) => s._graphEdges)
 
-  const [nodes, setNodes] = useState<Node<GraphNodeData>[]>(DEFAULT_NODES)
-  const [edges, setEdges] = useState<Edge[]>(DEFAULT_EDGES)
-  const nodesRef = useRef<Node<GraphNodeData>[]>(DEFAULT_NODES)
-  const edgesRef = useRef<Edge[]>(DEFAULT_EDGES)
-  const initialized = useRef(false)
+  // Mount from the store snapshot (NOT a hard-coded starter), so New Project / remounts stay consistent.
+  const [nodes, setNodes] = useNodesState<Node<GraphNodeData>>(useProjectStore.getState()._graphNodes)
+  const [edges, setEdges] = useEdgesState<Edge>(useProjectStore.getState()._graphEdges)
+  const nodesRef = useRef<Node<GraphNodeData>[]>(nodes)
+  const edgesRef = useRef<Edge[]>(edges)
+  if (sync.publishedNodes === null) {
+    sync.publishedNodes = nodesRef.current
+    sync.publishedEdges = edgesRef.current
+  }
 
-  const compileAndNotify = useCallback(() => {
-    const result = compileGraph(nodesRef.current, edgesRef.current)
-    const error = result.error
-    const queue = result.queue
-    if (error) {
-      setCompileError(error)
-      setRenderQueue(null)
-    } else {
-      setCompileError(null)
-      setRenderQueue(queue)
-      const raymarchStep = queue.find((s) => s.type === "raymarch")
-      if (raymarchStep && raymarchStep.type === "raymarch") {
-        const activeBackend = useProjectStore.getState().activeBackend
-        const newSource = activeBackend === "webgpu" ? raymarchStep.wgslSource : raymarchStep.glslSource
-        useProjectStore.getState().setShaderSource(newSource)
-        useProjectStore.getState().triggerRecompile()
-      }
-    }
-    if (hasPostProcessNode(nodesRef.current) || hasRaymarchNode(nodesRef.current)) {
-      useProjectStore.getState().setHasUnsavedChanges(true)
-    }
-  }, [setCompileError, setRenderQueue])
+  const commitNodes = useCallback((next: Node<GraphNodeData>[]) => {
+    nodesRef.current = next
+    setNodes(next)
+  }, [setNodes])
+  const commitEdges = useCallback((next: Edge[]) => {
+    edgesRef.current = next
+    setEdges(next)
+  }, [setEdges])
 
+  const layoutSnapshotRef = useRef<Debounced<[]> | null>(null)
+  if (!layoutSnapshotRef.current) layoutSnapshotRef.current = debounce(() => publishLayout(nodesRef.current), 300)
+  const layoutSnapshot = layoutSnapshotRef.current
+
+  /** Data edit helper for the node-level custom events below. No side effects inside state updaters. */
   const updateNodes = useCallback(
     (updater: (prev: Node<GraphNodeData>[]) => Node<GraphNodeData>[]) => {
-      setNodes((current) => {
-        const updated = updater(current)
-        nodesRef.current = updated
-        setGraphNodes(updated)
-        compileAndNotify()
-        return updated
-      })
+      const prev = nodesRef.current
+      const next = updater(prev)
+      if (next === prev) return
+      commitNodes(next)
+      publishStructure(prev, next, edgesRef.current)
     },
-    [setGraphNodes, compileAndNotify]
+    [commitNodes]
   )
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
-      setNodes((current) => {
-        const updated = applyNodeChanges(changes, current) as Node<GraphNodeData>[]
-        nodesRef.current = updated
-        setGraphNodes(updated)
-        compileAndNotify()
-        return updated
-      })
+      commitNodes(processNodeChanges(changes, nodesRef.current, edgesRef.current, layoutSnapshot))
     },
-    [setGraphNodes, compileAndNotify]
+    [commitNodes, layoutSnapshot]
   )
 
   const onEdgesChange: OnEdgesChange = useCallback(
     (changes) => {
-      setEdges((current) => {
-        const updated = applyEdgeChanges(changes, current)
-        edgesRef.current = updated
-        setGraphEdges(updated)
-        compileAndNotify()
-        return updated
-      })
+      commitEdges(processEdgeChanges(changes, nodesRef.current, edgesRef.current))
     },
-    [setGraphEdges, compileAndNotify]
+    [commitEdges]
   )
 
   const onConnect: OnConnect = useCallback(
     (connection: Connection) => {
-      setEdges((current) => {
-        const updated = addEdge(connection, current)
-        edgesRef.current = updated
-        setGraphEdges(updated)
-        compileAndNotify()
-        return updated
-      })
+      const next = addEdge(connection, edgesRef.current)
+      commitEdges(next)
+      publishStructure(nodesRef.current, nodesRef.current, next)
     },
-    [setGraphEdges, compileAndNotify]
+    [commitEdges]
   )
 
   const onSelectionChange = useCallback(
     ({ nodes: selectedNodes }: { nodes: Node<GraphNodeData>[] }) => {
-      setSelectedNodeId(selectedNodes[0]?.id ?? null)
+      const id = selectedNodes[0]?.id ?? null
+      if (useProjectStore.getState().selectedNodeId !== id) setSelectedNodeId(id)
     },
     [setSelectedNodeId]
   )
 
-  // Sync external store changes (from loadProjectData, resetProject, etc.)
+  // External store writes (loadProjectData, resetProject, starter scene, templates) -> React Flow.
+  // Nodes and edges are applied together so we compile once against a consistent graph.
   useEffect(() => {
-    if (storeNodes && storeNodes.length > 0 && storeNodes !== nodesRef.current) {
-      nodesRef.current = storeNodes
-      setNodes(storeNodes)
-      compileAndNotify()
-    }
-  }, [storeNodes, compileAndNotify])
+    if (!isExternalGraphWrite(storeNodes, storeEdges)) return
+    layoutSnapshot.cancel()
+    sync.publishedNodes = storeNodes
+    sync.publishedEdges = storeEdges
+    sync.raymarchSources = null
+    sync.queueSignature = null
+    nodesRef.current = storeNodes
+    edgesRef.current = storeEdges
+    setNodes(storeNodes)
+    setEdges(storeEdges)
+    compileAndPublish(storeNodes, storeEdges)
+  }, [storeNodes, storeEdges, setNodes, setEdges, layoutSnapshot])
 
+  // Mount: make sure the render queue matches the graph, expose the live graph to save/export,
+  // and on unmount flush a pending drag snapshot so the store never keeps stale positions.
   useEffect(() => {
-    if (storeEdges && storeEdges !== edgesRef.current) {
-      edgesRef.current = storeEdges
-      setEdges(storeEdges)
-      compileAndNotify()
+    compileAndPublish(nodesRef.current, edgesRef.current)
+    registerLiveGraphProvider(() => ({ nodes: nodesRef.current, edges: edgesRef.current }))
+    return () => {
+      layoutSnapshot.flush()
+      registerLiveGraphProvider(null)
     }
-  }, [storeEdges, compileAndNotify])
-
-  useEffect(() => {
-    if (!initialized.current) {
-      initialized.current = true
-      setGraphNodes(nodesRef.current)
-      setGraphEdges(edgesRef.current)
-      compileAndNotify()
-    }
-  }, [setGraphNodes, setGraphEdges, compileAndNotify])
+  }, [layoutSnapshot])
 
   useEffect(() => {
     const handleMeshChange = (e: CustomEvent) => {
@@ -393,15 +615,9 @@ export function NodeGraph({ className }: NodeGraphProps) {
           return
       }
       const newNode: Node<GraphNodeData> = { id, type, position, data }
-      setNodes((current) => {
-        const updated = [...current, newNode]
-        nodesRef.current = updated
-        setGraphNodes(updated)
-        compileAndNotify()
-        return updated
-      })
+      updateNodes((current) => [...current, newNode])
     },
-    [setGraphNodes, compileAndNotify]
+    [updateNodes]
   )
 
   useEffect(() => {
@@ -427,15 +643,9 @@ export function NodeGraph({ className }: NodeGraphProps) {
       const id = `${type}-${Date.now()}`
       const position = { x: 250 + Math.random() * 80, y: 150 + Math.random() * 80 }
       const newNode: Node<GraphNodeData> = { id, type, position, data }
-      setNodes((current) => {
-        const updated = [...current, newNode]
-        nodesRef.current = updated
-        setGraphNodes(updated)
-        compileAndNotify()
-        return updated
-      })
+      updateNodes((current) => [...current, newNode])
     },
-    [setGraphNodes, compileAndNotify]
+    [updateNodes]
   )
 
   return (

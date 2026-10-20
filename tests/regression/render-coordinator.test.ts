@@ -564,7 +564,7 @@ describe("Adversarial Stress Test: Milestone 2 RenderCoordinator and Lifecycle C
       audioEngine.update = originalUpdate
     })
 
-    it("evaluates impact when a pre-render hook throws: Phase 4 & 5 do not run and error propagates", () => {
+    it("isolates a throwing pre-render hook: the draw and telemetry phases still run", () => {
       const coordinator = new RenderCoordinator()
       let drawRan = false
       let telemetryRan = false
@@ -582,13 +582,11 @@ describe("Adversarial Stress Test: Milestone 2 RenderCoordinator and Lifecycle C
         telemetryRan = true
       })
 
-      // tick throws when hook throws
-      expect(() => coordinator.tick(100)).toThrow("Pre-render modulation crashed")
-
-      // Notice draw and telemetry were aborted
-      expect(drawRan).toBe(false)
-      expect(telemetryRan).toBe(false)
-      expect(coordinator.getLastFramePhases()).toEqual(["clock", "audio", "modulation"])
+      // fleet(w2): hooks are isolated, one throwing hook never skips the draw
+      expect(() => coordinator.tick(100)).not.toThrow()
+      expect(drawRan).toBe(true)
+      expect(telemetryRan).toBe(true)
+      expect(coordinator.getLastFramePhases()).toEqual(["clock", "audio", "modulation", "draw", "telemetry"])
     })
 
     it("handles pre-render hook unregistering ITSELF during Phase 3 execution cleanly", () => {
@@ -653,13 +651,13 @@ describe("Adversarial Stress Test: Milestone 2 RenderCoordinator and Lifecycle C
       expect(executionOrder).toEqual(["hook-1", "hook-dynamic"])
     })
 
-    it("handles telemetry subscriber throwing without crashing if isolated, or documents abortion", () => {
+    it("isolates a throwing telemetry subscriber", () => {
       const coordinator = new RenderCoordinator()
       coordinator.onMetrics(() => {
         throw new Error("Telemetry subscriber failed")
       })
 
-      expect(() => coordinator.tick(100)).toThrow("Telemetry subscriber failed")
+      expect(() => coordinator.tick(100)).not.toThrow()
       expect(coordinator.getLastFramePhases()).toEqual([
         "clock",
         "audio",
@@ -1026,8 +1024,9 @@ describe("Adversarial RenderCoordinator & Loop Lifecycle Suite (Challenger 2)", 
       coordinator.start()
       expect(env.clock.activeCallbackCount).toBe(1)
 
-      // Stepping the clock causes the rAF callback to throw on frame 1
-      expect(() => env.clock.step(16)).toThrow("Temporary hook transient failure")
+      // fleet(w2): the hook error is isolated, frame 1 does not throw out of the rAF callback
+      expect(() => env.clock.step(16)).not.toThrow()
+      expect(hookCallCount).toBe(1)
 
       // HARDENED BEHAVIOR:
       // try...finally ensures the coordinator remains running and reschedules the next frame
@@ -1400,7 +1399,7 @@ describe("Adversarial Deep Stress: RenderCoordinator Loop & Recovery Invariants"
       coordinator.start()
       expect(env.clock.activeCallbackCount).toBe(1)
 
-      expect(() => env.clock.step(16)).toThrow("Crash after stop")
+      expect(() => env.clock.step(16)).not.toThrow()
       expect(coordinator.getIsRunning()).toBe(false)
       expect(env.clock.activeCallbackCount).toBe(0)
     })
@@ -1420,7 +1419,8 @@ describe("Adversarial Deep Stress: RenderCoordinator Loop & Recovery Invariants"
       coordinator.start()
       expect(env.clock.activeCallbackCount).toBe(1)
 
-      expect(() => env.clock.step(16)).toThrow("Crash after re-entrant start")
+      expect(() => env.clock.step(16)).not.toThrow()
+      expect(stepCount).toBe(1)
       expect(coordinator.getIsRunning()).toBe(true)
       expect(env.clock.activeCallbackCount).toBe(1)
 
@@ -1456,8 +1456,9 @@ describe("Adversarial Deep Stress: RenderCoordinator Loop & Recovery Invariants"
       coordinator.start()
       expect(env.clock.activeCallbackCount).toBe(1)
 
-      // Frame 1 throws during Phase 4
-      expect(() => env.clock.step(16)).toThrow("GPU Pipeline compilation failure during draw")
+      // Frame 1: the draw error is isolated
+      expect(() => env.clock.step(16)).not.toThrow()
+      expect(drawCalls).toBe(1)
       expect(coordinator.getIsRunning()).toBe(true)
       expect(env.clock.activeCallbackCount).toBe(1)
 
@@ -1484,8 +1485,9 @@ describe("Adversarial Deep Stress: RenderCoordinator Loop & Recovery Invariants"
       coordinator.start()
       expect(env.clock.activeCallbackCount).toBe(1)
 
-      // Frame 1 throws in Phase 5
-      expect(() => env.clock.step(16)).toThrow("Telemetry reporting sink crashed")
+      // Frame 1: the subscriber error is isolated
+      expect(() => env.clock.step(16)).not.toThrow()
+      expect(metricsReceived).toBe(1)
       expect(coordinator.getIsRunning()).toBe(true)
       expect(env.clock.activeCallbackCount).toBe(1)
 
@@ -1789,5 +1791,811 @@ describe("RenderCoordinator resilience (w1-c-tooling handoff)", () => {
     expect(coordinator.getActiveAdapter()).toBeNull()
     expect(coordinator.getIsRunning()).toBe(false)
     expect(env.clock.activeCallbackCount).toBe(0)
+  })
+})
+
+// ============================================================================
+// fleet(w2): single loop authority, mount generation guard, delta cap, render on demand, capture
+// ============================================================================
+import { MAX_DELTA_MS } from "@/core/renderCoordinator"
+import { viewportCapture } from "@/utils/frameCapture"
+import type { RenderAdapter } from "@/adapters/types"
+
+describe("w2 render core", () => {
+  let env: ReturnType<typeof setupE2ETestEnvironment>
+  beforeEach(() => { env = setupE2ETestEnvironment() })
+  afterEach(() => { teardownE2ETestEnvironment() })
+
+  const fakeAdapter = (mount: () => Promise<boolean>) => {
+    const a = {
+      backendType: "webgl2" as const,
+      mount: vi.fn(mount),
+      dispose: vi.fn(),
+      renderFrame: vi.fn(),
+      setExternalLoopDriven: vi.fn(),
+    }
+    return a as unknown as RenderAdapter & typeof a
+  }
+
+  describe("item 1: single loop authority", () => {
+    it.each([
+      ["webgpu", async () => new WebGPUAdapter()],
+      ["webgl2", async () => new WebGL2Adapter()],
+      ["threejs", async () => new (await import("@/adapters/threejs")).ThreeJSAdapter()],
+    ])("mounting %s through the coordinator leaves exactly one rAF chain", async (_name, make) => {
+      const coordinator = new RenderCoordinator()
+      const adapter = (await make()) as unknown as RenderAdapter
+      const session = coordinator.mountAdapter(adapter, env.createCanvas() as any)
+      expect(await session.done).toBe(true)
+
+      expect(env.clock.activeCallbackCount).toBe(1) // the coordinator's; the adapter never started its own
+      for (let i = 0; i < 5; i++) {
+        env.clock.step(16)
+        expect(env.clock.activeCallbackCount).toBe(1)
+      }
+      session.cancel()
+      expect(env.clock.activeCallbackCount).toBe(0)
+    })
+  })
+
+  describe("item 7: mount generation guard", () => {
+    it("cancel() while the mount is pending makes the mount dispose its own resources (no leaked loop or device)", async () => {
+      const coordinator = new RenderCoordinator()
+      let resolveMount!: (ok: boolean) => void
+      const adapter = fakeAdapter(() => new Promise<boolean>((r) => { resolveMount = r }))
+      const session = coordinator.mountAdapter(adapter, env.createCanvas() as any)
+      await Promise.resolve() // let the chain reach adapter.mount
+      expect(adapter.mount).toHaveBeenCalledTimes(1)
+
+      session.cancel() // StrictMode cleanup / backend switched / unmounted mid-mount
+      expect(adapter.dispose).not.toHaveBeenCalled() // mount still in flight
+      resolveMount(true)
+
+      expect(await session.done).toBe(false)
+      expect(adapter.dispose).toHaveBeenCalledTimes(1)
+      expect(coordinator.getActiveAdapter()).toBeNull()
+      expect(coordinator.getIsRunning()).toBe(false)
+      expect(env.clock.activeCallbackCount).toBe(0)
+    })
+
+    it("serializes overlapping mounts of the same singleton adapter and only the surviving session goes live", async () => {
+      const coordinator = new RenderCoordinator()
+      const resolvers: Array<(ok: boolean) => void> = []
+      const adapter = fakeAdapter(() => new Promise<boolean>((r) => { resolvers.push(r) }))
+      const canvas = env.createCanvas() as any
+
+      const first = coordinator.mountAdapter(adapter, canvas) // StrictMode first effect
+      await Promise.resolve()
+      first.cancel() // ...cleaned up immediately
+      const second = coordinator.mountAdapter(adapter, canvas) // second effect
+
+      expect(adapter.mount).toHaveBeenCalledTimes(1) // second must wait for first to settle
+      resolvers[0](true)
+      expect(await first.done).toBe(false)
+      expect(adapter.dispose).toHaveBeenCalledTimes(1) // first disposed what it created
+
+      await vi.waitFor(() => expect(adapter.mount).toHaveBeenCalledTimes(2))
+      resolvers[1](true)
+      expect(await second.done).toBe(true)
+      expect(coordinator.getActiveAdapter()).toBe(adapter)
+      expect(env.clock.activeCallbackCount).toBe(1)
+
+      second.cancel()
+      expect(adapter.dispose).toHaveBeenCalledTimes(2)
+      expect(coordinator.getActiveAdapter()).toBeNull()
+      expect(env.clock.activeCallbackCount).toBe(0)
+    })
+
+    it("a failed mount disposes partial resources and resolves false", async () => {
+      const coordinator = new RenderCoordinator()
+      const adapter = fakeAdapter(async () => false)
+      const session = coordinator.mountAdapter(adapter, env.createCanvas() as any)
+      expect(await session.done).toBe(false)
+      expect(adapter.dispose).toHaveBeenCalledTimes(1)
+      expect(coordinator.getActiveAdapter()).toBeNull()
+    })
+  })
+
+  describe("item 2: delta cap and pause", () => {
+    it("caps simulated delta at MAX_DELTA_MS but reports the real interval to telemetry", () => {
+      const coordinator = new RenderCoordinator()
+      const renderFrame = vi.fn()
+      coordinator.setActiveAdapter({ renderFrame, dispose: vi.fn() })
+      const metrics: PerformanceMetrics[] = []
+      coordinator.onMetrics((m) => metrics.push(m))
+      coordinator.tick(1000)
+      coordinator.tick(61000) // 60s background-tab resume
+
+      expect(renderFrame).toHaveBeenLastCalledWith(expect.any(Number), MAX_DELTA_MS)
+      expect(coordinator.getLastDelta()).toBe(MAX_DELTA_MS)
+      expect(coordinator.getPlaybackTime()).toBeLessThan(MAX_DELTA_MS / 1000 + 0.01)
+      expect(metrics[metrics.length - 1].frameTimeMs).toBe(60000)
+    })
+
+    it("delivers delta 0 while paused and exposes it via getLastDelta", () => {
+      const coordinator = new RenderCoordinator()
+      const renderFrame = vi.fn()
+      coordinator.setActiveAdapter({ renderFrame, dispose: vi.fn() })
+      coordinator.tick(1000)
+      coordinator.tick(1016)
+      coordinator.setPlaying(false)
+      coordinator.tick(1032)
+      expect(renderFrame).toHaveBeenLastCalledWith(expect.any(Number), 0)
+      expect(coordinator.getLastDelta()).toBe(0)
+    })
+  })
+
+  describe("item 3: render on demand while paused", () => {
+    it("draws a couple of frames after pausing, then stops scheduling rAF entirely; requestRender wakes it", () => {
+      const coordinator = new RenderCoordinator()
+      const renderFrame = vi.fn()
+      coordinator.setActiveAdapter({ renderFrame, dispose: vi.fn() })
+      coordinator.start()
+      env.clock.step(16)
+      coordinator.setPlaying(false)
+
+      env.clock.stepFrames(10)
+      const drawnWhilePaused = renderFrame.mock.calls.length
+      expect(env.clock.activeCallbackCount).toBe(0) // loop idles: zero rAF callbacks
+      env.clock.stepFrames(10)
+      expect(renderFrame.mock.calls.length).toBe(drawnWhilePaused) // nothing changed -> nothing drawn
+
+      coordinator.requestRender() // uniform update / resize / recompile / camera
+      expect(env.clock.activeCallbackCount).toBe(1)
+      env.clock.stepFrames(10)
+      expect(renderFrame.mock.calls.length).toBeGreaterThan(drawnWhilePaused)
+      expect(renderFrame.mock.calls.length - drawnWhilePaused).toBeLessThanOrEqual(2)
+      expect(env.clock.activeCallbackCount).toBe(0)
+
+      coordinator.setPlaying(true) // resume continues the loop
+      const before = renderFrame.mock.calls.length
+      env.clock.stepFrames(5)
+      expect(renderFrame.mock.calls.length - before).toBe(5)
+      expect(env.clock.activeCallbackCount).toBe(1)
+      coordinator.stop()
+    })
+
+    it("always draws a correct first frame even when started paused", () => {
+      const coordinator = new RenderCoordinator()
+      coordinator.setPlaying(false)
+      const renderFrame = vi.fn()
+      coordinator.setActiveAdapter({ renderFrame, dispose: vi.fn() })
+      coordinator.start()
+      env.clock.stepFrames(4)
+      expect(renderFrame).toHaveBeenCalled()
+      coordinator.stop()
+    })
+
+    it("continuous-render keys keep a paused loop drawing (live audio) until released", () => {
+      const coordinator = new RenderCoordinator()
+      const renderFrame = vi.fn()
+      coordinator.setActiveAdapter({ renderFrame, dispose: vi.fn() })
+      coordinator.start()
+      coordinator.setPlaying(false)
+      env.clock.stepFrames(5)
+      coordinator.setContinuousRender("audio", true)
+      const before = renderFrame.mock.calls.length
+      env.clock.stepFrames(20)
+      expect(renderFrame.mock.calls.length - before).toBe(20)
+      coordinator.setContinuousRender("audio", false)
+      env.clock.stepFrames(5)
+      expect(env.clock.activeCallbackCount).toBe(0)
+      coordinator.stop()
+    })
+
+    it("requests made from inside a frame (pre-render hooks) do not keep a paused loop alive", () => {
+      const coordinator = new RenderCoordinator()
+      coordinator.setActiveAdapter({ renderFrame: vi.fn(), dispose: vi.fn() })
+      coordinator.registerPreRenderHook("h", () => coordinator.requestRender())
+      coordinator.start()
+      coordinator.setPlaying(false)
+      env.clock.stepFrames(6)
+      expect(env.clock.activeCallbackCount).toBe(0)
+      coordinator.stop()
+    })
+  })
+
+  describe("item 10c: captureNextFrame", () => {
+    it("captures right after the next draw, not before", async () => {
+      const coordinator = new RenderCoordinator()
+      const order: string[] = []
+      coordinator.setActiveAdapter({ renderFrame: () => order.push("draw"), dispose: vi.fn() })
+      const blob = new Blob(["x"], { type: "image/png" })
+      const spy = vi.spyOn(viewportCapture, "captureBlob").mockImplementation(async () => { order.push("capture"); return blob })
+      coordinator.start()
+      env.clock.step(16)
+      coordinator.setPlaying(false)
+      env.clock.stepFrames(4)
+      order.length = 0
+
+      const pending = coordinator.captureNextFrame()
+      expect(spy).not.toHaveBeenCalled()
+      env.clock.step(16)
+      expect(await pending).toBe(blob)
+      expect(order.slice(0, 2)).toEqual(["draw", "capture"])
+      spy.mockRestore()
+      coordinator.stop()
+    })
+
+    it("rejects when there is no canvas to capture", async () => {
+      const coordinator = new RenderCoordinator()
+      vi.spyOn(viewportCapture, "captureBlob").mockResolvedValue(null)
+      await expect(coordinator.captureNextFrame()).rejects.toThrow(/Frame capture failed/)
+      vi.restoreAllMocks()
+    })
+  })
+})
+
+describe("w2-c coverage: coordinator mount/subscription edge paths", () => {
+  let env: ReturnType<typeof setupE2ETestEnvironment>
+  beforeEach(() => { env = setupE2ETestEnvironment() })
+  afterEach(() => { teardownE2ETestEnvironment(); vi.restoreAllMocks() })
+
+  const mk = (mount: () => Promise<boolean>) =>
+    ({ backendType: "webgl2", mount: vi.fn(mount), dispose: vi.fn(), renderFrame: vi.fn(), setExternalLoopDriven: vi.fn() }) as unknown as RenderAdapter & { mount: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }
+
+  it("a session cancelled before its turn in the mount queue never calls adapter.mount", async () => {
+    const c = new RenderCoordinator()
+    const adapter = mk(async () => true)
+    const s = c.mountAdapter(adapter, env.createCanvas() as any)
+    s.cancel() // synchronously, before the chained continuation runs
+    expect(await s.done).toBe(false)
+    expect(adapter.mount).not.toHaveBeenCalled()
+    expect(c.getActiveAdapter()).toBeNull()
+  })
+
+  it("a throwing mount warns, disposes and resolves false", async () => {
+    const c = new RenderCoordinator()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const adapter = mk(async () => { throw new Error("gpu boom") })
+    expect(await c.mountAdapter(adapter, env.createCanvas() as any).done).toBe(false)
+    expect(warn).toHaveBeenCalled()
+    expect(adapter.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it("cancel() on a live session is idempotent and only disposes once", async () => {
+    const c = new RenderCoordinator()
+    const adapter = mk(async () => true)
+    const s = c.mountAdapter(adapter, env.createCanvas() as any)
+    await s.done
+    s.cancel()
+    s.cancel()
+    expect(adapter.dispose).toHaveBeenCalledTimes(1)
+    expect(c.getActiveAdapter()).toBeNull()
+  })
+
+  it("a failure inside the mount continuation does not wedge later mounts", async () => {
+    const c = new RenderCoordinator()
+    vi.spyOn(c, "setActiveAdapter").mockImplementationOnce(() => { throw new Error("hook failure") })
+    const bad = c.mountAdapter(mk(async () => true), env.createCanvas() as any)
+    await expect(bad.done).rejects.toThrow("hook failure")
+    const good = c.mountAdapter(mk(async () => true), env.createCanvas() as any)
+    expect(await good.done).toBe(true)
+    good.cancel()
+  })
+
+  it("onTimeUpdate unsubscribe stops notifications; setIsPlaying/getIsPlaying mirror setPlaying", () => {
+    const c = new RenderCoordinator()
+    c.setActiveAdapter({ renderFrame: vi.fn(), dispose: vi.fn() } as any)
+    const times: number[] = []
+    const off = c.onTimeUpdate((t) => times.push(t))
+    c.setIsPlaying(true)
+    expect(c.getIsPlaying()).toBe(true)
+    c.start()
+    env.clock.step(16)
+    env.clock.step(16)
+    const n = times.length
+    expect(n).toBeGreaterThan(0)
+    off()
+    env.clock.step(16)
+    env.clock.step(16)
+    expect(times.length).toBe(n)
+    c.setIsPlaying(false)
+    expect(c.getIsPlaying()).toBe(false)
+    c.stop()
+  })
+
+  it("requesting a render while a frame is already scheduled does not add a second rAF", () => {
+    const c = new RenderCoordinator()
+    c.start()
+    c.requestRender()
+    c.requestRender()
+    expect(env.clock.activeCallbackCount).toBe(1)
+    c.stop()
+  })
+
+  it("a captureBlob rejection with a non-Error is wrapped in an Error for every pending capture", async () => {
+    const c = new RenderCoordinator()
+    vi.spyOn(viewportCapture, "captureBlob").mockRejectedValue("nope")
+    c.setActiveAdapter({ renderFrame: vi.fn(), dispose: vi.fn() } as any)
+    c.start()
+    const p = c.captureNextFrame()
+    const assertion = expect(p).rejects.toThrow("nope")
+    env.clock.step(16)
+    await assertion
+    c.stop()
+  })
+})
+
+// ============================================================================
+// w2-c coverage: the real Viewport component. renderToStaticMarkup never runs effects or keeps state, so a tiny
+// harness keeps refs/state across renders and re-runs an effect only when its deps change (like React). The
+// adapter singletons keep their real prototype methods but with stubbed GPU work.
+// ============================================================================
+import * as React from "react"
+import { renderToStaticMarkup } from "react-dom/server"
+import { Viewport } from "@/components/Viewport"
+import { VideoLoopRecorderModal } from "@/components/VideoLoopRecorderModal"
+import { webgl2Adapter } from "@/adapters/webgl2"
+import { webgpuAdapter } from "@/adapters/webgpu"
+import { threejsAdapter } from "@/adapters/threejs"
+import { useTransportStore } from "@/stores/transportStore"
+
+describe("Viewport (real component, effect-aware harness)", () => {
+  const internals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+  const st = () => useProjectStore.getState()
+  const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
+
+  let env: ReturnType<typeof setupE2ETestEnvironment>
+  let listeners: Record<string, (e?: unknown) => void>
+  let observers: Array<{ cb: () => void; disconnected: boolean }>
+  let rect: { width: number; height: number }
+
+  function createHarness() {
+    const canvas = { tag: "canvas" } as unknown as HTMLCanvasElement
+    const container = {
+      getBoundingClientRect: () => rect,
+      addEventListener: (t: string, f: (e?: unknown) => void) => { listeners[t] = f },
+      removeEventListener: (t: string) => { delete listeners[t] },
+    }
+    // Viewport's first two hooks are useRef: canvasRef, containerRef
+    const refs: Array<{ current: unknown }> = [{ current: canvas }, { current: container }]
+    const states: Array<{ v: unknown }> = []
+    const effects: Array<{ deps?: unknown[]; cleanup?: () => void }> = []
+    const callbacks: Array<{ fn: unknown; deps?: unknown[] }> = []
+    let tree: any = null
+    const render = () => {
+      let ri = 0, si = 0, ei = 0, ci = 0
+      const queue: Array<{ i: number; fn: () => void | (() => void); deps?: unknown[] }> = []
+      function Interceptor() {
+        const original = internals.H
+        internals.H = {
+          ...original,
+          useRef: (init: unknown) => (refs[ri] ??= { current: init }, refs[ri++]),
+          useState: (init: unknown) => {
+            const s = (states[si] ??= { v: init })
+            si++
+            return [s.v, (next: unknown) => { s.v = typeof next === "function" ? (next as (p: unknown) => unknown)(s.v) : next }]
+          },
+          // the server dispatcher does not memoize; real React keeps the callback while deps are unchanged
+          useCallback: (fn: unknown, deps?: unknown[]) => {
+            const c = callbacks[ci]
+            if (!c || !deps || !c.deps || deps.some((d, k) => !Object.is(d, c.deps![k]))) callbacks[ci] = { fn, deps }
+            return callbacks[ci++].fn
+          },
+          useEffect: (fn: () => void | (() => void), deps?: unknown[]) => void queue.push({ i: ei++, fn, deps }),
+        }
+        try { tree = (Viewport as unknown as (p: object) => unknown)({}) } finally { internals.H = original }
+        return null
+      }
+      renderToStaticMarkup(React.createElement(Interceptor))
+      for (const { i, fn, deps } of queue) {
+        const prev = effects[i]
+        const changed = !prev || !deps || !prev.deps || deps.some((d, k) => !Object.is(d, prev.deps![k]))
+        if (!changed) continue
+        prev?.cleanup?.()
+        const c = fn()
+        effects[i] = { deps, cleanup: typeof c === "function" ? c : undefined }
+      }
+      return tree
+    }
+    const walk = (pred: (el: any) => boolean, node: any): any => {
+      if (!node || typeof node !== "object") return null
+      if (Array.isArray(node)) { for (const c of node) { const r = walk(pred, c); if (r) return r } return null }
+      if (node.props && pred(node)) return node
+      return node.props ? walk(pred, node.props.children) : null
+    }
+    const text = (node: any): string =>
+      node == null || typeof node === "boolean" ? "" : typeof node !== "object" ? String(node) : Array.isArray(node) ? node.map(text).join("") : text(node.props?.children)
+    return {
+      canvas,
+      render,
+      find: (pred: (el: any) => boolean) => walk(pred, tree),
+      text: () => text(tree),
+      unmount: () => effects.forEach((e) => e?.cleanup?.()),
+    }
+  }
+
+  /** Stubs the GPU-touching methods of an adapter singleton; returns the spies. */
+  function stubAdapter<T extends object>(adapter: T, mountOk = true) {
+    const a = adapter as any
+    return {
+      mount: vi.spyOn(a, "mount").mockResolvedValue(mountOk),
+      dispose: vi.spyOn(a, "dispose").mockImplementation(() => undefined),
+      setRenderQueue: vi.spyOn(a, "setRenderQueue").mockImplementation(() => undefined),
+      recompileShader: vi.spyOn(a, "recompileShader").mockImplementation(() => undefined),
+      updateEnvironment: vi.spyOn(a, "updateEnvironment").mockImplementation(() => undefined),
+      resize: vi.spyOn(a, "resize").mockImplementation(() => undefined),
+      updateUniform: vi.spyOn(a, "updateUniform").mockImplementation(() => undefined),
+    }
+  }
+
+  let h: ReturnType<typeof createHarness>
+  let requestRender: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    env = setupE2ETestEnvironment()
+    listeners = {}
+    observers = []
+    rect = { width: 800, height: 600 }
+    class FakeResizeObserver {
+      disconnected = false
+      constructor(public cb: () => void) { observers.push(this) }
+      observe() {}
+      disconnect() { this.disconnected = true }
+    }
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver)
+    useProjectStore.getState().resetProject()
+    useProjectStore.setState({ activeBackend: "webgl2", shaderSource: "void main() {}", deviceLost: false })
+    useTransportStore.setState({ resolutionScale: 1 })
+    renderCoordinator.stop()
+    renderCoordinator.setActiveAdapter(null)
+    vi.spyOn(viewportCapture, "registerCanvas").mockImplementation(() => undefined)
+    vi.spyOn(viewportCapture, "unregisterCanvas").mockImplementation(() => undefined)
+    requestRender = vi.spyOn(renderCoordinator, "requestRender")
+    h = createHarness()
+  })
+  afterEach(() => {
+    h.unmount()
+    renderCoordinator.stop()
+    renderCoordinator.setActiveAdapter(null)
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    teardownE2ETestEnvironment()
+  })
+
+  describe("mounting through the coordinator", () => {
+    it("mounts the active backend's adapter, seeds it from the project and makes it the coordinator's adapter", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ renderQueue: [{ type: "mesh", geometry: "cube" }] as any })
+      h.render()
+      await flush()
+
+      expect(spies.mount).toHaveBeenCalledWith(h.canvas)
+      expect(viewportCapture.registerCanvas).toHaveBeenCalledWith(h.canvas)
+      expect(spies.setRenderQueue).toHaveBeenCalledWith([{ type: "mesh", geometry: "cube" }])
+      expect(spies.recompileShader).toHaveBeenCalledWith("void main() {}")
+      expect(spies.updateEnvironment).toHaveBeenCalledWith(st().environmentSettings)
+      expect(spies.resize).toHaveBeenCalledWith(800, 600, 1)
+      expect(renderCoordinator.getActiveAdapter()).toBe(webgl2Adapter)
+      expect(renderCoordinator.getIsRunning()).toBe(true)
+    })
+
+    it("an empty shader is not compiled on mount", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ shaderSource: "" })
+      h.render()
+      await flush()
+      expect(spies.recompileShader).not.toHaveBeenCalled()
+    })
+
+    it("a zero-sized container is not resized on mount", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      rect = { width: 0, height: 0 }
+      h.render()
+      await flush()
+      expect(spies.mount).toHaveBeenCalled()
+      expect(spies.resize).not.toHaveBeenCalled() // nothing meaningful to size to yet
+    })
+
+    it("unmount cancels the session: adapter disposed, canvas unregistered, coordinator idle", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      h.render()
+      await flush()
+      h.unmount()
+      expect(spies.dispose).toHaveBeenCalledTimes(1)
+      expect(viewportCapture.unregisterCanvas).toHaveBeenCalled()
+      expect(renderCoordinator.getActiveAdapter()).toBeNull()
+      expect(renderCoordinator.getIsRunning()).toBe(false)
+    })
+
+    it("switching backend tears down the old adapter and mounts the new one", async () => {
+      const gl = stubAdapter(webgl2Adapter)
+      const three = stubAdapter(threejsAdapter)
+      h.render()
+      await flush()
+      useProjectStore.setState({ activeBackend: "threejs" })
+      h.render()
+      await flush()
+      expect(gl.dispose).toHaveBeenCalledTimes(1)
+      expect(three.mount).toHaveBeenCalledTimes(1)
+      expect(renderCoordinator.getActiveAdapter()).toBe(threejsAdapter)
+    })
+
+    it("resize effect: honours resolution scale, 'native' is capped at 2x, and the observer is disconnected on unmount", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      h.render()
+      await flush()
+      useTransportStore.setState({ resolutionScale: 2 })
+      h.render()
+      expect(spies.resize).toHaveBeenLastCalledWith(800, 600, 2)
+      ;(window as any).devicePixelRatio = 3
+      useTransportStore.setState({ resolutionScale: "native" })
+      h.render()
+      expect(spies.resize).toHaveBeenLastCalledWith(800, 600, 2)
+      ;(window as any).devicePixelRatio = 1.5
+      useTransportStore.setState({ resolutionScale: "native" })
+      useTransportStore.setState({ resolutionScale: 0.5 })
+      h.render()
+      expect(spies.resize).toHaveBeenLastCalledWith(800, 600, 0.5)
+      expect(spies.mount).toHaveBeenCalledTimes(1) // a DPR change never recreates the adapter
+
+      rect = { width: 400, height: 300 }
+      observers[observers.length - 1].cb() // container resized
+      expect(spies.resize).toHaveBeenLastCalledWith(400, 300, 0.5)
+      h.unmount()
+      expect(observers.every((o) => o.disconnected)).toBe(true)
+    })
+  })
+
+  describe("redraw wiring (render on demand)", () => {
+    it("adapter mutators wake the loop once mounted and are restored on unmount", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      h.render()
+      await flush()
+      requestRender.mockClear()
+      spies.updateUniform.mockReturnValue("result" as never)
+
+      const out = (webgl2Adapter as any).updateUniform("u_x", { type: "float", value: 1 })
+      expect(out).toBe("result") // return value passes through
+      expect(spies.updateUniform).toHaveBeenCalledWith("u_x", { type: "float", value: 1 })
+      expect(requestRender).toHaveBeenCalledTimes(1)
+
+      h.unmount()
+      requestRender.mockClear()
+      ;(webgl2Adapter as any).updateUniform("u_x", { type: "float", value: 2 })
+      expect(requestRender).not.toHaveBeenCalled() // unwrapped: back to the plain method
+    })
+
+    it("store edits (render queue, environment, uniform values) and pointer input request a redraw", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      h.render()
+      await flush()
+
+      requestRender.mockClear()
+      const queue = [{ type: "mesh", geometry: "torus" }] as any
+      useProjectStore.setState({ renderQueue: queue })
+      h.render()
+      expect(spies.setRenderQueue).toHaveBeenLastCalledWith(queue)
+      expect(requestRender).toHaveBeenCalled()
+
+      requestRender.mockClear()
+      const env2 = { ...st().environmentSettings, exposure: 2.5 }
+      useProjectStore.setState({ environmentSettings: env2 })
+      h.render()
+      expect(spies.updateEnvironment).toHaveBeenLastCalledWith(env2)
+      expect(requestRender).toHaveBeenCalled()
+
+      requestRender.mockClear()
+      useProjectStore.setState({ uniformValues: { u_a: { type: "float", value: 1 } } as any })
+      expect(requestRender).toHaveBeenCalledTimes(1)
+      useProjectStore.setState({ activeShaderPath: "x" }) // unrelated change
+      expect(requestRender).toHaveBeenCalledTimes(1)
+
+      requestRender.mockClear()
+      listeners.pointerdown()
+      listeners.wheel()
+      listeners.pointermove({ buttons: 1 })
+      expect(requestRender).toHaveBeenCalledTimes(3)
+      listeners.pointermove({ buttons: 0 }) // hover without a button does not redraw
+      expect(requestRender).toHaveBeenCalledTimes(3)
+
+      h.unmount()
+      expect(Object.keys(listeners)).toEqual([])
+    })
+
+    it("recompile trigger recompiles the current shader on the mounted adapter, once per trigger", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      h.render()
+      await flush()
+      spies.recompileShader.mockClear()
+
+      useProjectStore.setState({ shaderSource: "void main() { /* v2 */ }" })
+      h.render()
+      expect(spies.recompileShader).not.toHaveBeenCalled() // typing alone does not compile; the trigger does
+      st().triggerRecompile()
+      h.render()
+      expect(spies.recompileShader).toHaveBeenCalledWith("void main() { /* v2 */ }")
+      h.render()
+      expect(spies.recompileShader).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe("fallback banner (only for real failures)", () => {
+    it("a failed WebGPU mount falls back to WebGL2 and explains why, then the notice auto-dismisses", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
+      vi.spyOn(console, "warn").mockImplementation(() => undefined)
+      stubAdapter(webgpuAdapter, false)
+      stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ activeBackend: "webgpu" })
+      h.render()
+      await flush()
+
+      expect(st().activeBackend).toBe("webgl2")
+      h.render()
+      expect(h.text()).toContain("WebGPU failed to initialise: switched to WebGL2.")
+      vi.advanceTimersByTime(6000)
+      h.render()
+      expect(h.text()).not.toContain("WebGPU failed to initialise")
+    })
+
+    it("a failed WebGL2 mount falls back to Three.js", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => undefined)
+      stubAdapter(webgl2Adapter, false)
+      stubAdapter(threejsAdapter)
+      h.render()
+      await flush()
+      expect(st().activeBackend).toBe("threejs")
+    })
+
+    it("a failed Three.js mount has nowhere to fall back to and only logs", async () => {
+      const err = vi.spyOn(console, "error").mockImplementation(() => undefined)
+      stubAdapter(threejsAdapter, false)
+      useProjectStore.setState({ activeBackend: "threejs" })
+      h.render()
+      await flush()
+      expect(st().activeBackend).toBe("threejs")
+      expect(err).toHaveBeenCalled()
+    })
+
+    it("a manual WebGPU -> WebGL2 switch shows no banner", async () => {
+      stubAdapter(webgpuAdapter)
+      stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ activeBackend: "webgpu" })
+      h.render()
+      await flush()
+      st().setActiveBackend("webgl2")
+      h.render()
+      await flush()
+      expect(h.text()).not.toContain("GPU hardware exhausted")
+      expect(h.text()).not.toContain("failed to initialise")
+    })
+
+    it("a WebGPU -> WebGL2 switch after a real device loss explains the hardware exhaustion", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
+      stubAdapter(webgpuAdapter)
+      stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ activeBackend: "webgpu" })
+      h.render()
+      await flush()
+      useProjectStore.setState({ deviceLost: true })
+      h.render()
+      expect(h.text()).toContain("WebGPU Context Lost")
+      st().setActiveBackend("webgl2")
+      h.render()
+      expect(h.text()).toContain("GPU hardware exhausted: automatically switched to WebGL2 fallback.")
+    })
+
+    it("the fallback notice can be dismissed by hand", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
+      vi.spyOn(console, "warn").mockImplementation(() => undefined)
+      stubAdapter(webgpuAdapter, false)
+      stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ activeBackend: "webgpu" })
+      h.render()
+      await flush()
+      h.render()
+      h.find((el) => el.type === "button" && el.props.children === "✕").props.onClick()
+      h.render()
+      expect(h.text()).not.toContain("failed to initialise")
+    })
+
+    it("shows the compute banner only for a compute pipeline on a non-WebGPU backend", () => {
+      stubAdapter(webgl2Adapter)
+      stubAdapter(webgpuAdapter)
+      useProjectStore.setState({ activeBackend: "webgl2", renderQueue: [{ type: "compute" }] as any })
+      h.render()
+      expect(h.text()).toContain("Compute Pipeline active")
+      useProjectStore.setState({ activeBackend: "webgpu" })
+      h.render()
+      expect(h.text()).not.toContain("Compute Pipeline active")
+    })
+
+    it("the record button opens the video loop recorder", () => {
+      stubAdapter(webgl2Adapter)
+      h.render()
+      expect(h.find((el) => el.type === VideoLoopRecorderModal).props.isOpen).toBe(false)
+      h.find((el) => el.type === "button" && h.text().includes("Record 60fps Loop") && el.props.onClick).props.onClick()
+      h.render()
+      expect(h.find((el) => el.type === VideoLoopRecorderModal).props.isOpen).toBe(true)
+    })
+  })
+
+  describe("audio modulation", () => {
+    let hook: (time: number, delta: number) => void
+    let continuous: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
+      const real = renderCoordinator.registerPreRenderHook.bind(renderCoordinator)
+      vi.spyOn(renderCoordinator, "registerPreRenderHook").mockImplementation((id, fn) => {
+        if (id === "viewport-audio-modulation") hook = fn
+        real(id, fn)
+      })
+      continuous = vi.spyOn(renderCoordinator, "setContinuousRender")
+      vi.spyOn(audioEngine, "uniforms", "get").mockReturnValue({ bass: 0.5, mid: 0.25, treble: 0, level: 0, beat: 0 } as any)
+    })
+
+    it("adds the band signal scaled by amount to the base uniform value, resolving u_/bare aliases", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      useProjectStore.setState({
+        audioBindings: { speed: { band: "bass", amount: 2 }, glow: { band: "mid", amount: 4 } },
+        uniformValues: { u_speed: { type: "float", value: 1 }, glow: { type: "float", value: 10 } } as any,
+      })
+      h.render()
+      await flush()
+      hook(0, 16)
+      expect(spies.updateUniform).toHaveBeenCalledWith("speed", { type: "float", value: 2 }) // 1 + 0.5 * 2
+      expect(spies.updateUniform).toHaveBeenCalledWith("glow", { type: "float", value: 11 }) // 10 + 0.25 * 4
+    })
+
+    it("skips bindings whose base uniform is missing or not a scalar", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      useProjectStore.setState({
+        audioBindings: { ghost: { band: "bass", amount: 1 }, tint: { band: "bass", amount: 1 } },
+        uniformValues: { tint: { type: "vec3", value: [1, 1, 1] } } as any,
+      })
+      h.render()
+      await flush()
+      spies.updateUniform.mockClear()
+      hook(0, 16)
+      expect(spies.updateUniform).not.toHaveBeenCalled()
+    })
+
+    it("rebuilds the binding list when bindings change, and does nothing without bindings or before an adapter is mounted", async () => {
+      const spies = stubAdapter(webgl2Adapter)
+      useProjectStore.setState({ uniformValues: { u_speed: { type: "float", value: 1 } } as any })
+      h.render()
+      expect(hook).toBeTypeOf("function")
+      hook(0, 16) // not mounted yet, no bindings
+      expect(spies.updateUniform).not.toHaveBeenCalled()
+
+      await flush()
+      hook(0, 16) // mounted, still no bindings
+      expect(spies.updateUniform).not.toHaveBeenCalled()
+
+      st().setAudioBinding("speed", { band: "bass", amount: 1 })
+      hook(0, 16)
+      expect(spies.updateUniform).toHaveBeenCalledWith("speed", { type: "float", value: 1.5 })
+
+      spies.updateUniform.mockClear()
+      st().setAudioBinding("speed", null)
+      hook(0, 16)
+      expect(spies.updateUniform).not.toHaveBeenCalled()
+    })
+
+    it("keeps the loop alive only while audio is playing and bindings exist (polled), and clears it on unmount", async () => {
+      stubAdapter(webgl2Adapter)
+      const playing = vi.spyOn(audioEngine, "getIsPlaying").mockReturnValue(true)
+      h.render()
+      await flush()
+      continuous.mockClear()
+      vi.advanceTimersByTime(250)
+      expect(continuous).toHaveBeenLastCalledWith("audio-modulation", false) // playing but no bindings
+
+      st().setAudioBinding("speed", { band: "bass", amount: 1 })
+      vi.advanceTimersByTime(250)
+      expect(continuous).toHaveBeenLastCalledWith("audio-modulation", true)
+
+      playing.mockReturnValue(false)
+      vi.advanceTimersByTime(250)
+      expect(continuous).toHaveBeenLastCalledWith("audio-modulation", false)
+
+      h.unmount()
+      continuous.mockClear()
+      vi.advanceTimersByTime(1000)
+      expect(continuous).not.toHaveBeenCalledWith("audio-modulation", true) // polling stopped
+    })
   })
 })

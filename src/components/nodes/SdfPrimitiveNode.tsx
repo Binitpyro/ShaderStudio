@@ -1,5 +1,5 @@
 import { memo, useCallback } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Handle, Position, useReactFlow } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
@@ -22,17 +22,14 @@ function SdfPrimitiveNodeComponent({ id, data, selected }: FlowNodeProps<SdfPrim
   const primitiveType = data.primitiveType || "sphere"
   const params = data.params || DEFAULT_PRIMITIVE_PARAMS[primitiveType]
 
+  const { updateNodeData } = useReactFlow()
+
+  // React Flow owns node data: update through its API instead of mutating props.
   const updateData = useCallback(
     (newType: SdfPrimitiveType, newParams: any) => {
-      data.primitiveType = newType
-      data.params = newParams
-      const evt = new CustomEvent("nodeDataChanged", {
-        detail: { nodeId: id, data: { ...data, primitiveType: newType, params: newParams } },
-        bubbles: true,
-      })
-      document.dispatchEvent(evt)
+      updateNodeData(id, { primitiveType: newType, params: newParams })
     },
-    [id, data]
+    [id, updateNodeData]
   )
 
   const handleTypeChange = (newType: SdfPrimitiveType) => {

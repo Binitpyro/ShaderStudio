@@ -25,6 +25,9 @@ import {
   PanelLeft,
 } from "lucide-react"
 
+/** Focus inside these owns the Space key (code editor, node-graph canvas which opens its palette on Space). */
+const SPACE_IGNORE_SELECTOR = ".monaco-editor, .react-flow, [data-node-graph], [data-space-passthrough]"
+
 const BACKEND_OPTIONS: { value: BackendType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { value: "webgpu", label: "WebGPU", icon: Cpu },
   { value: "webgl2", label: "WebGL2", icon: Layers },
@@ -79,7 +82,7 @@ const TelemetryBadge = memo(function TelemetryBadge() {
 })
 
 // ----------------------------------------------------------------------------
-// Timeline Scrubber Sub-Component (Isolated 60 FPS Re-rendering)
+// Timeline Scrubber Sub-Component (reads the throttled ~10Hz transport mirror; one render per update)
 // ----------------------------------------------------------------------------
 const TimelineScrubber = memo(function TimelineScrubber() {
   const isPlaying = useTransportStore((state) => state.isPlaying)
@@ -90,14 +93,7 @@ const TimelineScrubber = memo(function TimelineScrubber() {
   const resetTime = useTransportStore((state) => state.resetTime)
 
   const [isScrubbing, setIsScrubbing] = useState(false)
-  const [scrubValue, setScrubValue] = useState(playbackTime)
-
-  // Keep scrubValue synced with playbackTime when not actively dragging
-  useEffect(() => {
-    if (!isScrubbing) {
-      setScrubValue(playbackTime)
-    }
-  }, [playbackTime, isScrubbing])
+  const [scrubValue, setScrubValue] = useState(0)
 
   const handleSliderChange = useCallback((values: number[]) => {
     const val = values[0] ?? 0
@@ -329,8 +325,9 @@ export function Toolbar({
         if (
           tagName === "input" ||
           tagName === "textarea" ||
+          tagName === "select" ||
           target.isContentEditable ||
-          target.closest(".monaco-editor")
+          target.closest(SPACE_IGNORE_SELECTOR)
         ) {
           return
         }

@@ -7,12 +7,15 @@ import type { SdfOperatorType, SdfOperatorParams } from "./sdf/sdfOperators"
 import {
   compileSdfToGlsl,
   compileSdfToWgsl,
+  collectSdfUniforms,
+  type SdfUniformMap,
   type SdfTreeNode,
   type SdfCompileOptions,
 } from "./sdf/sdfCompiler"
 import type { SubGraphDefinition, SubGraphLibrary, SubGraphNodeData } from "./subGraphLibrary"
 import { subGraphLibrary } from "./subGraphLibrary"
 import { customNodeRegistry } from "./customNodeSdk"
+import { validateMathExpression, compileMathExpressionToGlsl, compileMathExpressionToWgsl } from "./mathExpressionValidator"
 
 export type { SubGraphNodeData } from "./subGraphLibrary"
 
@@ -150,6 +153,15 @@ export interface RaymarchStep {
   glslSource: string
   wgslSource: string
   options?: SdfCompileOptions
+  /** SDF parameter values bound as uniforms (name -> value); changing them never changes glsl/wgslSource. */
+  sdfUniforms?: SdfUniformMap
+}
+export interface MathExpressionStep {
+  type: "math_expression"
+  id: string
+  outputType: "float" | "vec2" | "vec3" | "vec4"
+  glsl: string
+  wgsl: string
 }
 export interface CustomStep {
   type: "custom"
@@ -166,6 +178,7 @@ export type RenderStep =
   | MaterialStep
   | PostProcessStep
   | RaymarchStep
+  | MathExpressionStep
   | CustomStep
 export type RenderQueue = RenderStep[]
 
@@ -480,6 +493,7 @@ export function compileGraph(
           glslSource,
           wgslSource,
           options: compileOpts,
+          sdfUniforms: collectSdfUniforms(rootSdfNode),
         })
         break
       }
@@ -498,7 +512,21 @@ export function compileGraph(
         })
         break
       }
-      case "math_expression":
+      case "math_expression": {
+        const expr = data.expression ?? ""
+        const check = validateMathExpression(expr, data.inputNames ?? [])
+        if (check.isValid) {
+          const outputType = data.outputType ?? check.outputType ?? "float"
+          queue.push({
+            type: "math_expression",
+            id: node.id,
+            outputType,
+            glsl: compileMathExpressionToGlsl(expr, "expr_out", outputType),
+            wgsl: compileMathExpressionToWgsl(expr, "expr_out", outputType),
+          })
+        }
+        break
+      }
       case "comment":
       case "frame":
       case "subgraph":
@@ -632,13 +660,6 @@ function validateGraph(nodes: Node<GraphNodeData>[], edges: Edge[]): string | nu
   }
 
   return null
-}
-
-export function getGraphUniforms(nodes: Node<GraphNodeData>[]): Array<{ id: string; name: string; type: string; defaultValue: unknown }> {
-  return nodes.filter((n) => n.data.type === "uniform").map((n) => {
-    const data = n.data as UniformNodeData
-    return { id: data.uniformId, name: data.name, type: data.uniformType, defaultValue: data.defaultValue }
-  })
 }
 
 export function hasTimeNode(nodes: Node<GraphNodeData>[]): boolean {

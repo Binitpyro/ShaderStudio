@@ -14,7 +14,18 @@ import { validateCustomNodeManifest, type CustomNodeManifest, CustomNodeRegistry
 import { FrameNode } from "@/components/nodes/FrameNode"
 import { CommentNode } from "@/components/nodes/CommentNode"
 import { NodePreviewViewport } from "@/components/inspector/NodePreviewViewport"
-import { useProjectStore } from "@/stores/projectStore"
+import { useProjectStore, registerLiveGraphProvider } from "@/stores/projectStore"
+import {
+  processNodeChanges,
+  processEdgeChanges,
+  publishStructure,
+  publishLayout,
+  compileAndPublish,
+  resetGraphSync,
+  isExternalGraphWrite,
+  classifyNodeChanges,
+} from "@/components/NodeGraph"
+import { debounce } from "@/utils/throttle"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
 import { webgpuAdapter } from "@/adapters/webgpu"
 import { webgl2Adapter } from "@/adapters/webgl2"
@@ -1911,3 +1922,193 @@ describe("Tier 5: Comprehensive White-Box Adversarial Coverage & Boundary Harden
   })
 })
 
+
+describe("NodeGraph <-> store sync: no recompile storm, SDF params are uniforms, store holds a snapshot only (fleet w2-a-state)", () => {
+  const sdfNodes = (radius = 1.25, maxSteps = 96, primitiveType: "sphere" | "box" = "sphere"): Node<GraphNodeData>[] => [
+    {
+      id: "prim-1",
+      type: "sdf_primitive",
+      position: { x: 0, y: 0 },
+      data: { type: "sdf_primitive", primitiveType, params: { type: primitiveType, offset: [0, 0, 0], radius, size: [0.8, 0.8, 0.8] } },
+    },
+    { id: "raymarch-1", type: "raymarch", position: { x: 200, y: 0 }, data: { type: "raymarch", maxSteps, maxDistance: 35 } },
+    { id: "output-1", type: "output", position: { x: 400, y: 0 }, data: { type: "output" } },
+  ]
+  const sdfEdges: Edge[] = [
+    { id: "e1", source: "prim-1", target: "raymarch-1", sourceHandle: "sdf", targetHandle: "scene" },
+    { id: "e2", source: "raymarch-1", target: "output-1", sourceHandle: "output", targetHandle: null },
+  ]
+  const replaceNode = (n: Node<GraphNodeData>, data: Partial<GraphNodeData>) =>
+    ({ type: "replace", id: n.id, item: { ...n, data: { ...n.data, ...data } } }) as any
+
+  let nodes: Node<GraphNodeData>[]
+  beforeEach(() => {
+    useProjectStore.getState().resetProject()
+    resetGraphSync()
+    registerLiveGraphProvider(null)
+    nodes = sdfNodes()
+    // baseline: first publish compiles and pushes sources + queue to the store
+    publishStructure([], nodes, sdfEdges)
+    useProjectStore.getState().setHasUnsavedChanges(false)
+  })
+  afterEach(() => registerLiveGraphProvider(null))
+
+  it("position / select / measurement changes never compile, recompile or touch shader sources", () => {
+    const before = useProjectStore.getState()
+    const onLayout = vi.fn()
+    const moved = processNodeChanges(
+      [{ type: "position", id: "prim-1", position: { x: 50, y: 60 }, dragging: true } as any],
+      nodes, sdfEdges, onLayout
+    )
+    processNodeChanges([{ type: "select", id: "prim-1", selected: true } as any], moved, sdfEdges, onLayout)
+    processNodeChanges([{ type: "dimensions", id: "prim-1", dimensions: { width: 10, height: 10 } } as any], moved, sdfEdges, onLayout)
+
+    const after = useProjectStore.getState()
+    expect(moved[0].position).toEqual({ x: 50, y: 60 })
+    expect(onLayout).toHaveBeenCalledTimes(1) // only the position change asks for a (debounced) layout snapshot
+    expect(after.recompileTrigger).toBe(before.recompileTrigger)
+    expect(after.renderQueue).toBe(before.renderQueue)
+    expect(after.shaderSource).toBe(before.shaderSource)
+    expect(after.wgslSource).toBe(before.wgslSource)
+    expect(after._graphNodes).toBe(before._graphNodes) // snapshot untouched per drag tick
+    expect(after.hasUnsavedChanges).toBe(false) // not dirty until the debounced layout publish
+    expect(classifyNodeChanges([{ type: "select", id: "x", selected: true }])).toEqual({ structural: false, layout: false, params: false })
+  })
+
+  it("a structural data change recompiles once; an SDF slider only updates uniform values", () => {
+    const t0 = useProjectStore.getState().recompileTrigger
+
+    // structure: raymarch option (baked literal) -> new source -> exactly one recompile
+    let next = processNodeChanges([replaceNode(nodes[1], { maxSteps: 64 })], nodes, sdfEdges, () => {})
+    expect(useProjectStore.getState().recompileTrigger).toBe(t0 + 1)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+
+    // SDF param drag: many ticks, zero recompiles, source and queue untouched, values land in uniformValues
+    const src = useProjectStore.getState().wgslSource
+    const queue = useProjectStore.getState().renderQueue
+    for (const r of [1.3, 1.4, 1.5, 1.6]) {
+      next = processNodeChanges([replaceNode(next[0], { params: { ...(next[0].data as any).params, radius: r } })], next, sdfEdges, () => {})
+    }
+    const st = useProjectStore.getState()
+    expect(st.recompileTrigger).toBe(t0 + 1)
+    expect(st.wgslSource).toBe(src)
+    expect(st.renderQueue).toBe(queue)
+    expect(st.uniformValues["u_sdf_prim_1_radius"]).toEqual({ type: "float", value: 1.6 })
+
+    // changing the primitive TYPE changes structure -> recompile
+    next = processNodeChanges([replaceNode(next[0], { primitiveType: "box", params: { type: "box", offset: [0, 0, 0], size: [1, 1, 1] } })], next, sdfEdges, () => {})
+    expect(useProjectStore.getState().recompileTrigger).toBe(t0 + 2)
+    expect(useProjectStore.getState().wgslSource).not.toBe(src)
+  })
+
+  it("deleting a uniform node removes its graph uniform; unrelated edits keep it", () => {
+    const withUniform: Node<GraphNodeData>[] = [
+      ...nodes,
+      { id: "u-1", type: "uniform", position: { x: 0, y: 100 }, data: { type: "uniform", uniformId: "gu-1", name: "glow", uniformType: "float", defaultValue: 0.5 } },
+    ]
+    useProjectStore.getState().addGraphUniform({ id: "gu-1", name: "glow", type: "float", defaultValue: 0.5 })
+    const kept = processNodeChanges([replaceNode(withUniform[1], { maxSteps: 80 })], withUniform, sdfEdges, () => {})
+    expect(useProjectStore.getState().graphUniforms.map((u) => u.id)).toEqual(["gu-1"])
+    processNodeChanges([{ type: "remove", id: "u-1" } as any], kept, sdfEdges, () => {})
+    expect(useProjectStore.getState().graphUniforms).toEqual([])
+  })
+
+  it("layout publish marks dirty without compiling; export serialises live positions", () => {
+    const t0 = useProjectStore.getState().recompileTrigger
+    const moved = nodes.map((n) => (n.id === "prim-1" ? { ...n, position: { x: 9, y: 9 } } : n))
+    registerLiveGraphProvider(() => ({ nodes: moved, edges: sdfEdges }))
+    expect(useProjectStore.getState().exportProjectData().graphNodes[0].position).toEqual({ x: 9, y: 9 })
+    publishLayout(moved)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+    expect(useProjectStore.getState().recompileTrigger).toBe(t0)
+    expect(isExternalGraphWrite(useProjectStore.getState()._graphNodes, useProjectStore.getState()._graphEdges)).toBe(false)
+  })
+
+  it("store writes the NodeGraph did not publish (load / reset / templates) are detected as external", () => {
+    expect(isExternalGraphWrite(useProjectStore.getState()._graphNodes, useProjectStore.getState()._graphEdges)).toBe(false)
+    useProjectStore.getState().setGraphNodes([])
+    expect(isExternalGraphWrite(useProjectStore.getState()._graphNodes, useProjectStore.getState()._graphEdges)).toBe(true)
+  })
+
+  it("an empty graph clears the render queue without surfacing a 'no output node' error (New Project)", () => {
+    compileAndPublish([], [])
+    expect(useProjectStore.getState().renderQueue).toBeNull()
+    expect(useProjectStore.getState().lastCompileError).toBeNull()
+  })
+
+  it("value-only 'replace' ticks (updateNodeData) never publish structure, compile or recompile; one debounced snapshot", () => {
+    vi.useFakeTimers()
+    try {
+      const t0 = useProjectStore.getState().recompileTrigger
+      const queue = useProjectStore.getState().renderQueue
+      const wgsl = useProjectStore.getState().wgslSource
+      const graphNodesBefore = useProjectStore.getState()._graphNodes
+      let graphNodeWrites = 0
+      const unsub = useProjectStore.subscribe((st, prev) => { if (st._graphNodes !== prev._graphNodes) graphNodeWrites++ })
+      const onData = vi.fn()
+      let cur = nodes
+      for (const r of [1.3, 1.4, 1.5, 1.6, 1.7]) {
+        cur = processNodeChanges([replaceNode(cur[0], { params: { ...(cur[0].data as any).params, radius: r } })], cur, sdfEdges, () => {}, onData)
+      }
+      expect(onData).toHaveBeenCalledTimes(5) // caller debounces; no immediate structural publish
+      expect(graphNodeWrites).toBe(0)
+      const st = useProjectStore.getState()
+      expect(st.recompileTrigger).toBe(t0)
+      expect(st.renderQueue).toBe(queue)
+      expect(st.wgslSource).toBe(wgsl)
+      expect(st._graphNodes).toBe(graphNodesBefore)
+      expect(st.uniformValues["u_sdf_prim_1_radius"]).toEqual({ type: "float", value: 1.7 })
+
+      // uniform node default value: graph uniform updates, still no structural publish
+      const withU: Node<GraphNodeData>[] = [...cur, { id: "u-1", type: "uniform", position: { x: 0, y: 100 }, data: { type: "uniform", uniformId: "gu-1", name: "glow", uniformType: "float", defaultValue: 0.5 } }]
+      useProjectStore.getState().addGraphUniform({ id: "gu-1", name: "glow", type: "float", defaultValue: 0.5 })
+      processNodeChanges([replaceNode(withU[3], { defaultValue: 0.9 })], withU, sdfEdges, () => {}, onData)
+      expect(useProjectStore.getState().graphUniforms[0].defaultValue).toBe(0.9)
+      expect(graphNodeWrites).toBe(0)
+      expect(useProjectStore.getState().recompileTrigger).toBe(t0)
+      // renaming a uniform is structure
+      expect(classifyNodeChanges([replaceNode(withU[3], { name: "other" })], withU).structural).toBe(true)
+
+      // the debounced publisher (what NodeGraph wires to onData) fires once
+      const publish = debounce(() => publishLayout(cur), 300)
+      for (let i = 0; i < 5; i++) publish()
+      expect(graphNodeWrites).toBe(0)
+      vi.advanceTimersByTime(300)
+      expect(graphNodeWrites).toBe(1)
+      expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+      expect(useProjectStore.getState().recompileTrigger).toBe(t0)
+      unsub()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("edge select changes do not compile; edge add/remove do", () => {
+    const t0 = useProjectStore.getState().recompileTrigger
+    const selected = processEdgeChanges([{ type: "select", id: "e1", selected: true } as any], nodes, sdfEdges)
+    expect(selected).not.toBe(sdfEdges)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(false)
+    processEdgeChanges([{ type: "remove", id: "e1" } as any], nodes, sdfEdges)
+    expect(useProjectStore.getState().hasUnsavedChanges).toBe(true)
+    expect(useProjectStore.getState().recompileTrigger).toBe(t0 + 1) // raymarch loses its input -> default metaball source
+  })
+})
+
+describe("math_expression nodes emit their validated expression (fleet w2-a-state)", () => {
+  const graph = (expression: string): Node<GraphNodeData>[] => [
+    { id: "m1", position: { x: 0, y: 0 }, data: { type: "math_expression", expression, inputNames: ["uv"], outputType: "float" } },
+    { id: "out", position: { x: 100, y: 0 }, data: { type: "output" } },
+  ]
+  it("pushes a math_expression step with GLSL and WGSL code for a valid expression", () => {
+    const r = compileGraph(graph("sin(uv.x * 10.0) * 0.5 + 0.5"), [{ id: "e", source: "m1", target: "out" }])
+    expect(r.error).toBeNull()
+    const step = r.queue.find((s) => s.type === "math_expression") as any
+    expect(step).toBeDefined()
+    expect(step.glsl).toContain("sin(uv.x * 10.0)")
+    expect(step.wgsl).toContain("let expr_out: f32")
+  })
+  it("emits nothing for an invalid expression (node shows the error; compile never throws)", () => {
+    const r = compileGraph(graph("sin(uv.x;"), [{ id: "e", source: "m1", target: "out" }])
+    expect(r.queue.some((s) => s.type === "math_expression")).toBe(false)
+  })
+})

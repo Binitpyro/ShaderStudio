@@ -563,3 +563,139 @@ describe("WorkspaceLayout with real child components", () => {
     expect(html).toContain("[Line 5:2]")
   })
 })
+
+// ============================================================================
+// w2-c coverage: UniformNode persistence + MaterialNode "Open in Editor" (real components, effects/handlers captured)
+// ============================================================================
+import { UniformNode } from "@/components/nodes/UniformNode"
+import { MaterialNode } from "@/components/nodes/MaterialNode"
+
+const reactFlowSpy = vi.hoisted(() => ({ updateNodeData: null as null | ((id: string, d: unknown) => void) }))
+vi.mock("@xyflow/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@xyflow/react")>()
+  return {
+    ...actual,
+    useReactFlow: (...args: unknown[]) =>
+      reactFlowSpy.updateNodeData
+        ? ({ updateNodeData: reactFlowSpy.updateNodeData } as unknown as ReturnType<typeof actual.useReactFlow>)
+        : (actual.useReactFlow as (...a: unknown[]) => ReturnType<typeof actual.useReactFlow>)(...args),
+  }
+})
+
+/** Renders a (memo-wrapped) node component's function once, capturing its effects, and returns its element tree. */
+function mountNode(component: unknown, props: Record<string, unknown>) {
+  const internals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+  const effects: Array<() => void | (() => void)> = []
+  let tree: any = null
+  const fn = (component as { type: (p: unknown) => unknown }).type
+  function Interceptor() {
+    const original = internals.H
+    internals.H = { ...original, useEffect: (e: () => void | (() => void)) => void effects.push(e) }
+    try { tree = fn(props) } finally { internals.H = original }
+    return null
+  }
+  renderToStaticMarkup(React.createElement(Interceptor))
+  const cleanups = () => effects.map((e) => e())
+  return { tree, runEffects: cleanups }
+}
+
+function findElement(node: any, pred: (el: any) => boolean): any {
+  if (!node || typeof node !== "object") return null
+  if (Array.isArray(node)) { for (const c of node) { const r = findElement(c, pred); if (r) return r } return null }
+  if (node.props && pred(node)) return node
+  return node.props ? findElement(node.props.children, pred) : null
+}
+
+describe("w2-c: UniformNode persists name/type via node data and keeps the graph uniform until node deletion", () => {
+  const update = vi.fn()
+  beforeEach(() => {
+    useProjectStore.getState().resetProject()
+    update.mockClear()
+    reactFlowSpy.updateNodeData = update
+  })
+  afterEach(() => { reactFlowSpy.updateNodeData = null })
+
+  const props = (data: Record<string, unknown>) => ({ id: "n1", selected: false, data: { type: "uniform", ...data } })
+
+  it("mount registers a graph uniform (id derived from the node id) with the node's name and type", () => {
+    mountNode(UniformNode, props({ name: "speed", uniformType: "vec2" })).runEffects()
+    expect(useProjectStore.getState().graphUniforms).toEqual([
+      { id: "uniform_n1", name: "speed", type: "vec2", defaultValue: [0, 0] },
+    ])
+  })
+
+  it.each([
+    ["bool", false],
+    ["float", 0.5],
+    ["vec2", [0, 0]],
+    ["vec4", [0.5, 0.5, 0.5, 1]],
+    ["vec3", [0.5, 0.5, 0.5]],
+    ["color", [0.5, 0.5, 0.5]],
+  ])("a %s uniform without a stored default gets the type's default", (uniformType, expected) => {
+    mountNode(UniformNode, props({ uniformType })).runEffects()
+    expect(useProjectStore.getState().graphUniforms[0].defaultValue).toEqual(expected)
+  })
+
+  it("an explicit stored default value and uniformId are respected, and an unnamed node is called 'param'", () => {
+    mountNode(UniformNode, props({ uniformId: "u_custom", defaultValue: 3 })).runEffects()
+    expect(useProjectStore.getState().graphUniforms).toEqual([{ id: "u_custom", name: "param", type: "float", defaultValue: 3 }])
+  })
+
+  it("remount with changed name/type updates the existing uniform instead of duplicating it", () => {
+    mountNode(UniformNode, props({ name: "a", uniformType: "float" })).runEffects()
+    mountNode(UniformNode, props({ name: "b", uniformType: "vec3" })).runEffects()
+    const us = useProjectStore.getState().graphUniforms
+    expect(us).toHaveLength(1)
+    expect(us[0]).toMatchObject({ id: "uniform_n1", name: "b", type: "vec3" })
+  })
+
+  it("unmounting (effect cleanup) does not remove the uniform", () => {
+    const { runEffects } = mountNode(UniformNode, props({ name: "keep" }))
+    const cleanups = runEffects()
+    cleanups.forEach((c) => typeof c === "function" && c())
+    expect(useProjectStore.getState().graphUniforms.map((u) => u.name)).toEqual(["keep"])
+  })
+
+  it("editing the name writes it to node data (so it survives save/load)", () => {
+    const { tree } = mountNode(UniformNode, props({ name: "a" }))
+    const input = findElement(tree, (el) => el.type === "input")
+    input.props.onChange({ target: { value: "renamed" } })
+    expect(update).toHaveBeenCalledWith("n1", { name: "renamed" })
+  })
+
+  it("changing the type writes type + default to node data and to the graph uniform", () => {
+    const m = mountNode(UniformNode, props({ name: "a", uniformType: "float" }))
+    m.runEffects()
+    const select = findElement(m.tree, (el) => el.type === "select")
+    select.props.onChange({ target: { value: "vec4" } })
+    expect(update).toHaveBeenCalledWith("n1", { uniformType: "vec4", defaultValue: [0.5, 0.5, 0.5, 1] })
+    expect(useProjectStore.getState().graphUniforms[0]).toMatchObject({ type: "vec4", defaultValue: [0.5, 0.5, 0.5, 1] })
+  })
+})
+
+describe("w2-c: MaterialNode 'Open in Editor'", () => {
+  beforeEach(() => {
+    useProjectStore.getState().resetProject()
+    useLayoutStore.setState({ jumpTarget: null, maximizedPanel: "none" })
+  })
+  const open = () => {
+    const { tree } = mountNode(MaterialNode, { id: "m", selected: true, data: { type: "material", shaderPath: "a/b.wgsl" } })
+    const btn = findElement(tree, (el) => el.type === "button")
+    expect(btn).toBeTruthy()
+    btn.props.onClick()
+  }
+
+  it("on WebGPU switches to the render tab and jumps to line 1", () => {
+    useProjectStore.setState({ activeBackend: "webgpu", activeEditorTab: "compute" })
+    open()
+    expect(useProjectStore.getState().activeEditorTab).toBe("render")
+    expect(useLayoutStore.getState().jumpTarget?.line).toBe(1)
+  })
+
+  it("on WebGL2 switches to the fragment tab and jumps to line 1", () => {
+    useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "vertex" })
+    open()
+    expect(useProjectStore.getState().activeEditorTab).toBe("fragment")
+    expect(useLayoutStore.getState().jumpTarget?.line).toBe(1)
+  })
+})

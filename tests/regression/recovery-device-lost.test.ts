@@ -239,8 +239,10 @@ describe("Milestone 3 Adversarial Challenger 2: WebGPU Device Loss, Auto-Recover
 
       const store = useProjectStore.getState()
       expect(store.activeBackend).toBe("webgl2")
-      // User data preserved
-      expect(store.shaderSource).toBe(preservedSource)
+      // User data preserved: the WGSL written under WebGPU survives in its own slot;
+      // the active source is now the GLSL slot for the WebGL2 fallback.
+      expect(store.wgslSource).toBe(preservedSource)
+      expect(store.shaderSource).toBe(store.glslSource)
       expect(store.uniformValues.u_customVal.value).toBe(42.5)
 
       adapter.dispose()

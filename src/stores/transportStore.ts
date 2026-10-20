@@ -44,6 +44,9 @@ function clampResolutionScale(scale: ResolutionScale): ResolutionScale {
   return 1
 }
 
+/** Last time value mirrored into the store; see the throttled sync at the bottom of this file. */
+let lastSyncedTime = 0
+
 export const useTransportStore = create<TransportState>((set, get, api) => {
   api.getInitialState = () => api.getState()
 
@@ -56,19 +59,21 @@ export const useTransportStore = create<TransportState>((set, get, api) => {
     resolutionScale: 1,
 
     togglePlay: () => {
-      const next = !get().isPlaying
-      set({ isPlaying: next })
-      renderCoordinator.setPlaying(next)
+      get().setIsPlaying(!get().isPlaying)
     },
 
     setIsPlaying: (playing: boolean) => {
-      set({ isPlaying: playing })
       renderCoordinator.setPlaying(playing)
+      // Time is only mirrored (throttled) while playing, so snap the store to the coordinator's clock now.
+      const t = renderCoordinator.getPlaybackTime()
+      lastSyncedTime = t
+      set({ isPlaying: playing, playbackTime: t, currentTime: t })
     },
 
     seek: (timeSeconds: number) => {
       const duration = get().duration
       const safeTime = Math.max(0.0, Math.min(timeSeconds, duration > 0 ? duration : Infinity))
+      lastSyncedTime = safeTime
       set({ playbackTime: safeTime, currentTime: safeTime })
       renderCoordinator.seek(safeTime)
     },
@@ -78,6 +83,7 @@ export const useTransportStore = create<TransportState>((set, get, api) => {
     },
 
     resetTime: () => {
+      lastSyncedTime = 0
       set({ playbackTime: 0.0, currentTime: 0.0 })
       renderCoordinator.resetTime()
     },
@@ -111,7 +117,7 @@ export const useTransportStore = create<TransportState>((set, get, api) => {
     },
 
     getFormattedTime: () => {
-      return formatTime(get().playbackTime)
+      return formatTime(renderCoordinator.getPlaybackTime())
     },
   }
 })
@@ -119,11 +125,13 @@ export const useTransportStore = create<TransportState>((set, get, api) => {
 // SSR and Test Parity
 useTransportStore.getInitialState = () => useTransportStore.getState()
 
-// Sync virtual playback clock from renderCoordinator to transportStore
+// The coordinator owns the authoritative clock (renderCoordinator.getPlaybackTime()). The store only
+// mirrors it ~10Hz (wall-clock equivalent: the threshold scales with playback speed) for UI readers,
+// instead of writing zustand state every frame.
 renderCoordinator.onTimeUpdate((time: number) => {
-  const current = useTransportStore.getState().playbackTime
-  // Avoid redundant state sets if time is identical
-  if (Math.abs(current - time) > 0.0001) {
+  const threshold = 0.1 * renderCoordinator.getPlaybackSpeed()
+  if (Math.abs(time - lastSyncedTime) >= threshold || time < lastSyncedTime) {
+    lastSyncedTime = time
     useTransportStore.setState({ playbackTime: time, currentTime: time })
   }
 })

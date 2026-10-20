@@ -346,9 +346,8 @@ describe("layoutStore: jumpToLine", () => {
     }
   })
 
-  // fleet: fixed in W2 -- jumpToLine currently stores negative / zero / fractional lines
-  // verbatim, which Monaco cannot reveal. Contract: integer >= 1 for line and column.
-  it.fails("clamps negative, zero and fractional line/column to integers >= 1", () => {
+  // Contract: jumpToLine normalises line/column to integers >= 1 (Monaco cannot reveal anything else).
+  it("clamps negative, zero and fractional line/column to integers >= 1", () => {
     st().jumpToLine(-50, -20)
     expect(st().jumpTarget).toMatchObject({ line: 1, column: 1 })
     st().jumpToLine(0, 0)

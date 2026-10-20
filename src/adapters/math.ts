@@ -105,3 +105,55 @@ export function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array
 function normalize(v: number[]): number[] { const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0] }
 function cross(a: number[], b: number[]): number[] { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
 function dot(a: number[], b: number[]): number { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
+
+// ---------------------------------------------------------------------------
+// Shared helpers extracted from the adapters (adapters adopt these in W3).
+// ---------------------------------------------------------------------------
+
+/** Halton low-discrepancy sequence value in [0, 1) (radical inverse of `index` in `base`). */
+export function halton(index: number, base: number): number {
+  let result = 0
+  let f = 1 / base
+  let i = index
+  while (i > 0) {
+    result += f * (i % base)
+    i = Math.floor(i / base)
+    f /= base
+  }
+  return result
+}
+
+/** Tags a texture-like object with format/width/height (best effort, tolerates frozen/getter-only objects). */
+export function setTexMeta(tex: any, format: string, width: number, height: number): void {
+  if (!tex) return
+  const define = (key: string, value: unknown) => {
+    try {
+      Object.defineProperty(tex, key, { value, configurable: true, writable: true })
+    } catch {
+      try { tex[key] = value } catch { /* read-only */ }
+    }
+  }
+  define("format", format)
+  define("width", width)
+  define("height", height)
+}
+
+/** Right-handed perspective projection, GL clip space (z in [-1, 1]). Used by WebGL2/Three. */
+export function setPerspectiveMatrixGL(out: Float32Array, fov: number, aspect: number, near: number, far: number): Float32Array {
+  const f = 1.0 / Math.tan(fov / 2), nf = 1 / (near - far)
+  out[0] = f / aspect; out[1] = 0; out[2] = 0; out[3] = 0
+  out[4] = 0; out[5] = f; out[6] = 0; out[7] = 0
+  out[8] = 0; out[9] = 0; out[10] = (far + near) * nf; out[11] = -1
+  out[12] = 0; out[13] = 0; out[14] = 2 * far * near * nf; out[15] = 0
+  return out
+}
+
+/** Right-handed perspective projection, WebGPU clip space (z in [0, 1]). */
+export function setPerspectiveMatrixWebGPU(out: Float32Array, fov: number, aspect: number, near: number, far: number): Float32Array {
+  const f = 1.0 / Math.tan(fov / 2), nf = 1 / (near - far)
+  out[0] = f / aspect; out[1] = 0; out[2] = 0; out[3] = 0
+  out[4] = 0; out[5] = f; out[6] = 0; out[7] = 0
+  out[8] = 0; out[9] = 0; out[10] = far * nf; out[11] = -1
+  out[12] = 0; out[13] = 0; out[14] = far * near * nf; out[15] = 0
+  return out
+}

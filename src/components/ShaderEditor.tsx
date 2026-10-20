@@ -1,9 +1,10 @@
 import { useRef, useCallback, useEffect } from "react"
 import Editor, { type OnMount } from "@monaco-editor/react"
-import { useProjectStore, type EditorTab, type BackendType } from "@/stores/projectStore"
+import { useProjectStore, languageForBackend, type EditorTab, type BackendType, type ShaderLanguage } from "@/stores/projectStore"
 import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { useLayoutStore } from "@/stores/layoutStore"
-import { debounce } from "@/utils/throttle"
+import { debounce, type Debounced } from "@/utils/throttle"
+import { renderCoordinator } from "@/core/renderCoordinator"
 import { Button } from "@/components/ui/button"
 import { SyncStatusBanner } from "./SyncStatusBanner"
 import { cn } from "@/lib/utils"
@@ -83,27 +84,77 @@ export function ShaderEditor() {
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null)
   const lastErrorTabRef = useRef<EditorTab | null>(null)
 
-  const debouncedRenderUpdate = useRef(
-    debounce((value: string) => {
-      setShaderSource(value)
+  // What this editor last wrote to the store per tab. A store value that differs from it was written by
+  // someone else (project / template / file load, bridge sync) -> any pending debounced edit is stale.
+  const lastWrite = useRef<{ render?: string; vertex?: string; compute?: string }>({})
+
+  // The language is captured when the keystroke happens, so a backend switch inside the debounce window
+  // can never write WGSL text into the GLSL slot (or vice versa).
+  // Lazy init: useRef(debounce(...)) would build (and discard) a new debounce closure on every render.
+  const renderDebounceRef = useRef<Debounced<[string, ShaderLanguage]> | null>(null)
+  if (!renderDebounceRef.current) {
+    renderDebounceRef.current = debounce((value: string, language: ShaderLanguage) => {
+      lastWrite.current.render = value
+      setShaderSource(value, language)
       triggerRecompile()
     }, 400)
-  ).current
+  }
+  const debouncedRenderUpdate = renderDebounceRef.current
 
-  const debouncedVertexUpdate = useRef(
-    debounce((value: string) => {
+  const vertexDebounceRef = useRef<Debounced<[string]> | null>(null)
+  if (!vertexDebounceRef.current) {
+    vertexDebounceRef.current = debounce((value: string) => {
+      lastWrite.current.vertex = value
       setVertexShaderSource(value)
       triggerRecompile()
     }, 400)
-  ).current
+  }
+  const debouncedVertexUpdate = vertexDebounceRef.current
 
-  const debouncedComputeUpdate = useRef(
-    debounce((value: string) => {
+  const computeDebounceRef = useRef<Debounced<[string]> | null>(null)
+  if (!computeDebounceRef.current) {
+    computeDebounceRef.current = debounce((value: string) => {
+      lastWrite.current.compute = value
       setComputeShaderSource(value)
       webgpuAdapter.recompileComputeShader?.(value)
+      // Called on the adapter directly (bypassing Viewport's redraw wrapper): wake an idle loop ourselves.
+      renderCoordinator.requestRender()
       triggerRecompile()
     }, 400)
-  ).current
+  }
+  const debouncedComputeUpdate = computeDebounceRef.current
+
+  const currentProjectName = useProjectStore((state) => state.currentProjectName)
+  const activeShaderPath = useProjectStore((state) => state.activeShaderPath)
+
+  // Project / active file changed: drop every pending write so it cannot clobber what was just loaded.
+  useEffect(() => {
+    debouncedRenderUpdate.cancel()
+    debouncedVertexUpdate.cancel()
+    debouncedComputeUpdate.cancel()
+    lastWrite.current = {}
+  }, [currentProjectName, activeShaderPath, debouncedRenderUpdate, debouncedVertexUpdate, debouncedComputeUpdate])
+
+  // External source writes (template load, bridge, file importer): cancel the matching pending write.
+  useEffect(() => {
+    if (shaderSource !== lastWrite.current.render) debouncedRenderUpdate.cancel()
+  }, [shaderSource, debouncedRenderUpdate])
+  useEffect(() => {
+    if (vertexShaderSource !== lastWrite.current.vertex) debouncedVertexUpdate.cancel()
+  }, [vertexShaderSource, debouncedVertexUpdate])
+  useEffect(() => {
+    if (computeShaderSource !== lastWrite.current.compute) debouncedComputeUpdate.cancel()
+  }, [computeShaderSource, debouncedComputeUpdate])
+
+  // Closing the editor must not lose the last keystrokes.
+  useEffect(
+    () => () => {
+      debouncedRenderUpdate.flush()
+      debouncedVertexUpdate.flush()
+      debouncedComputeUpdate.flush()
+    },
+    [debouncedRenderUpdate, debouncedVertexUpdate, debouncedComputeUpdate]
+  )
 
   const isReadOnly = syncMode === "bridge" || syncMode === "folder"
 
@@ -269,13 +320,13 @@ export function ShaderEditor() {
           if (isComputeTab) {
             debouncedComputeUpdate(value)
           } else {
-            debouncedRenderUpdate(value)
+            debouncedRenderUpdate(value, languageForBackend(activeBackend))
           }
         } else {
           if (isVertexTab) {
             debouncedVertexUpdate(value)
           } else {
-            debouncedRenderUpdate(value)
+            debouncedRenderUpdate(value, languageForBackend(activeBackend))
           }
         }
       }

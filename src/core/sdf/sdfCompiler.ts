@@ -43,186 +43,95 @@ export interface SdfCompileOptions {
   baseColor?: [number, number, number]
 }
 
+/** Collected SDF parameter uniforms: stable name -> current value. */
+export type SdfUniformMap = Record<string, number>
+
+/** Stable uniform name per node + param component (value-independent, so slider drags never change the source). */
+export function sdfUniformName(nodeId: string, key: string): string {
+  return `u_sdf_${nodeId.replace(/[^A-Za-z0-9]/g, "_")}_${key}`
+}
+
+type Lang = "glsl" | "wgsl"
+const VEC3 = { glsl: "vec3", wgsl: "vec3f" } as const
+const VEC2 = { glsl: "vec2", wgsl: "vec2f" } as const
+
 /**
- * Generate recursive GLSL distance expression for an SDF tree node.
+ * Generate recursive distance expression for an SDF tree node. Parameters are emitted as uniform
+ * references (registered into `uni`) instead of baked literals, so only graph structure affects the source.
  */
-function buildGlslDistanceExpr(node: SdfTreeNode, pVar: string = "p"): string {
+function buildDistanceExpr(lang: Lang, node: SdfTreeNode, uni: SdfUniformMap, pVar: string = "p"): string {
+  const ref = (name: string) => (lang === "wgsl" ? `uniforms.${name}` : name)
+  const scalar = (key: string, value: number): string => {
+    const name = sdfUniformName(node.id, key)
+    uni[name] = value
+    return ref(name)
+  }
+  const vec3 = (key: string, v: readonly number[]): string =>
+    `${VEC3[lang]}(${scalar(`${key}_x`, v[0])}, ${scalar(`${key}_y`, v[1])}, ${scalar(`${key}_z`, v[2])})`
+  const vec2 = (key: string, a: number, b: number): string =>
+    `${VEC2[lang]}(${scalar(`${key}_x`, a)}, ${scalar(`${key}_y`, b)})`
+
   if (node.kind === "primitive") {
-    const off = node.params.offset ?? [0, 0, 0]
-    const hasOffset = off[0] !== 0 || off[1] !== 0 || off[2] !== 0
-    const localP = hasOffset
-      ? `(${pVar} - vec3(${off[0].toFixed(4)}, ${off[1].toFixed(4)}, ${off[2].toFixed(4)}))`
-      : pVar
+    const localP = `(${pVar} - ${vec3("offset", node.params.offset ?? [0, 0, 0])})`
 
     switch (node.type) {
       case "sphere":
-        return `sdSphere(${localP}, ${(node.params.radius ?? 1.0).toFixed(4)})`
-
-      case "box": {
-        const b = node.params.size ?? [0.8, 0.8, 0.8]
-        return `sdBox(${localP}, vec3(${b[0].toFixed(4)}, ${b[1].toFixed(4)}, ${b[2].toFixed(4)}))`
-      }
-
-      case "torus": {
-        const R = (node.params.majorRadius ?? 1.0).toFixed(4)
-        const r = (node.params.minorRadius ?? 0.35).toFixed(4)
-        return `sdTorus(${localP}, vec2(${R}, ${r}))`
-      }
-
-      case "cylinder": {
-        const r = (node.params.radius ?? 0.7).toFixed(4)
-        const h = (node.params.height ?? 1.0).toFixed(4)
-        return `sdCylinder(${localP}, vec2(${r}, ${h}))`
-      }
-
-      case "capsule": {
-        const a = node.params.capsuleA ?? [0, -0.6, 0]
-        const b = node.params.capsuleB ?? [0, 0.6, 0]
-        const r = (node.params.radius ?? 0.4).toFixed(4)
-        const aStr = `vec3(${a[0].toFixed(4)}, ${a[1].toFixed(4)}, ${a[2].toFixed(4)})`
-        const bStr = `vec3(${b[0].toFixed(4)}, ${b[1].toFixed(4)}, ${b[2].toFixed(4)})`
-        return `sdCapsule(${localP}, ${aStr}, ${bStr}, ${r})`
-      }
-
-      case "plane": {
-        const n = node.params.planeNormal ?? [0, 1, 0]
-        const h = (node.params.planeDistance ?? 0.0).toFixed(4)
-        const nStr = `vec3(${n[0].toFixed(4)}, ${n[1].toFixed(4)}, ${n[2].toFixed(4)})`
-        return `sdPlane(${localP}, ${nStr}, ${h})`
-      }
-
+        return `sdSphere(${localP}, ${scalar("radius", node.params.radius ?? 1.0)})`
+      case "box":
+        return `sdBox(${localP}, ${vec3("size", node.params.size ?? [0.8, 0.8, 0.8])})`
+      case "torus":
+        return `sdTorus(${localP}, ${vec2("torus", node.params.majorRadius ?? 1.0, node.params.minorRadius ?? 0.35)})`
+      case "cylinder":
+        return `sdCylinder(${localP}, ${vec2("cyl", node.params.radius ?? 0.7, node.params.height ?? 1.0)})`
+      case "capsule":
+        return `sdCapsule(${localP}, ${vec3("capA", node.params.capsuleA ?? [0, -0.6, 0])}, ${vec3("capB", node.params.capsuleB ?? [0, 0.6, 0])}, ${scalar("radius", node.params.radius ?? 0.4)})`
+      case "plane":
+        return `sdPlane(${localP}, ${vec3("normal", node.params.planeNormal ?? [0, 1, 0])}, ${scalar("planeDistance", node.params.planeDistance ?? 0.0)})`
       default:
         return `sdSphere(${localP}, 1.0)`
     }
   }
 
   // Operator
-  const k = (node.params.smoothness ?? 0.2).toFixed(4)
+  const k = () => scalar("smoothness", node.params.smoothness ?? 0.2)
   const childA = node.children[0]
   const childB = node.children[1]
 
   if (node.type === "repetition") {
-    const c = node.params.repetitionSpacing ?? [3.0, 3.0, 3.0]
-    const repVar = `opRep(${pVar}, vec3(${c[0].toFixed(4)}, ${c[1].toFixed(4)}, ${c[2].toFixed(4)}))`
-    return childA ? buildGlslDistanceExpr(childA, repVar) : `sdSphere(${repVar}, 0.5)`
+    const repVar = `opRep(${pVar}, ${vec3("spacing", node.params.repetitionSpacing ?? [3.0, 3.0, 3.0])})`
+    return childA ? buildDistanceExpr(lang, childA, uni, repVar) : `sdSphere(${repVar}, 0.5)`
   }
 
   if (node.type === "twist") {
-    const rate = (node.params.twistRate ?? 1.0).toFixed(4)
-    const twistVar = `opTwist(${pVar}, ${rate})`
-    return childA ? buildGlslDistanceExpr(childA, twistVar) : `sdSphere(${twistVar}, 0.5)`
+    const twistVar = `opTwist(${pVar}, ${scalar("twistRate", node.params.twistRate ?? 1.0)})`
+    return childA ? buildDistanceExpr(lang, childA, uni, twistVar) : `sdSphere(${twistVar}, 0.5)`
   }
 
-  const exprA = childA ? buildGlslDistanceExpr(childA, pVar) : "100.0"
-  const exprB = childB ? buildGlslDistanceExpr(childB, pVar) : "100.0"
+  const exprA = childA ? buildDistanceExpr(lang, childA, uni, pVar) : "100.0"
+  const exprB = childB ? buildDistanceExpr(lang, childB, uni, pVar) : "100.0"
 
   switch (node.type) {
-    case "union":
-      return `opUnion(${exprA}, ${exprB})`
     case "smooth_union":
-      return `opSmoothUnion(${exprA}, ${exprB}, ${k})`
+      return `opSmoothUnion(${exprA}, ${exprB}, ${k()})`
     case "subtraction":
       return `opSubtraction(${exprA}, ${exprB})`
     case "smooth_subtraction":
-      return `opSmoothSubtraction(${exprA}, ${exprB}, ${k})`
+      return `opSmoothSubtraction(${exprA}, ${exprB}, ${k()})`
     case "intersection":
       return `opIntersection(${exprA}, ${exprB})`
     case "smooth_intersection":
-      return `opSmoothIntersection(${exprA}, ${exprB}, ${k})`
+      return `opSmoothIntersection(${exprA}, ${exprB}, ${k()})`
+    case "union":
     default:
       return `opUnion(${exprA}, ${exprB})`
   }
 }
 
-/**
- * Generate recursive WGSL distance expression for an SDF tree node.
- */
-function buildWgslDistanceExpr(node: SdfTreeNode, pVar: string = "p"): string {
-  if (node.kind === "primitive") {
-    const off = node.params.offset ?? [0, 0, 0]
-    const hasOffset = off[0] !== 0 || off[1] !== 0 || off[2] !== 0
-    const localP = hasOffset
-      ? `(${pVar} - vec3f(${off[0].toFixed(4)}, ${off[1].toFixed(4)}, ${off[2].toFixed(4)}))`
-      : pVar
-
-    switch (node.type) {
-      case "sphere":
-        return `sdSphere(${localP}, ${(node.params.radius ?? 1.0).toFixed(4)})`
-
-      case "box": {
-        const b = node.params.size ?? [0.8, 0.8, 0.8]
-        return `sdBox(${localP}, vec3f(${b[0].toFixed(4)}, ${b[1].toFixed(4)}, ${b[2].toFixed(4)}))`
-      }
-
-      case "torus": {
-        const R = (node.params.majorRadius ?? 1.0).toFixed(4)
-        const r = (node.params.minorRadius ?? 0.35).toFixed(4)
-        return `sdTorus(${localP}, vec2f(${R}, ${r}))`
-      }
-
-      case "cylinder": {
-        const r = (node.params.radius ?? 0.7).toFixed(4)
-        const h = (node.params.height ?? 1.0).toFixed(4)
-        return `sdCylinder(${localP}, vec2f(${r}, ${h}))`
-      }
-
-      case "capsule": {
-        const a = node.params.capsuleA ?? [0, -0.6, 0]
-        const b = node.params.capsuleB ?? [0, 0.6, 0]
-        const r = (node.params.radius ?? 0.4).toFixed(4)
-        const aStr = `vec3f(${a[0].toFixed(4)}, ${a[1].toFixed(4)}, ${a[2].toFixed(4)})`
-        const bStr = `vec3f(${b[0].toFixed(4)}, ${b[1].toFixed(4)}, ${b[2].toFixed(4)})`
-        return `sdCapsule(${localP}, ${aStr}, ${bStr}, ${r})`
-      }
-
-      case "plane": {
-        const n = node.params.planeNormal ?? [0, 1, 0]
-        const h = (node.params.planeDistance ?? 0.0).toFixed(4)
-        const nStr = `vec3f(${n[0].toFixed(4)}, ${n[1].toFixed(4)}, ${n[2].toFixed(4)})`
-        return `sdPlane(${localP}, ${nStr}, ${h})`
-      }
-
-      default:
-        return `sdSphere(${localP}, 1.0)`
-    }
-  }
-
-  // Operator
-  const k = (node.params.smoothness ?? 0.2).toFixed(4)
-  const childA = node.children[0]
-  const childB = node.children[1]
-
-  if (node.type === "repetition") {
-    const c = node.params.repetitionSpacing ?? [3.0, 3.0, 3.0]
-    const repVar = `opRep(${pVar}, vec3f(${c[0].toFixed(4)}, ${c[1].toFixed(4)}, ${c[2].toFixed(4)}))`
-    return childA ? buildWgslDistanceExpr(childA, repVar) : `sdSphere(${repVar}, 0.5)`
-  }
-
-  if (node.type === "twist") {
-    const rate = (node.params.twistRate ?? 1.0).toFixed(4)
-    const twistVar = `opTwist(${pVar}, ${rate})`
-    return childA ? buildWgslDistanceExpr(childA, twistVar) : `sdSphere(${twistVar}, 0.5)`
-  }
-
-  const exprA = childA ? buildWgslDistanceExpr(childA, pVar) : "100.0"
-  const exprB = childB ? buildWgslDistanceExpr(childB, pVar) : "100.0"
-
-  switch (node.type) {
-    case "union":
-      return `opUnion(${exprA}, ${exprB})`
-    case "smooth_union":
-      return `opSmoothUnion(${exprA}, ${exprB}, ${k})`
-    case "subtraction":
-      return `opSubtraction(${exprA}, ${exprB})`
-    case "smooth_subtraction":
-      return `opSmoothSubtraction(${exprA}, ${exprB}, ${k})`
-    case "intersection":
-      return `opIntersection(${exprA}, ${exprB})`
-    case "smooth_intersection":
-      return `opSmoothIntersection(${exprA}, ${exprB}, ${k})`
-    default:
-      return `opUnion(${exprA}, ${exprB})`
-  }
+/** Current uniform values for an SDF tree (name -> value). Independent of the generated source text. */
+export function collectSdfUniforms(root: SdfTreeNode): SdfUniformMap {
+  const uni: SdfUniformMap = {}
+  buildDistanceExpr("glsl", root, uni)
+  return uni
 }
 
 /**
@@ -233,7 +142,9 @@ export function compileSdfToGlsl(root: SdfTreeNode, options: SdfCompileOptions =
   const maxDist = (options.maxDistance ?? 40.0).toFixed(1)
   const hitEps = (options.hitEpsilon ?? 0.001).toFixed(4)
   const color = options.baseColor ?? [0.35, 0.65, 1.0]
-  const mapExpr = buildGlslDistanceExpr(root, "p")
+  const sdfUni: SdfUniformMap = {}
+  const mapExpr = buildDistanceExpr("glsl", root, sdfUni, "p")
+  const sdfDecls = Object.keys(sdfUni).map((n) => `uniform float ${n};`).join("\n")
 
   return `#version 300 es
 precision highp float;
@@ -248,6 +159,7 @@ uniform float u_audio_bass;
 uniform float u_audio_mid;
 uniform float u_audio_treble;
 uniform float u_audio_beat;
+${sdfDecls}
 
 ${GLSL_SDF_PRIMITIVES_LIB}
 ${GLSL_SDF_OPERATORS_LIB}
@@ -357,7 +269,9 @@ export function compileSdfToWgsl(root: SdfTreeNode, options: SdfCompileOptions =
   const maxDist = (options.maxDistance ?? 40.0).toFixed(1)
   const hitEps = (options.hitEpsilon ?? 0.001).toFixed(4)
   const color = options.baseColor ?? [0.35, 0.65, 1.0]
-  const mapExpr = buildWgslDistanceExpr(root, "p")
+  const sdfUni: SdfUniformMap = {}
+  const mapExpr = buildDistanceExpr("wgsl", root, sdfUni, "p")
+  const sdfFields = Object.keys(sdfUni).map((n) => `  ${n}: f32,`).join("\n")
 
   return `// ShaderStudio - Visual SDF Procedural Raymarching WGSL Shader
 struct Uniforms {
@@ -366,6 +280,7 @@ struct Uniforms {
   color: vec3f,
   resolution: vec2f,
   padding: vec2f,
+${sdfFields}
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

@@ -610,7 +610,7 @@ describe("Adversarial Uniform Layout & Memory Packing Engine", () => {
       expect(normalizeFieldType("mat4")).toBe("mat4x4f")
       expect(normalizeFieldType("texture_2d<f32>")).toBe("texture_2d")
       expect(normalizeFieldType("sampler")).toBe("texture_2d")
-      expect(normalizeFieldType("unknown_custom")).toBe("f32")
+      expect(() => normalizeFieldType("unknown_custom")).toThrow(/Unsupported uniform type/)
     })
 
     it("tests getTypeMetrics accuracy against W3C WGSL spec", () => {

@@ -65,7 +65,10 @@ describe("Tier 1: Visual Raymarching & SDF Procedural Geometry", () => {
     if (raymarchStep && raymarchStep.type === "raymarch") {
       expect(raymarchStep.glslSource).toContain("#version 300 es")
       expect(raymarchStep.glslSource).toContain("sdSphere")
-      expect(raymarchStep.glslSource).toContain("1.2500")
+      // SDF params are uniforms: the radius lives in sdfUniforms, not baked into the source
+      expect(Object.values(raymarchStep.sdfUniforms ?? {})).toContain(1.25)
+      expect(raymarchStep.glslSource).toContain("uniform float u_sdf_prim_1_radius;")
+      expect(raymarchStep.wgslSource).toContain("u_sdf_prim_1_radius: f32,")
       expect(raymarchStep.wgslSource).toContain("@fragment")
       expect(raymarchStep.wgslSource).toContain("sdSphere")
     }

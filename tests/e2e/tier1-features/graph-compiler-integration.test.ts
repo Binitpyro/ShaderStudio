@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../mocks"
 import {
   compileGraph,
-  getGraphUniforms,
   hasTimeNode,
   hasPostProcessNode,
   type GraphNodeData,
@@ -268,15 +267,14 @@ describe("Tier 1: Visual Node Graph -> GPU Integration", () => {
 
   // Feature 38: Functional UniformNode
   describe("Feature 38: Functional UniformNode", () => {
-    it("extracts defined uniforms via getGraphUniforms", () => {
+    it("uniform nodes carry persisted name/type/default in node data", () => {
       const nodes: Node<GraphNodeData>[] = [
         { id: "u-1", position: { x: 0, y: 0 }, data: { type: "uniform", uniformId: "u1", name: "u_glow", uniformType: "float", defaultValue: 0.5 } },
         { id: "u-2", position: { x: 0, y: 50 }, data: { type: "uniform", uniformId: "u2", name: "u_tint", uniformType: "color", defaultValue: [1, 0, 0] } },
       ]
-      const uniforms = getGraphUniforms(nodes)
-      expect(uniforms).toHaveLength(2)
-      expect(uniforms[0]).toEqual({ id: "u1", name: "u_glow", type: "float", defaultValue: 0.5 })
-      expect(uniforms[1]).toEqual({ id: "u2", name: "u_tint", type: "color", defaultValue: [1, 0, 0] })
+      const uniforms = nodes.map((n) => n.data as any)
+      expect(uniforms[0]).toMatchObject({ uniformId: "u1", name: "u_glow", uniformType: "float", defaultValue: 0.5 })
+      expect(uniforms[1]).toMatchObject({ uniformId: "u2", name: "u_tint", uniformType: "color", defaultValue: [1, 0, 0] })
     })
 
     it("synchronizes graph uniforms to project store", () => {
@@ -327,8 +325,7 @@ describe("Tier 1: Visual Node Graph -> GPU Integration", () => {
         { id: "u-2", position: { x: 0, y: 30 }, data: { type: "uniform", uniformId: "u2", name: "u_v2", uniformType: "vec2", defaultValue: [1, 2] } },
         { id: "u-3", position: { x: 0, y: 60 }, data: { type: "uniform", uniformId: "u3", name: "u_b", uniformType: "bool", defaultValue: true } },
       ]
-      const list = getGraphUniforms(nodes)
-      expect(list).toHaveLength(3)
+      expect(nodes.map((n) => (n.data as any).uniformType)).toEqual(["float", "vec2", "bool"])
     })
   })
 

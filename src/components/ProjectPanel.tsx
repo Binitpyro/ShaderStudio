@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react"
-import { useProjectStore, type ProjectData } from "@/stores/projectStore"
-import { saveProject, loadProject, listProjects, deleteProject } from "@/db"
+import { useProjectStore } from "@/stores/projectStore"
+import { saveProject, loadProject, listProjects, deleteProject, parseProjectJson, uniqueImportName } from "@/db"
 import { Button } from "@/components/ui/button"
 import { Save, FolderOpen, Download, Upload, FilePlus, Trash2, Sparkles, HardDriveDownload, HardDriveUpload } from "lucide-react"
 import { createProjectFromShadertoy } from "@/core/shadertoyImporter"
@@ -14,7 +14,7 @@ import {
 
 
 export function ProjectPanel() {
-  const [projects, setProjects] = useState<Array<{ name: string; updatedAt: number }>>([])
+  const [projects, setProjects] = useState<Array<{ name: string; updatedAt: number; projectId?: string }>>([])
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [projectName, setProjectName] = useState("")
   const [showLoadDialog, setShowLoadDialog] = useState(false)
@@ -26,7 +26,9 @@ export function ProjectPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const currentProjectName = useProjectStore((s) => s.currentProjectName)
+  const currentProjectId = useProjectStore((s) => s.currentProjectId)
   const setCurrentProjectName = useProjectStore((s) => s.setCurrentProjectName)
+  const setCurrentProjectId = useProjectStore((s) => s.setCurrentProjectId)
   const loadProjectData = useProjectStore((s) => s.loadProjectData)
   const exportProjectData = useProjectStore((s) => s.exportProjectData)
   const resetProject = useProjectStore((s) => s.resetProject)
@@ -42,24 +44,38 @@ export function ProjectPanel() {
     const name = projectName || currentProjectName || "Untitled"
     const data = exportProjectData()
     data.name = name
+    // Same name keeps the project's identity; a new name is "save as" (a separate project).
+    let projectId = name === currentProjectName ? currentProjectId ?? undefined : undefined
+    if (!projectId) {
+      const clash = (await listProjects()).find((p) => p.name === name)
+      if (clash) {
+        if (!window.confirm(`A saved project named "${name}" already exists. Overwrite it?`)) return
+        projectId = clash.projectId
+      }
+    }
+    data.projectId = projectId ?? crypto.randomUUID()
     await saveProject(data)
+    setCurrentProjectId(data.projectId)
     setCurrentProjectName(name)
     setHasUnsavedChanges(false)
     setShowSaveDialog(false)
     setProjectName("")
-  }, [projectName, currentProjectName, exportProjectData, setCurrentProjectName, setHasUnsavedChanges])
+  }, [projectName, currentProjectName, currentProjectId, exportProjectData, setCurrentProjectName, setCurrentProjectId, setHasUnsavedChanges])
 
-  const handleLoad = useCallback(async (name: string) => {
-    const data = await loadProject(name)
+  // Key = projectId (names are not unique); legacy rows without one are addressed by name.
+  const handleLoad = useCallback(async (key: string) => {
+    const data = await loadProject(key) // validated against the same rules as imports
     if (data) {
       loadProjectData(data)
       triggerRecompile()
       setShowLoadDialog(false)
+    } else {
+      setImportError("Could not load that project: it is missing or invalid.")
     }
   }, [loadProjectData, triggerRecompile])
 
-  const handleDelete = useCallback(async (name: string) => {
-    await deleteProject(name)
+  const handleDelete = useCallback(async (key: string) => {
+    await deleteProject(key)
     refreshProjects()
   }, [refreshProjects])
 
@@ -80,18 +96,20 @@ export function ProjectPanel() {
   const processProjectJSON = useCallback(async (jsonText: string) => {
     try {
       setImportError(null)
-      const data = JSON.parse(jsonText) as ProjectData
-      if (!data || typeof data !== "object") {
-        throw new Error("Invalid project file: not an object")
+      const parsed = parseProjectJson(jsonText)
+      if (!parsed.ok) {
+        setImportError(parsed.error)
+        return
       }
-      if (!data.backend) {
-        throw new Error("Invalid project file: missing backend specification")
-      }
+      // Fresh projectId (from validation) + unique name: an import can never overwrite a local project.
+      const data = parsed.data
+      data.name = uniqueImportName(data.name, (await listProjects()).map((p) => p.name))
       loadProjectData(data)
       triggerRecompile()
       await saveProject(data)
+      if (parsed.warnings.length > 0) setImportError(`Imported with warnings: ${parsed.warnings.join("; ")}`)
     } catch (err: any) {
-      setImportError(err.message || "Failed to parse project file")
+      setImportError(err?.message || "Failed to import project file")
     }
   }, [loadProjectData, triggerRecompile])
 
@@ -120,6 +138,8 @@ export function ProjectPanel() {
         throw new Error("Please paste Shadertoy GLSL code.")
       }
       const data = createProjectFromShadertoy(shadertoyCode, shadertoyName || "Shadertoy Import")
+      data.projectId = crypto.randomUUID()
+      data.name = uniqueImportName(data.name, (await listProjects()).map((p) => p.name))
       loadProjectData(data)
       triggerRecompile()
       await saveProject(data)
@@ -289,15 +309,15 @@ export function ProjectPanel() {
         <div className="flex flex-col gap-2 p-2 bg-background rounded border border-border max-h-48 overflow-auto">
           {projects.length === 0 && <span className="text-xs text-muted-foreground">No saved projects</span>}
           {projects.map((p) => (
-            <div key={p.name} className="flex items-center gap-2">
+            <div key={p.projectId ?? p.name} className="flex items-center gap-2">
               <button
-                onClick={() => handleLoad(p.name)}
+                onClick={() => handleLoad(p.projectId ?? p.name)}
                 className="flex-1 text-xs text-left hover:text-primary truncate"
               >
                 {p.name}
               </button>
               <button
-                onClick={() => handleDelete(p.name)}
+                onClick={() => handleDelete(p.projectId ?? p.name)}
                 className="text-xs text-muted-foreground hover:text-destructive p-1"
                 title="Delete project"
               >

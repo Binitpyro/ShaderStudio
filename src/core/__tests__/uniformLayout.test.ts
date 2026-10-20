@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { computeUniformBufferLayout, packUniformBuffer } from "../uniformLayout"
+import { computeUniformBufferLayout, packUniformBuffer, UnsupportedUniformTypeError } from "../uniformLayout"
 import type { ParsedUniform } from "@/stores/projectStore"
 
 describe("uniformLayout", () => {
@@ -262,5 +262,42 @@ describe("uniformLayout", () => {
     const view = new DataView(buffer)
     expect(view.getFloat32(0, true)).toBe(0)
     expect(view.getFloat32(16, true)).toBe(0)
+  })
+})
+
+describe("uniformLayout supported + unsupported types (fleet w2)", () => {
+  const u = (name: string, type: string): ParsedUniform => ({ name, type: type as ParsedUniform["type"], kind: "vector" })
+
+  it("lays out integer vectors with the same size/alignment as float vectors (no silent f32 shift)", () => {
+    const layout = computeUniformBufferLayout([u("a", "vec3<i32>"), u("b", "f32"), u("c", "vec2u"), u("d", "vec4<u32>")])
+    expect(layout.fields["a"]).toMatchObject({ type: "vec3i", offset: 0, size: 12, alignment: 16 })
+    expect(layout.fields["b"]).toMatchObject({ type: "f32", offset: 12 })
+    expect(layout.fields["c"]).toMatchObject({ type: "vec2u", offset: 16, size: 8 })
+    expect(layout.fields["d"]).toMatchObject({ type: "vec4u", offset: 32, size: 16 })
+  })
+
+  it("packs integer vectors as int32/uint32 bits, not float32", () => {
+    const layout = computeUniformBufferLayout([u("iv", "vec2i"), u("uv", "vec2u")])
+    const view = new DataView(packUniformBuffer(layout, { iv: [-5, 7], uv: [4000000000, 3] }))
+    expect(view.getInt32(layout.fields["iv"].offset, true)).toBe(-5)
+    expect(view.getInt32(layout.fields["iv"].offset + 4, true)).toBe(7)
+    expect(view.getUint32(layout.fields["uv"].offset, true)).toBe(4000000000)
+  })
+
+  it("derives array stride from an array<T, N> type string (vec3 stride 16, f32 stride 16)", () => {
+    const layout = computeUniformBufferLayout([
+      u("pos", "array<vec3f, 3>"),
+      u("rad", "array<f32, 2>"),
+      u("after", "f32"),
+    ])
+    expect(layout.fields["pos"]).toMatchObject({ arrayCount: 3, arrayStride: 16, size: 48, offset: 0 })
+    expect(layout.fields["rad"]).toMatchObject({ arrayCount: 2, arrayStride: 16, size: 32, offset: 48 })
+    expect(layout.fields["after"].offset).toBe(80)
+  })
+
+  it("throws a clear error for f16 and unknown types instead of guessing f32", () => {
+    expect(() => computeUniformBufferLayout([u("h", "f16")])).toThrow(/Unsupported uniform type "f16"/)
+    expect(() => computeUniformBufferLayout([u("h", "vec2<f16>")])).toThrow(UnsupportedUniformTypeError)
+    expect(() => computeUniformBufferLayout([u("x", "Light")])).toThrow(/Unsupported uniform type "Light"/)
   })
 })

@@ -3,6 +3,8 @@ import type { ParsedUniform } from "@/stores/projectStore"
 export type UniformFieldType =
   | "f32" | "i32" | "u32" | "bool"
   | "vec2f" | "vec3f" | "vec4f"
+  | "vec2i" | "vec3i" | "vec4i"
+  | "vec2u" | "vec3u" | "vec4u"
   | "mat2x2f" | "mat3x3f" | "mat4x4f"
   | "texture_2d"
 
@@ -26,20 +28,41 @@ export function alignTo(offset: number, alignment: number): number {
   return (offset + alignment - 1) & ~(alignment - 1)
 }
 
+export class UnsupportedUniformTypeError extends Error {
+  constructor(public readonly typeName: string, detail?: string) {
+    super(`Unsupported uniform type "${typeName}"${detail ? `: ${detail}` : ""}. Supported: f32, i32, u32, bool, vecN<f32|i32|u32>, matNxN<f32>, array<T, N>, texture_2d.`)
+    this.name = "UnsupportedUniformTypeError"
+  }
+}
+
+const VEC_RE = /^(?:vec([234])(?:<(f32|i32|u32)>|([fiu]))?|([iu])vec([234]))$/
+const MAT_RE = /^mat([234])(?:x\1)?(?:<f32>|f)?$/
+
+/** Parses `array<T, N>` into its element type and count, or null when `typeStr` is not an array. */
+export function parseArrayType(typeStr: string): { elementType: string; count: number } | null {
+  const m = typeStr.replace(/\s+/g, "").match(/^array<(.+),(\d+)>$/)
+  return m ? { elementType: m[1], count: parseInt(m[2], 10) } : null
+}
+
 export function normalizeFieldType(typeStr: string): UniformFieldType {
-  const t = typeStr.trim()
+  const t = typeStr.trim().replace(/\s+/g, "")
   if (t === "texture" || t.startsWith("texture_2d") || t.startsWith("sampler")) return "texture_2d"
   if (t === "float" || t === "f32") return "f32"
   if (t === "int" || t === "i32") return "i32"
   if (t === "uint" || t === "u32") return "u32"
   if (t === "bool") return "bool"
-  if (t === "vec2" || t === "vec2<f32>" || t === "vec2f") return "vec2f"
-  if (t === "vec3" || t === "vec3<f32>" || t === "vec3f") return "vec3f"
-  if (t === "vec4" || t === "vec4<f32>" || t === "vec4f") return "vec4f"
-  if (t === "mat2" || t === "mat2x2" || t === "mat2x2<f32>" || t === "mat2x2f") return "mat2x2f"
-  if (t === "mat3" || t === "mat3x3" || t === "mat3x3<f32>" || t === "mat3x3f") return "mat3x3f"
-  if (t === "mat4" || t === "mat4x4" || t === "mat4x4<f32>" || t === "mat4x4f") return "mat4x4f"
-  return "f32"
+  if (t === "f16" || t.includes("<f16>") || /^vec[234]h$/.test(t)) {
+    throw new UnsupportedUniformTypeError(typeStr, "f16 uniforms are not supported")
+  }
+  const v = t.match(VEC_RE)
+  if (v) {
+    const n = v[1] ?? v[5]
+    const suffix = v[2] ? v[2][0] : (v[3] ?? v[4] ?? "f")
+    return `vec${n}${suffix}` as UniformFieldType
+  }
+  const m = t.match(MAT_RE)
+  if (m) return `mat${m[1]}x${m[1]}f` as UniformFieldType
+  throw new UnsupportedUniformTypeError(typeStr)
 }
 
 export function getTypeMetrics(type: UniformFieldType): { size: number; alignment: number } {
@@ -50,10 +73,16 @@ export function getTypeMetrics(type: UniformFieldType): { size: number; alignmen
     case "bool":
       return { size: 4, alignment: 4 }
     case "vec2f":
+    case "vec2i":
+    case "vec2u":
       return { size: 8, alignment: 8 }
     case "vec3f":
+    case "vec3i":
+    case "vec3u":
       return { size: 12, alignment: 16 }
     case "vec4f":
+    case "vec4i":
+    case "vec4u":
       return { size: 16, alignment: 16 }
     case "mat2x2f":
       return { size: 16, alignment: 8 }
@@ -73,7 +102,10 @@ export function computeUniformBufferLayout(uniforms: ParsedUniform[]): UniformBu
   const normalizedUniforms: ParsedUniform[] = []
   const seenArray = new Set<string>()
 
-  for (const u of uniforms) {
+  for (const u0 of uniforms) {
+    let u = u0
+    const arr = parseArrayType(u.type as string)
+    if (arr) u = { ...u, type: arr.elementType as ParsedUniform["type"], arrayLength: arr.count }
     const m = u.name.match(/^(.+)\[(\d+)\]$/)
     if (m) {
       const baseName = m[1]
@@ -205,6 +237,22 @@ function writeScalarOrVector(view: DataView, type: UniformFieldType, offset: num
     }
     case "bool": {
       view.setUint32(offset, val ? 1 : 0, true)
+      break
+    }
+    case "vec2i":
+    case "vec3i":
+    case "vec4i":
+    case "vec2u":
+    case "vec3u":
+    case "vec4u": {
+      const n = Number(type[3])
+      const signed = type.endsWith("i")
+      const arr = ArrayBuffer.isView(val) || Array.isArray(val) ? (val as ArrayLike<number>) : []
+      for (let i = 0; i < n; i++) {
+        const num = Number(arr[i] ?? 0) || 0
+        if (signed) view.setInt32(offset + i * 4, num | 0, true)
+        else view.setUint32(offset + i * 4, num >>> 0, true)
+      }
       break
     }
     case "vec2f": {

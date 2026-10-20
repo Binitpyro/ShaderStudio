@@ -1945,9 +1945,9 @@ describe("coordinator telemetry (w1-b-ui handoff)", () => {
     })
 
 
-  // fleet: fixed in W2 -- a throwing metrics subscriber currently propagates out of tick()
-  // and starves later subscribers; the contract is that subscribers are isolated.
-  it.fails("isolates subscriber errors so a throwing telemetry subscriber does not crash tick()", () => {
+  // fleet: fixed in W2 -- a throwing metrics subscriber must not propagate out of tick()
+  // or starve later subscribers; the contract is that subscribers are isolated.
+  it("isolates subscriber errors so a throwing telemetry subscriber does not crash tick()", () => {
     const coordinator = new RenderCoordinator()
     let healthyReceived = false
     coordinator.onMetrics(() => {
@@ -2242,5 +2242,108 @@ describe("telemetry / budget / LOD / streaming under stress (w1-c-tooling handof
     s.setMemoryLimitMB(-50)
     expect(s.getMemoryLimitMB()).toBe(1)
     expect(() => s.touch("non_existent.png")).not.toThrow()
+  })
+})
+
+// ============================================================================
+// fleet(w2): PerfOverlay subscription, telemetry ring buffer / frame stats / recompile counter
+// ============================================================================
+describe("w2 telemetry + PerfOverlay", () => {
+  beforeEach(() => { performanceTelemetry.reset() })
+
+  /** Server-renders PerfOverlay with its effects captured (SSR never runs them), optionally forcing it hidden. */
+  const mountOverlay = (hidden: boolean) => {
+    const internals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+    const effects: Array<() => void | (() => void)> = []
+    function Interceptor() {
+      const original = internals.H
+      internals.H = {
+        ...original,
+        useEffect: (fn: () => void | (() => void)) => void effects.push(fn),
+        // PerfOverlay's only `useState(true)` is `visible`
+        useState: (init: unknown) => (hidden && init === true ? [false, () => {}] : original.useState(init)),
+      }
+      try { PerfOverlay({}) } finally { internals.H = original }
+      return null
+    }
+    renderToStaticMarkup(React.createElement(Interceptor))
+    const cleanups = effects.map((e) => e()).filter((c): c is () => void => typeof c === "function")
+    return () => cleanups.forEach((c) => c())
+  }
+
+  it("uses exactly one telemetry subscription while visible and releases it on unmount", () => {
+    expect(performanceTelemetry.getSubscriberCount()).toBe(0)
+    const unmount = mountOverlay(false)
+    expect(performanceTelemetry.getSubscriberCount()).toBe(1)
+    unmount()
+    expect(performanceTelemetry.getSubscriberCount()).toBe(0)
+  })
+
+  it("holds no subscription at all while hidden", () => {
+    const unmount = mountOverlay(true)
+    expect(performanceTelemetry.getSubscriberCount()).toBe(0)
+    unmount()
+  })
+
+  it("throttles an interval subscriber to <= 4Hz regardless of frame rate", () => {
+    let now = 1000
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now)
+    const calls = vi.fn()
+    const unsubs = [performanceTelemetry.subscribe(calls, 250)]
+    const everyFrame = vi.fn()
+    unsubs.push(performanceTelemetry.subscribe(everyFrame))
+    for (let i = 0; i < 120; i++) { // 2 seconds at 60fps
+      now += 1000 / 60
+      performanceTelemetry.recordFrameTime(16.67)
+      performanceTelemetry.notifySubscribers()
+    }
+    nowSpy.mockRestore()
+    unsubs.forEach((u) => u())
+    expect(everyFrame).toHaveBeenCalledTimes(120)
+    expect(calls.mock.calls.length).toBeLessThanOrEqual(9) // 2s / 250ms (+ the first call)
+    expect(calls.mock.calls.length).toBeGreaterThanOrEqual(7)
+  })
+
+  it("does not build metrics when no subscriber is due", () => {
+    const spy = vi.spyOn(performanceTelemetry, "getMetrics")
+    performanceTelemetry.notifySubscribers() // no subscribers
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it("ring buffer keeps the last 60 frames in order and averages them", () => {
+    const t = new PerformanceTelemetry()
+    for (let i = 1; i <= 100; i++) t.recordFrameTime(i)
+    const timeline = t.getTimeline()
+    expect(timeline).toHaveLength(60)
+    expect(timeline[0]).toBe(41)
+    expect(timeline[59]).toBe(100)
+    expect(t.getLastFrameTime()).toBe(100)
+    expect(t.getAverageFps()).toBeCloseTo(1000 / 70.5, 5) // mean of 41..100
+    t.reset()
+    expect(t.getTimeline()).toEqual([])
+  })
+
+  it("reportFrameStats overrides the coordinator's fallback draw-call count and records pass timings", () => {
+    const coordinator = new RenderCoordinator()
+    coordinator.setActiveAdapter({ renderFrame: vi.fn(), dispose: vi.fn() })
+    coordinator.tick(1000)
+    expect(performanceTelemetry.getDrawCalls()).toBe(1) // fallback until an adapter reports
+
+    performanceTelemetry.reportFrameStats({ drawCalls: 7, triangles: 1234, passTimings: { shadow: 0.4, lighting: 1.2 } })
+    coordinator.tick(1016)
+    expect(performanceTelemetry.getDrawCalls()).toBe(7)
+    expect(performanceTelemetry.getTriangles()).toBe(1234)
+    expect(performanceTelemetry.getPassTimings()).toMatchObject({ shadow: 0.4, lighting: 1.2 })
+
+    coordinator.setActiveAdapter(null) // adapter change forgets stale stats
+    expect(performanceTelemetry.hasReportedFrameStats()).toBe(false)
+  })
+
+  it("counts recompiles", () => {
+    expect(performanceTelemetry.getRecompileCount()).toBe(0)
+    performanceTelemetry.recordRecompile()
+    performanceTelemetry.recordRecompile()
+    expect(performanceTelemetry.getRecompileCount()).toBe(2)
   })
 })

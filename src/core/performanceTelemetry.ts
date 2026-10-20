@@ -1,4 +1,4 @@
-import type { DetailedGpuMetrics } from "@/adapters/types"
+import type { DetailedGpuMetrics, FrameStats } from "@/adapters/types"
 
 export type { DetailedGpuMetrics }
 
@@ -16,33 +16,45 @@ export interface GeometryMemoryEntry {
 }
 
 export class PerformanceTelemetry {
-  private timeline: number[] = []
+  // Preallocated ring buffer: recordFrameTime never allocates or shifts.
   private readonly maxTimelineEntries = 60
+  private ring = new Float64Array(60)
+  private ringHead = 0 // next write index
+  private ringCount = 0
   private passTimings: DetailedGpuMetrics["passTimings"] = {}
   private drawCalls = 0
   private triangles = 0
   private registeredTextures = new Map<string, TextureMemoryEntry>()
   private registeredGeometries = new Map<string, GeometryMemoryEntry>()
   private manualVramBytes: number | null = null
-  private subscribers = new Set<(metrics: DetailedGpuMetrics) => void>()
+  private warnedSubscribers = new WeakSet<object>()
+  private subscribers = new Map<(metrics: DetailedGpuMetrics) => void, { intervalMs: number; last: number }>()
+  private recompileCount = 0
+  private frameStatsReported = false
 
   /**
-   * Pushes frame duration in ms into the circular 60-frame buffer.
-   * Evicts the oldest entry when length exceeds 60.
+   * Pushes frame duration in ms into the preallocated 60-entry ring buffer (oldest entry is overwritten).
    */
   recordFrameTime(ms: number): void {
-    const validMs = Number.isFinite(ms) ? Math.max(0, ms) : 16.67
-    this.timeline.push(validMs)
-    if (this.timeline.length > this.maxTimelineEntries) {
-      this.timeline.shift()
-    }
+    this.ring[this.ringHead] = Number.isFinite(ms) ? Math.max(0, ms) : 16.67
+    this.ringHead = (this.ringHead + 1) % this.maxTimelineEntries
+    if (this.ringCount < this.maxTimelineEntries) this.ringCount++
   }
 
   /**
-   * Returns a copy of the circular 60-frame timeline array.
+   * Returns the timeline, oldest first, as a fresh array (allocates; call at UI cadence only).
    */
   getTimeline(): number[] {
-    return [...this.timeline]
+    const out = new Array<number>(this.ringCount)
+    const start = (this.ringHead - this.ringCount + this.maxTimelineEntries) % this.maxTimelineEntries
+    for (let i = 0; i < this.ringCount; i++) out[i] = this.ring[(start + i) % this.maxTimelineEntries]
+    return out
+  }
+
+  /** Most recent frame time in ms (16.67 when nothing recorded). Allocation-free. */
+  getLastFrameTime(): number {
+    if (this.ringCount === 0) return 16.67
+    return this.ring[(this.ringHead - 1 + this.maxTimelineEntries) % this.maxTimelineEntries]
   }
 
   /**
@@ -50,9 +62,10 @@ export class PerformanceTelemetry {
    * Returns 60 if timeline is empty or average time <= 0.
    */
   getAverageFps(): number {
-    if (this.timeline.length === 0) return 60
-    const sum = this.timeline.reduce((acc, val) => acc + val, 0)
-    const avgMs = sum / this.timeline.length
+    if (this.ringCount === 0) return 60
+    let sum = 0
+    for (let i = 0; i < this.ringCount; i++) sum += this.ring[i] // order is irrelevant for the mean
+    const avgMs = sum / this.ringCount
     if (avgMs <= 0 || !Number.isFinite(avgMs)) return 60
     return 1000 / avgMs
   }
@@ -86,6 +99,43 @@ export class PerformanceTelemetry {
 
   getTriangles(): number {
     return this.triangles
+  }
+
+  /**
+   * Adapters call this once per frame after drawing with the real draw-call/triangle counts and
+   * optional per-pass GPU timings. Until an adapter reports, the coordinator falls back to 1 draw call.
+   */
+  reportFrameStats(stats: FrameStats): void {
+    this.drawCalls = Math.max(0, Math.floor(stats.drawCalls))
+    this.triangles = Math.max(0, Math.floor(stats.triangles))
+    if (stats.passTimings) {
+      for (const key of Object.keys(stats.passTimings) as Array<keyof DetailedGpuMetrics["passTimings"]>) {
+        const v = stats.passTimings[key]
+        if (v !== undefined) this.passTimings[key] = Math.max(0, v)
+      }
+    }
+    this.frameStatsReported = true
+  }
+
+  hasReportedFrameStats(): boolean {
+    return this.frameStatsReported
+  }
+
+  /** Forgets reported stats (call when the active adapter changes). */
+  resetFrameStats(): void {
+    this.frameStatsReported = false
+    this.drawCalls = 0
+    this.triangles = 0
+    this.passTimings = {}
+  }
+
+  /** Dev counter: how many shader recompiles were triggered (detects recompile storms). */
+  recordRecompile(): void {
+    this.recompileCount++
+  }
+
+  getRecompileCount(): number {
+    return this.recompileCount
   }
 
   /**
@@ -172,7 +222,7 @@ export class PerformanceTelemetry {
   }
 
   getMetrics(): DetailedGpuMetrics {
-    const lastFrame = this.timeline.length > 0 ? this.timeline[this.timeline.length - 1] : 16.67
+    const lastFrame = this.getLastFrameTime()
     return {
       fps: Math.round(this.getAverageFps()),
       frameTime: Number(lastFrame.toFixed(2)),
@@ -184,26 +234,46 @@ export class PerformanceTelemetry {
     }
   }
 
-  subscribe(callback: (metrics: DetailedGpuMetrics) => void): () => void {
-    this.subscribers.add(callback)
+  /**
+   * Subscribes to metrics. `intervalMs` throttles this subscriber (0 = every frame); the metrics
+   * object (with its timeline copy) is only built when at least one subscriber is due.
+   */
+  subscribe(callback: (metrics: DetailedGpuMetrics) => void, intervalMs = 0): () => void {
+    this.subscribers.set(callback, { intervalMs, last: -Infinity })
     return () => this.subscribers.delete(callback)
+  }
+
+  getSubscriberCount(): number {
+    return this.subscribers.size
   }
 
   notifySubscribers(): void {
     if (this.subscribers.size === 0) return
-    const metrics = this.getMetrics()
-    for (const sub of this.subscribers) {
+    const now = performance.now()
+    let metrics: DetailedGpuMetrics | null = null
+    for (const [sub, state] of this.subscribers) {
+      if (state.intervalMs > 0 && now - state.last < state.intervalMs) continue
+      state.last = now
+      metrics ??= this.getMetrics()
       try {
         sub(metrics)
-      } catch {}
+      } catch (e) {
+        if (!this.warnedSubscribers.has(sub)) {
+          this.warnedSubscribers.add(sub)
+          console.warn("[PerformanceTelemetry] metrics subscriber threw (further errors from it suppressed):", e)
+        }
+      }
     }
   }
 
   reset(): void {
-    this.timeline = []
+    this.ringHead = 0
+    this.ringCount = 0
     this.passTimings = {}
     this.drawCalls = 0
     this.triangles = 0
+    this.frameStatsReported = false
+    this.recompileCount = 0
     this.registeredTextures.clear()
     this.registeredGeometries.clear()
     this.manualVramBytes = null

@@ -201,10 +201,35 @@ describe("transportStore (Requirement R2)", () => {
 
     // Step coordinator
     renderCoordinator.tick(1000)
-    renderCoordinator.tick(1500) // delta = 500ms -> virtual time = 0.5s
+    renderCoordinator.tick(1100) // delta = 100ms (the per-frame cap) -> virtual time ~= 0.1s
 
     const state = useTransportStore.getState()
-    expect(state.playbackTime).toBeCloseTo(0.5, 2)
-    expect(state.currentTime).toBeCloseTo(0.5, 2)
+    expect(state.playbackTime).toBeCloseTo(0.1, 2)
+    expect(state.currentTime).toBeCloseTo(0.1, 2)
+  })
+
+  it("does not write the store every frame: ~10Hz mirror, coordinator holds the authoritative clock", () => {
+    renderCoordinator.resetTime()
+    renderCoordinator.setPlaying(true)
+    let writes = 0
+    const unsub = useTransportStore.subscribe(() => { writes++ })
+    renderCoordinator.tick(1000)
+    for (let i = 1; i <= 120; i++) renderCoordinator.tick(1000 + i * 16.667) // 2s at 60fps
+    unsub()
+
+    expect(renderCoordinator.getPlaybackTime()).toBeGreaterThan(1.9) // authoritative time advances every frame
+    expect(writes).toBeLessThanOrEqual(22) // ~10 writes/s, not 120
+    expect(writes).toBeGreaterThanOrEqual(15)
+    expect(Math.abs(useTransportStore.getState().playbackTime - renderCoordinator.getPlaybackTime())).toBeLessThan(0.11)
+    expect(useTransportStore.getState().getFormattedTime()).toBe(formatTime(renderCoordinator.getPlaybackTime()))
+  })
+
+  it("snaps the store to the coordinator clock when playback pauses", () => {
+    renderCoordinator.resetTime()
+    renderCoordinator.setPlaying(true)
+    renderCoordinator.tick(1000)
+    renderCoordinator.tick(1050) // 50ms: below the 100ms mirror threshold
+    useTransportStore.getState().setIsPlaying(false)
+    expect(useTransportStore.getState().playbackTime).toBeCloseTo(renderCoordinator.getPlaybackTime(), 6)
   })
 })

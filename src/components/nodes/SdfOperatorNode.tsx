@@ -1,5 +1,5 @@
 import { memo, useCallback } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Handle, Position, useReactFlow } from "@xyflow/react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
@@ -22,17 +22,14 @@ function SdfOperatorNodeComponent({ id, data, selected }: FlowNodeProps<SdfOpera
   const operatorType = data.operatorType || "smooth_union"
   const params = data.params || DEFAULT_OPERATOR_PARAMS[operatorType]
 
+  const { updateNodeData } = useReactFlow()
+
+  // React Flow owns node data: update through its API instead of mutating props.
   const updateData = useCallback(
     (newType: SdfOperatorType, newParams: any) => {
-      data.operatorType = newType
-      data.params = newParams
-      const evt = new CustomEvent("nodeDataChanged", {
-        detail: { nodeId: id, data: { ...data, operatorType: newType, params: newParams } },
-        bubbles: true,
-      })
-      document.dispatchEvent(evt)
+      updateNodeData(id, { operatorType: newType, params: newParams })
     },
-    [id, data]
+    [id, updateNodeData]
   )
 
   const handleTypeChange = (newType: SdfOperatorType) => {

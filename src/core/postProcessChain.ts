@@ -140,6 +140,7 @@ export class WebGL2Framebuffer {
   private gl: WebGL2RenderingContext | null = null
   private framebuffer: WebGLFramebuffer | null = null
   private texture: WebGLTexture | null = null
+  private depthBuffer: WebGLRenderbuffer | null = null
   private width = 0
   private height = 0
 
@@ -168,6 +169,12 @@ export class WebGL2Framebuffer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.texture, 0)
+    // Depth attachment so the scene keeps depth testing when rendered into this target.
+    this.depthBuffer = gl.createRenderbuffer()
+    gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthBuffer)
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, this.width, this.height)
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depthBuffer)
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null)
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
       console.error("Framebuffer is not complete")
     }
@@ -190,9 +197,11 @@ export class WebGL2Framebuffer {
     if (this.gl) {
       if (this.framebuffer) this.gl.deleteFramebuffer(this.framebuffer)
       if (this.texture) this.gl.deleteTexture(this.texture)
+      if (this.depthBuffer) this.gl.deleteRenderbuffer?.(this.depthBuffer) // optional: test doubles may omit it
     }
     this.framebuffer = null
     this.texture = null
+    this.depthBuffer = null
   }
 }
 

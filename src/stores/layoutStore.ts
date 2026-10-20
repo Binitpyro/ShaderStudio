@@ -103,6 +103,10 @@ export const useLayoutStore = create<LayoutState>((set, get, api) => {
 
   jumpTarget: null,
   jumpToLine: (line: number, column?: number) => {
+    // Contract: integers >= 1 (Monaco cannot reveal anything else)
+    const toPos = (n: number) => (Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 1)
+    line = toPos(line)
+    if (column !== undefined) column = toPos(column)
     // If Viewport is maximized, un-maximize so Editor is visible
     if (get().maximizedPanel === "viewport") {
       set({ maximizedPanel: "none" })

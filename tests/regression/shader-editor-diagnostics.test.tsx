@@ -1900,3 +1900,332 @@ describe("ErrorBoundary and diagnostics (w1-c-tooling handoff)", () => {
     expect(parseDiagnosticErrors(null)).toEqual([])
   })
 })
+
+// ============================================================================
+// w2-c coverage: debounce cancel/flush, language-aware writes, handlers and effects of the real ShaderEditor.
+// A tiny render harness keeps refs across renders and re-runs an effect only when its deps change (like React),
+// since renderToStaticMarkup never runs effects.
+// ============================================================================
+describe("ShaderEditor write pipeline and handlers (real component, effect-aware harness)", () => {
+  const internals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+
+  function createHarness() {
+    const refs: Array<{ current: unknown }> = []
+    const effects: Array<{ deps?: unknown[]; cleanup?: () => void }> = []
+    let tree: any = null
+    const render = () => {
+      let ri = 0
+      let ei = 0
+      const queue: Array<{ i: number; fn: () => void | (() => void); deps?: unknown[] }> = []
+      function Interceptor() {
+        const original = internals.H
+        internals.H = {
+          ...original,
+          useRef: (init: unknown) => (refs[ri] ??= { current: init }, refs[ri++]),
+          useEffect: (fn: () => void | (() => void), deps?: unknown[]) => void queue.push({ i: ei++, fn, deps }),
+        }
+        try { tree = ShaderEditor() } finally { internals.H = original }
+        return null
+      }
+      renderToStaticMarkup(React.createElement(Interceptor))
+      for (const { i, fn, deps } of queue) {
+        const prev = effects[i]
+        const changed = !prev || !deps || !prev.deps || deps.some((d, k) => !Object.is(d, prev.deps![k]))
+        if (!changed) continue
+        prev?.cleanup?.()
+        const c = fn()
+        effects[i] = { deps, cleanup: typeof c === "function" ? c : undefined }
+      }
+      return tree
+    }
+    const walk = (pred: (el: any) => boolean, node: any): any => {
+      if (!node || typeof node !== "object") return null
+      if (Array.isArray(node)) { for (const c of node) { const r = walk(pred, c); if (r) return r } return null }
+      if (node.props && pred(node)) return node
+      return node.props ? walk(pred, node.props.children) : null
+    }
+    const find = (pred: (el: any) => boolean) => walk(pred, tree)
+    const monacoEl = () => find((el) => typeof el.props.onChange === "function" && typeof el.props.onMount === "function")
+    return {
+      render,
+      find,
+      type: (value: string) => monacoEl().props.onChange(value),
+      click: (testId: string) => find((el) => el.props["data-testid"] === testId).props.onClick(),
+      mount: (editor: any, monaco: any = { KeyMod: { CtrlCmd: 1 }, KeyCode: { Enter: 2 }, editor: { setModelMarkers: vi.fn() } }) =>
+        monacoEl().props.onMount(editor, monaco),
+      unmount: () => effects.forEach((e) => e?.cleanup?.()),
+      readOnly: () => monacoEl().props.options.readOnly,
+    }
+  }
+
+  const st = () => useProjectStore.getState()
+  let h: ReturnType<typeof createHarness>
+  let doc: EventTarget
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    doc = new EventTarget()
+    vi.stubGlobal("document", doc) // the editor registers its editComputeShader listener on `document`
+    useProjectStore.getState().resetProject()
+    useLayoutStore.setState({ jumpTarget: null, maximizedPanel: "none", editorMinimap: false })
+    useFileSystemStore.setState({ syncMode: "local" })
+    h = createHarness()
+  })
+  afterEach(() => {
+    h.unmount()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  describe("debounced writes", () => {
+    it("writes the typed GLSL after 400ms, marks it dirty and triggers a recompile", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      const before = st().recompileTrigger
+      h.render()
+      h.type("void main() { /* A */ }")
+      vi.advanceTimersByTime(399)
+      expect(st().glslSource).not.toBe("void main() { /* A */ }")
+      vi.advanceTimersByTime(1)
+      expect(st().glslSource).toBe("void main() { /* A */ }")
+      expect(st().recompileTrigger).toBe(before + 1)
+    })
+
+    it("captures the language at keystroke time: a backend switch inside the window never writes GLSL into the WGSL slot", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      const wgslBefore = st().wgslSource
+      h.type("// glsl text")
+      useProjectStore.setState({ activeBackend: "webgpu", activeEditorTab: "render" })
+      h.render()
+      vi.advanceTimersByTime(400)
+      expect(st().glslSource).toBe("// glsl text")
+      expect(st().wgslSource).toBe(wgslBefore)
+    })
+
+    it("WebGPU render edits go to the WGSL slot", () => {
+      useProjectStore.setState({ activeBackend: "webgpu", activeEditorTab: "render" })
+      h.render()
+      const glslBefore = st().glslSource
+      h.type("// wgsl text")
+      vi.advanceTimersByTime(400)
+      expect(st().wgslSource).toBe("// wgsl text")
+      expect(st().glslSource).toBe(glslBefore)
+    })
+
+    it("vertex tab edits go to the vertex source", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "vertex" })
+      h.render()
+      h.type("// vert")
+      vi.advanceTimersByTime(400)
+      expect(st().vertexShaderSource).toBe("// vert")
+    })
+
+    it("compute tab edits go to the compute source and recompile the compute pipeline", () => {
+      const spy = vi.spyOn(webgpuAdapter, "recompileComputeShader").mockImplementation(() => undefined as never)
+      useProjectStore.setState({ activeBackend: "webgpu", activeEditorTab: "compute" })
+      h.render()
+      h.type("// compute")
+      vi.advanceTimersByTime(400)
+      expect(st().computeShaderSource).toBe("// compute")
+      expect(spy).toHaveBeenCalledWith("// compute")
+    })
+
+    it("read-only sync modes ignore edits", () => {
+      useFileSystemStore.setState({ syncMode: "bridge" })
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      const before = st().glslSource
+      expect(h.readOnly()).toBe(true)
+      h.type("ignored")
+      vi.advanceTimersByTime(400)
+      expect(st().glslSource).toBe(before)
+    })
+
+    it("an undefined editor value is ignored", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      const before = st().recompileTrigger
+      h.type(undefined as unknown as string)
+      vi.advanceTimersByTime(400)
+      expect(st().recompileTrigger).toBe(before)
+    })
+
+    it("re-rendering with unchanged store sources keeps the pending write", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      h.type("// keep me")
+      h.render()
+      vi.advanceTimersByTime(400)
+      expect(st().glslSource).toBe("// keep me")
+    })
+  })
+
+  describe("stale pending edits are dropped", () => {
+    it.each([
+      ["project name", () => useProjectStore.setState({ currentProjectName: "Another project" })],
+      ["active file", () => useProjectStore.setState({ activeShaderPath: "shaders/other.frag" })],
+    ])("a %s change cancels the pending write", (_n, change) => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      h.type("// stale")
+      change()
+      h.render()
+      vi.advanceTimersByTime(1000)
+      expect(st().glslSource).not.toBe("// stale")
+    })
+
+    it.each([
+      ["fragment", "webgl2", "glslSource"],
+      ["vertex", "webgl2", "vertexShaderSource"],
+      ["compute", "webgpu", "computeShaderSource"],
+    ] as const)("an external write to the %s source (template/bridge load) cancels the pending edit", (tab, backend, field) => {
+      vi.spyOn(webgpuAdapter, "recompileComputeShader").mockImplementation(() => undefined as never)
+      useProjectStore.setState({ activeBackend: backend, activeEditorTab: tab })
+      h.render()
+      h.type("// typed")
+      useProjectStore.setState({ [field]: "// from template", ...(field === "glslSource" ? { shaderSource: "// from template" } : {}) } as any)
+      h.render()
+      vi.advanceTimersByTime(1000)
+      expect(st()[field]).toBe("// from template")
+    })
+  })
+
+  describe("unmount flushes pending edits", () => {
+    it.each([
+      ["fragment", "webgl2", "glslSource"],
+      ["vertex", "webgl2", "vertexShaderSource"],
+      ["compute", "webgpu", "computeShaderSource"],
+    ] as const)("closing the editor immediately commits the last %s keystrokes", (tab, backend, field) => {
+      vi.spyOn(webgpuAdapter, "recompileComputeShader").mockImplementation(() => undefined as never)
+      useProjectStore.setState({ activeBackend: backend, activeEditorTab: tab })
+      h.render()
+      h.type("// last keys")
+      h.unmount()
+      expect(st()[field]).toBe("// last keys")
+    })
+  })
+
+  describe("toolbar handlers", () => {
+    it("tab buttons switch the active editor tab", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment" })
+      h.render()
+      h.click("tab-vertex")
+      expect(st().activeEditorTab).toBe("vertex")
+      h.click("tab-fragment")
+      expect(st().activeEditorTab).toBe("fragment")
+
+      useProjectStore.setState({ activeBackend: "webgpu", activeEditorTab: "render" })
+      h.render()
+      h.click("tab-compute")
+      expect(st().activeEditorTab).toBe("compute")
+      h.click("tab-render")
+      expect(st().activeEditorTab).toBe("render")
+    })
+
+    it("recompile and minimap buttons act on the stores", () => {
+      h.render()
+      const before = st().recompileTrigger
+      h.click("recompile-btn")
+      expect(st().recompileTrigger).toBe(before + 1)
+      h.click("toggle-minimap-btn")
+      expect(useLayoutStore.getState().editorMinimap).toBe(true)
+    })
+
+    it("format uses Monaco's formatter when supported and leaves the store untouched", () => {
+      useProjectStore.setState({ activeBackend: "webgl2", activeEditorTab: "fragment", glslSource: "a  ", shaderSource: "a  " })
+      h.render()
+      const run = vi.fn()
+      h.mount({ addCommand: vi.fn(), getModel: () => null, getAction: () => ({ isSupported: () => true, run }) })
+      h.click("format-code-btn")
+      expect(run).toHaveBeenCalled()
+      expect(st().glslSource).toBe("a  ")
+    })
+
+    it.each([
+      ["fragment", "webgl2", "glslSource"],
+      ["vertex", "webgl2", "vertexShaderSource"],
+      ["render", "webgpu", "wgslSource"],
+      ["compute", "webgpu", "computeShaderSource"],
+    ] as const)("format fallback trims trailing whitespace on the %s tab and writes it back", (tab, backend, field) => {
+      const raw = "line1   \nline2\t"
+      useProjectStore.setState({
+        activeBackend: backend,
+        activeEditorTab: tab,
+        [field]: raw,
+        ...(field === "glslSource" || field === "wgslSource" ? { shaderSource: raw } : {}),
+      } as any)
+      h.render()
+      const setValue = vi.fn()
+      h.mount({ addCommand: vi.fn(), getModel: () => null, getAction: () => null, setValue })
+      h.click("format-code-btn")
+      expect(setValue).toHaveBeenCalledWith("line1\nline2")
+      expect(st()[field]).toBe("line1\nline2")
+    })
+
+    it("'Detach & edit' returns a bridge-synced editor to local mode", () => {
+      useFileSystemStore.setState({ syncMode: "bridge" })
+      h.render()
+      const btn = h.find((el) => el.props.children === "Detach & edit")
+      btn.props.onClick()
+      expect(useFileSystemStore.getState().syncMode).toBe("local")
+    })
+  })
+
+  describe("Monaco bridge effects", () => {
+    it("jumpToLine from the console reveals and focuses that position once the editor is mounted", () => {
+      h.render()
+      const editor = { addCommand: vi.fn(), getModel: () => null, revealLineInCenter: vi.fn(), setPosition: vi.fn(), focus: vi.fn(), updateOptions: vi.fn() }
+      h.mount(editor)
+      useLayoutStore.getState().jumpToLine(7.9, 3)
+      h.render()
+      expect(editor.revealLineInCenter).toHaveBeenCalledWith(7)
+      expect(editor.setPosition).toHaveBeenCalledWith({ lineNumber: 7, column: 3 })
+      expect(editor.focus).toHaveBeenCalled()
+    })
+
+    it("toggling the minimap updates the live editor options", () => {
+      h.render()
+      const editor = { addCommand: vi.fn(), getModel: () => null, updateOptions: vi.fn() }
+      h.mount(editor)
+      useLayoutStore.setState({ editorMinimap: true })
+      h.render()
+      expect(editor.updateOptions).toHaveBeenCalledWith({ minimap: { enabled: true } })
+    })
+
+    it("the Ctrl+Enter command registered on mount recompiles", () => {
+      h.render()
+      const editor = { addCommand: vi.fn(), getModel: () => null }
+      h.mount(editor)
+      const before = st().recompileTrigger
+      editor.addCommand.mock.calls[0][1]()
+      expect(st().recompileTrigger).toBe(before + 1)
+    })
+  })
+
+  describe("editComputeShader document event", () => {
+    it("opens the compute tab and loads a custom source", () => {
+      h.render()
+      doc.dispatchEvent(new CustomEvent("editComputeShader", { detail: { customSource: "// custom compute" } }))
+      expect(st().activeEditorTab).toBe("compute")
+      expect(st().computeShaderSource).toBe("// custom compute")
+    })
+
+    it("seeds the preset code only when the compute source is empty", () => {
+      h.render()
+      doc.dispatchEvent(new CustomEvent("editComputeShader", { detail: { preset: "curl_noise" } }))
+      expect(st().computeShaderSource.length).toBeGreaterThan(0)
+
+      useProjectStore.setState({ computeShaderSource: "// mine" })
+      doc.dispatchEvent(new CustomEvent("editComputeShader", { detail: { preset: "curl_noise" } }))
+      expect(st().computeShaderSource).toBe("// mine")
+    })
+
+    it("stops listening after unmount", () => {
+      h.render()
+      h.unmount()
+      doc.dispatchEvent(new CustomEvent("editComputeShader", { detail: { customSource: "// late" } }))
+      expect(st().computeShaderSource).not.toBe("// late")
+    })
+  })
+})

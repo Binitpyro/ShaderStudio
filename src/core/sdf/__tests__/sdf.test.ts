@@ -13,6 +13,8 @@ import {
 import {
   compileSdfToGlsl,
   compileSdfToWgsl,
+  collectSdfUniforms,
+  sdfUniformName,
   type SdfTreeNode,
 } from "../sdfCompiler"
 
@@ -171,6 +173,36 @@ describe("Visual Raymarching & SDF Core Math", () => {
       expect(wgsl).toContain("calcSoftShadow")
       expect(wgsl).toContain("calcAO")
       expect(wgsl).toContain("@location(0) vec4f")
+    })
+
+    it("emits SDF params as uniforms: changing a param changes values, never the generated source", () => {
+      const withRadius = (r: number, k: number): SdfTreeNode => ({
+        ...sceneTree,
+        params: { type: "smooth_union", smoothness: k },
+        children: [
+          { kind: "primitive", id: "sphere_a", type: "sphere", params: { type: "sphere", offset: [-0.6, 0, 0], radius: r } },
+          { kind: "primitive", id: "sphere_b", type: "sphere", params: { type: "sphere", offset: [0.6, 0, 0], radius: 0.8 } },
+        ],
+      } as SdfTreeNode)
+      const a = withRadius(0.8, 0.25)
+      const b = withRadius(1.7, 0.9)
+      expect(compileSdfToGlsl(a)).toBe(compileSdfToGlsl(b))
+      expect(compileSdfToWgsl(a)).toBe(compileSdfToWgsl(b))
+      const ua = collectSdfUniforms(a)
+      const ub = collectSdfUniforms(b)
+      const rName = sdfUniformName("sphere_a", "radius")
+      expect(ua[rName]).toBe(0.8)
+      expect(ub[rName]).toBe(1.7)
+      expect(ub[sdfUniformName("smooth_union_1", "smoothness")]).toBe(0.9)
+      expect(compileSdfToGlsl(a)).toContain(`uniform float ${rName};`)
+      expect(compileSdfToWgsl(a)).toContain(`${rName}: f32,`)
+      expect(compileSdfToWgsl(a)).toContain(`uniforms.${rName}`)
+    })
+
+    it("keeps offset uniform references even when the offset is zero (structure is value-independent)", () => {
+      const zero: SdfTreeNode = { kind: "primitive", id: "p0", type: "sphere", params: { type: "sphere", offset: [0, 0, 0], radius: 1 } }
+      const moved: SdfTreeNode = { kind: "primitive", id: "p0", type: "sphere", params: { type: "sphere", offset: [1, 2, 3], radius: 1 } }
+      expect(compileSdfToGlsl(zero)).toBe(compileSdfToGlsl(moved))
     })
   })
 })

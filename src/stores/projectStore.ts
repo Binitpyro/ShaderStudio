@@ -157,6 +157,8 @@ export interface EnvironmentSettings {
 
 // Project serialization types
 export interface ProjectData {
+  /** Stable identity used for DB upserts (name is not unique). */
+  projectId?: string
   name: string
   version: "1.0"
   backend: BackendType
@@ -181,8 +183,29 @@ export interface ProjectData {
 
 export type EditorTab = "render" | "compute" | "fragment" | "vertex"
 
+export type ShaderLanguage = "wgsl" | "glsl"
+
+/** webgpu runs WGSL; webgl2 / threejs run GLSL. */
+export function languageForBackend(backend: BackendType): ShaderLanguage {
+  return backend === "webgpu" ? "wgsl" : "glsl"
+}
+
+/**
+ * Optional provider returning the live React Flow graph (with current positions). NodeGraph registers one
+ * so save/export serialise real positions without the store tracking every drag tick.
+ */
+type LiveGraphProvider = () => { nodes: Node<GraphNodeData>[]; edges: Edge[] }
+let liveGraphProvider: LiveGraphProvider | null = null
+export function registerLiveGraphProvider(provider: LiveGraphProvider | null) {
+  liveGraphProvider = provider
+}
+
 interface ProjectState {
   activeBackend: BackendType
+  /** Per-backend sources: switching backend only changes which one is active, never overwrites either. */
+  wgslSource: string
+  glslSource: string
+  /** Derived: always equals the source of the active backend's language (wgslSource | glslSource). */
   shaderSource: string
   activeShaderPath: string | null
   computeShaderSource: string
@@ -203,6 +226,10 @@ interface ProjectState {
   graphUniforms: GraphUniform[]
   textureResources: TextureResource[]
   renderQueue: RenderQueue | null
+  /**
+   * Serializable graph snapshot. React Flow owns the live nodes/edges; NodeGraph publishes here only on
+   * structure/data edits (and debounced after drags) - never per drag tick.
+   */
   _graphNodes: Node<GraphNodeData>[]
   _graphEdges: Edge[]
   // Variations & snapshots
@@ -214,13 +241,19 @@ interface ProjectState {
   environmentSettings: EnvironmentSettings
   // Project management
   currentProjectName: string | null
+  currentProjectId: string | null
   hasUnsavedChanges: boolean
   selectedNodeId: string | null
   // Memory Budget System (R5b)
   memoryBudget: MemoryBudgetConfig
 
   setActiveBackend: (backend: BackendType) => void
-  setShaderSource: (source: string) => void
+  /** Writes the source for the given language (default: the active backend's language). */
+  setShaderSource: (source: string, language?: ShaderLanguage) => void
+  /** Graph-generated (raymarch) sources for both languages; does not mark the project dirty. */
+  setGeneratedSources: (sources: { wgsl: string; glsl: string }) => void
+  /** Merge several uniform values in one update (single store notification). */
+  mergeUniformValues: (values: Record<string, UniformValue>) => void
   setActiveShaderPath: (path: string | null) => void
   setComputeShaderSource: (source: string) => void
   setVertexShaderSource: (source: string) => void
@@ -250,9 +283,10 @@ interface ProjectState {
   addTextureResource: (texture: TextureResource) => void
   removeTextureResource: (id: string) => void
   setRenderQueue: (queue: RenderQueue | null) => void
-  setGraphNodes: (nodes: Node<GraphNodeData>[]) => void
-  setGraphEdges: (edges: Edge[]) => void
+  setGraphNodes: (nodes: Node<GraphNodeData>[], opts?: { markDirty?: boolean }) => void
+  setGraphEdges: (edges: Edge[], opts?: { markDirty?: boolean }) => void
   setCurrentProjectName: (name: string | null) => void
+  setCurrentProjectId: (id: string | null) => void
   setHasUnsavedChanges: (has: boolean) => void
   setSelectedNodeId: (id: string | null) => void
   addVariation: (name: string) => string
@@ -268,12 +302,30 @@ interface ProjectState {
   checkMemoryThreshold: (usage: MemoryUsage) => MemoryThresholdResult
 }
 
+/**
+ * Resolve both language sources from saved data. Handles the legacy format where only the active
+ * language was saved (and, defensively, a bare top-level shaderSource string).
+ */
+function resolveLoadedSources(data: ProjectData): { wgsl: string; glsl: string } {
+  const saved = data.shaderSources
+  let wgsl = typeof saved?.wgsl === "string" ? saved.wgsl : ""
+  let glsl = typeof saved?.glsl === "string" ? saved.glsl : ""
+  const legacy = (data as unknown as { shaderSource?: unknown }).shaderSource
+  if (!wgsl && !glsl && typeof legacy === "string") {
+    if (data.backend === "webgpu") wgsl = legacy
+    else glsl = legacy
+  }
+  return { wgsl, glsl }
+}
+
 export const STARTER_QUEUE = compileGraph(STARTER_NODES, STARTER_EDGES).queue
 
 export const useProjectStore = create<ProjectState>((set, get, api) => {
   api.getInitialState = () => api.getState()
   return {
   activeBackend: "webgpu",
+  wgslSource: STARTER_WGSL,
+  glslSource: STARTER_GLSL,
   shaderSource: STARTER_WGSL,
   activeShaderPath: null,
   computeShaderSource: "",
@@ -301,6 +353,7 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
   variations: [...STARTER_VARIATIONS],
   activeVariationId: null,
   currentProjectName: "Iridescent Torus Hero",
+  currentProjectId: null,
   hasUnsavedChanges: false,
   selectedNodeId: null,
   memoryBudget: createDefaultMemoryBudget(),
@@ -317,22 +370,43 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
       }
     }
 
-    let nextSource = state.shaderSource
-    if (backend === "webgpu" && (state.shaderSource === STARTER_GLSL || state.shaderSource.includes("#version 300 es"))) {
-      nextSource = STARTER_WGSL
-    } else if (backend !== "webgpu" && (state.shaderSource === STARTER_WGSL || state.shaderSource.includes("@fragment"))) {
-      nextSource = STARTER_GLSL
-    }
+    // Never overwrite user code. Only a still-empty slot of a project that already has code in the
+    // other language is seeded with that language's starter so the new backend has something to run.
+    let wgslSource = state.wgslSource
+    let glslSource = state.glslSource
+    if (!wgslSource && glslSource) wgslSource = STARTER_WGSL
+    if (!glslSource && wgslSource) glslSource = STARTER_GLSL
 
     return {
       activeBackend: backend,
       activeEditorTab: nextTab,
-      shaderSource: nextSource,
+      wgslSource,
+      glslSource,
+      shaderSource: backend === "webgpu" ? wgslSource : glslSource,
       hasUnsavedChanges: true,
       recompileTrigger: state.recompileTrigger + 1,
     }
   }),
-  setShaderSource: (source) => set({ shaderSource: source, hasUnsavedChanges: true }),
+  setShaderSource: (source, language) => set((state) => {
+    const lang = language ?? languageForBackend(state.activeBackend)
+    const wgslSource = lang === "wgsl" ? source : state.wgslSource
+    const glslSource = lang === "glsl" ? source : state.glslSource
+    return {
+      wgslSource,
+      glslSource,
+      shaderSource: languageForBackend(state.activeBackend) === "wgsl" ? wgslSource : glslSource,
+      hasUnsavedChanges: true,
+    }
+  }),
+  setGeneratedSources: ({ wgsl, glsl }) => set((state) => ({
+    wgslSource: wgsl,
+    glslSource: glsl,
+    shaderSource: languageForBackend(state.activeBackend) === "wgsl" ? wgsl : glsl,
+  })),
+  mergeUniformValues: (values) => set((state) => ({
+    uniformValues: { ...state.uniformValues, ...values },
+    hasUnsavedChanges: true,
+  })),
   setActiveShaderPath: (path) => set({ activeShaderPath: path }),
   setComputeShaderSource: (source) => set({ computeShaderSource: source, hasUnsavedChanges: true }),
   setVertexShaderSource: (source) => set({ vertexShaderSource: source, hasUnsavedChanges: true }),
@@ -430,7 +504,13 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
   setDeviceLost: (lost) => set({ deviceLost: lost }),
   setAutoCompile: (auto) => set({ autoCompile: auto }),
   triggerRecompile: () => set((state) => ({ recompileTrigger: state.recompileTrigger + 1 })),
-  addGraphUniform: (uniform) => set((state) => ({ graphUniforms: [...state.graphUniforms, uniform], hasUnsavedChanges: true })),
+  addGraphUniform: (uniform) => set((state) => ({
+    // Idempotent per id: loading a project (which restores graphUniforms) and mounting its uniform nodes must not duplicate.
+    graphUniforms: state.graphUniforms.some((u) => u.id === uniform.id)
+      ? state.graphUniforms.map((u) => (u.id === uniform.id ? { ...u, ...uniform } : u))
+      : [...state.graphUniforms, uniform],
+    hasUnsavedChanges: true,
+  })),
   updateGraphUniform: (id, updates) => set((state) => ({
     graphUniforms: state.graphUniforms.map((u) => u.id === id ? { ...u, ...updates } : u),
     hasUnsavedChanges: true,
@@ -445,9 +525,16 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     hasUnsavedChanges: true,
   })),
   setRenderQueue: (queue) => set({ renderQueue: queue }),
-  setGraphNodes: (nodes) => set({ _graphNodes: nodes, hasUnsavedChanges: true }),
-  setGraphEdges: (edges) => set({ _graphEdges: edges, hasUnsavedChanges: true }),
+  setGraphNodes: (nodes, opts) => set((state) => ({
+    _graphNodes: nodes,
+    hasUnsavedChanges: opts?.markDirty === false ? state.hasUnsavedChanges : true,
+  })),
+  setGraphEdges: (edges, opts) => set((state) => ({
+    _graphEdges: edges,
+    hasUnsavedChanges: opts?.markDirty === false ? state.hasUnsavedChanges : true,
+  })),
   setCurrentProjectName: (name) => set({ currentProjectName: name }),
+  setCurrentProjectId: (id) => set({ currentProjectId: id }),
   setHasUnsavedChanges: (has) => set({ hasUnsavedChanges: has }),
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
 
@@ -497,6 +584,9 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
   resetProject: () => {
     set({
       currentProjectName: "Untitled",
+      currentProjectId: null,
+      wgslSource: "",
+      glslSource: "",
       shaderSource: "",
       vertexShaderSource: "",
       computeShaderSource: "",
@@ -529,6 +619,9 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     const isWebGpu = get().activeBackend === "webgpu"
     set({
       currentProjectName: "Iridescent Torus Hero",
+      currentProjectId: null,
+      wgslSource: STARTER_WGSL,
+      glslSource: STARTER_GLSL,
       shaderSource: isWebGpu ? STARTER_WGSL : STARTER_GLSL,
       vertexShaderSource: STARTER_VERT_GLSL,
       computeShaderSource: "",
@@ -551,13 +644,17 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     })
   },
 
-  loadProjectData: (data) => set({
+  loadProjectData: (data) => {
+    const sources = resolveLoadedSources(data)
+    set({
     activeBackend: data.backend,
     _graphNodes: data.graphNodes || [],
     _graphEdges: data.graphEdges || [],
     uniformValues: data.uniformValues || {},
     graphUniforms: data.graphUniforms || [],
-    shaderSource: data.shaderSources.wgsl || data.shaderSources.glsl || "",
+    wgslSource: sources.wgsl,
+    glslSource: sources.glsl,
+    shaderSource: data.backend === "webgpu" ? sources.wgsl : sources.glsl,
     computeShaderSource: data.shaderSources?.compute || "",
     vertexShaderSource: data.shaderSources?.vertex || "",
     selectedNodeId: null,
@@ -578,23 +675,27 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     memoryBudget: data.memoryBudget ? { ...createDefaultMemoryBudget(), ...data.memoryBudget } : createDefaultMemoryBudget(),
     activeVariationId: null,
     currentProjectName: data.name,
+    currentProjectId: data.projectId ?? null,
     hasUnsavedChanges: false,
     recompileTrigger: get().recompileTrigger + 1,
-  }),
+    })
+  },
 
   exportProjectData: () => {
     const state = get()
+    const live = liveGraphProvider?.()
     return {
+      projectId: state.currentProjectId ?? undefined,
       name: state.currentProjectName || "Untitled",
       version: "1.0" as const,
       backend: state.activeBackend,
-      graphNodes: state._graphNodes,
-      graphEdges: state._graphEdges,
+      graphNodes: live?.nodes ?? state._graphNodes,
+      graphEdges: live?.edges ?? state._graphEdges,
       uniformValues: state.uniformValues,
       graphUniforms: state.graphUniforms,
       shaderSources: {
-        wgsl: state.activeBackend === "webgpu" ? state.shaderSource : undefined,
-        glsl: state.activeBackend !== "webgpu" ? state.shaderSource : undefined,
+        wgsl: state.wgslSource || undefined,
+        glsl: state.glslSource || undefined,
         compute: state.computeShaderSource || undefined,
         vertex: state.vertexShaderSource || undefined,
       },
