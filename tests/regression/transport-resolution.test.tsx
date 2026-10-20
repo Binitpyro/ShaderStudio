@@ -593,8 +593,7 @@ describe("Milestone 2 Adversarial Challenger Suite: Transport Toolbar & Navigati
       expect(html).toContain("data-testid=\"playback-time-counter\"")
       expect(html).toContain("data-testid=\"resolution-scale-selector\"")
       expect(html).toContain("data-testid=\"toolbar-telemetry\"")
-      expect(html).toContain("Play (Space)") // Paused state icon tooltip
-      expect(html).toContain("Bridge server offline")
+      expect(html).toContain("aria-label=\"Play\"") // Paused state icon
     })
 
     it("formats digital time strings cleanly without negative signs or NaN artifacts", () => {

@@ -1,5 +1,6 @@
 import { memo, useState, useEffect, useRef } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Badge, Button, Select } from "@/components/ui"
+import { NodeShell, NodeDetails, DetailRow, Port, Position } from "./NodeShell"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { MeshNodeData } from "@/core/graphCompiler"
@@ -48,37 +49,39 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
     if (file) handleFile(file)
   }
 
+  const detailRows =
+    data.geometry === "torus_knot" ? [["Vertices", "1,728"], ["Triangles", "576"], ["Parameters", "p=2, q=3, r=1.0"]]
+    : data.geometry === "cube" ? [["Vertices", "36"], ["Triangles", "12"], ["Extents", "1.0 x 1.0 x 1.0"]]
+    : data.geometry === "sphere" ? [["Vertices", "720"], ["Triangles", "240"], ["Segments", "32 rings x 16"]]
+    : data.geometry === "plane" ? [["Vertices", "6"], ["Triangles", "2"], ["Size", "2.0 x 2.0 quad"]]
+    : [["Model triangles", model?.triangleCount?.toLocaleString() ?? "No model loaded"]]
+
   return (
-    <div
-      className={cn(
-        "bg-card border rounded-md p-3 shadow-sm select-none text-foreground transition-all duration-150",
-        selected
-          ? "border-primary ring-2 ring-primary/30 min-w-[210px] max-w-[240px] shadow-lg"
-          : "border-border min-w-[160px] max-w-[220px]"
-      )}
+    <NodeShell
+      title="Mesh Geometry"
+      icon={Box}
+      selected={selected}
+      ports={<Port type="source" position={Position.Right} portType="geometry" />}
     >
-      <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground mb-2">
-        <Box className="w-3.5 h-3.5 text-primary" />
-        <span>Mesh Geometry</span>
-      </div>
-      <select
+      <Select
+        aria-label="Geometry"
         value={data.geometry}
         onChange={(e) => {
           const select = e.target
           const event = new CustomEvent("meshGeometryChange", { detail: { geometry: select.value }, bubbles: true })
           select.dispatchEvent(event)
         }}
-        className="w-full bg-background text-xs border border-border rounded px-2 py-1 mb-2 focus:outline-none focus:ring-1 focus:ring-primary nodrag"
+        className="nodrag"
       >
         <option value="cube">Cube</option>
         <option value="sphere">Sphere</option>
         <option value="plane">Plane</option>
         <option value="torus_knot">Torus Knot</option>
         <option value="custom">Custom 3D Model</option>
-      </select>
+      </Select>
 
       {data.geometry === "custom" && (
-        <div className="mt-1">
+        <div>
           <input
             ref={fileInputRef}
             type="file"
@@ -91,26 +94,18 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
           />
 
           {isLoading ? (
-            <div className="flex flex-col items-center justify-center p-3 border border-dashed border-border rounded bg-muted/20 text-muted-foreground text-[11px] gap-1.5">
-              <Loader2 className="w-4 h-4 animate-spin text-primary" />
+            <div className="flex flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-line-strong bg-raised p-3 text-xs text-fg-muted">
+              <Loader2 className="size-4 animate-spin text-brand-text" />
               <span>Parsing 3D mesh...</span>
             </div>
           ) : model ? (
-            <div className="flex flex-col gap-1 p-2 bg-muted/30 border border-border/60 rounded text-[11px]">
-              <div className="flex items-center gap-1.5 text-foreground font-medium truncate">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <div className="flex flex-col gap-1 rounded-md bg-raised p-2 text-xs">
+              <div className="flex items-center gap-1.5 truncate font-medium text-fg">
+                <CheckCircle2 className="size-3.5 shrink-0 text-success" />
                 <span className="truncate">{model.name}</span>
               </div>
-              <div className="text-[10px] text-muted-foreground pl-5">
-                {model.triangleCount.toLocaleString()} triangles
-              </div>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="mt-1 text-[10px] bg-secondary hover:bg-secondary/80 text-secondary-foreground px-2 py-0.5 rounded text-center transition-colors cursor-pointer"
-              >
-                Change Model
-              </button>
+              <div className="num pl-5 text-2xs text-fg-muted">{model.triangleCount.toLocaleString()} triangles</div>
+              <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()} className="mt-1 nodrag">Change model</Button>
             </div>
           ) : (
             <div
@@ -119,19 +114,19 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
               onDrop={onDrop}
               onClick={() => fileInputRef.current?.click()}
               className={cn(
-                "flex flex-col items-center justify-center p-2.5 border border-dashed rounded text-center cursor-pointer transition-colors text-[10px]",
-                isDragging ? "border-primary bg-primary/10 text-primary" : "border-border hover:border-primary/60 bg-muted/10 text-muted-foreground"
+                "flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed p-2.5 text-center text-2xs transition-colors",
+                isDragging ? "border-brand bg-brand-soft text-brand-text" : "border-line-strong bg-raised text-fg-muted hover:border-fg-subtle"
               )}
             >
-              <UploadCloud className="w-4 h-4 mb-1 text-muted-foreground" />
+              <UploadCloud className="mb-1 size-4" />
               <span className="font-medium">Drop .glb / .obj</span>
-              <span className="text-[9px] text-muted-foreground/70">or click to browse</span>
+              <span className="text-fg-subtle">or click to browse</span>
             </div>
           )}
 
           {error && (
-            <div className="flex items-start gap-1 mt-1 text-[10px] text-destructive leading-tight">
-              <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+            <div className="mt-1 flex items-start gap-1 text-2xs leading-tight text-danger" role="alert">
+              <AlertCircle className="mt-0.5 size-3 shrink-0" />
               <span>{error}</span>
             </div>
           )}
@@ -139,106 +134,24 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
       )}
 
       {selected && (
-        <div className="mt-2 pt-2 border-t border-border/60 flex flex-col gap-1.5 font-mono text-[10px]">
-          <div className="flex items-center justify-between text-muted-foreground">
-            <span className="font-semibold text-foreground text-[11px]">Geometry Details</span>
-            <span className="text-[9px] text-primary font-bold uppercase">{data.geometry}</span>
-          </div>
+        <>
+          <NodeDetails title="Geometry details">
+            {detailRows.map(([label, value]) => <DetailRow key={label} label={label} value={value} />)}
+          </NodeDetails>
 
-          <div className="p-1.5 rounded bg-muted/30 border border-border/50 flex flex-col gap-1">
-            {data.geometry === "torus_knot" && (
-              <>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Vertices</span>
-                  <span className="text-foreground font-semibold">1,728</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Triangles</span>
-                  <span className="text-foreground font-semibold">576</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Parameters</span>
-                  <span className="text-foreground">p=2, q=3, r=1.0</span>
-                </div>
-              </>
-            )}
-            {data.geometry === "cube" && (
-              <>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Vertices</span>
-                  <span className="text-foreground font-semibold">36</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Triangles</span>
-                  <span className="text-foreground font-semibold">12</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Extents</span>
-                  <span className="text-foreground">1.0 × 1.0 × 1.0</span>
-                </div>
-              </>
-            )}
-            {data.geometry === "sphere" && (
-              <>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Vertices</span>
-                  <span className="text-foreground font-semibold">720</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Triangles</span>
-                  <span className="text-foreground font-semibold">240</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Segments</span>
-                  <span className="text-foreground">32 rings × 16</span>
-                </div>
-              </>
-            )}
-            {data.geometry === "plane" && (
-              <>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Vertices</span>
-                  <span className="text-foreground font-semibold">6</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Triangles</span>
-                  <span className="text-foreground font-semibold">2</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Size</span>
-                  <span className="text-foreground">2.0 × 2.0 Quad</span>
-                </div>
-              </>
-            )}
-            {data.geometry === "custom" && (
-              <div className="flex justify-between text-muted-foreground">
-                <span>Model Triangles</span>
-                <span className="text-foreground font-semibold">{model?.triangleCount?.toLocaleString() ?? "No model loaded"}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Mesh LOD System (R5c) */}
-          <div className="p-1.5 rounded bg-muted/20 border border-border/40 flex flex-col gap-1 text-[10px]">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="flex items-center gap-1 font-medium text-foreground">
-                <Layers className="w-3 h-3 text-primary" />
-                <span>Level of Detail</span>
-              </span>
-              <span className="text-[9px] px-1 py-0.2 bg-primary/20 text-primary font-mono rounded">
+          <div className="flex flex-col gap-1.5 border-t border-line pt-2 text-2xs">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1 text-xs font-medium text-fg"><Layers className="size-3 text-fg-muted" />Level of detail</span>
+              <Badge tone="brand" className="num">
                 {lodMode === "auto" ? `${selectLodByDistance(10).toUpperCase()} (Auto)` : lodMode.toUpperCase()}
-              </span>
+              </Badge>
             </div>
-            <select
-              value={lodMode}
-              onChange={(e) => setLodMode(e.target.value as "auto" | LodLevel)}
-              className="w-full bg-background text-[10px] border border-border rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-primary nodrag cursor-pointer"
-            >
+            <Select aria-label="Level of detail" value={lodMode} onChange={(e) => setLodMode(e.target.value as "auto" | LodLevel)} className="nodrag">
               <option value="auto">Auto (Distance)</option>
               <option value="lod0">LOD 0 (100% Detail)</option>
               <option value="lod1">LOD 1 (50% Detail)</option>
               <option value="lod2">LOD 2 (25% Detail)</option>
-            </select>
+            </Select>
             {(() => {
               const baseVertices = data.geometry === "torus_knot" ? 1728
                 : data.geometry === "cube" ? 36
@@ -247,33 +160,20 @@ function MeshNodeComponent({ data, selected }: FlowNodeProps<MeshNodeData>) {
                 : model ? (model.triangleCount * 3) : 0
               const lods = generateMeshLods(baseVertices)
               return (
-                <div className="grid grid-cols-3 gap-1 text-[9px] text-center pt-1 border-t border-border/30">
-                  <div className="bg-background/80 rounded py-0.5 border border-border/40">
-                    <div className="text-muted-foreground font-mono">L0</div>
-                    <div className="text-foreground font-semibold">{lods.lod0}v</div>
-                  </div>
-                  <div className="bg-background/80 rounded py-0.5 border border-border/40">
-                    <div className="text-muted-foreground font-mono">L1</div>
-                    <div className="text-foreground font-semibold">{lods.lod1}v</div>
-                  </div>
-                  <div className="bg-background/80 rounded py-0.5 border border-border/40">
-                    <div className="text-muted-foreground font-mono">L2</div>
-                    <div className="text-foreground font-semibold">{lods.lod2}v</div>
-                  </div>
+                <div className="grid grid-cols-3 gap-1 text-center">
+                  {([["L0", lods.lod0], ["L1", lods.lod1], ["L2", lods.lod2]] as const).map(([k, v]) => (
+                    <div key={k} className="rounded-md bg-raised py-1">
+                      <div className="text-fg-muted">{k}</div>
+                      <div className="num text-fg">{v}v</div>
+                    </div>
+                  ))}
                 </div>
               )
             })()}
           </div>
-
-          <div className="flex items-center justify-between text-[9px] text-muted-foreground pt-0.5 border-t border-border/30">
-            <span>Buffer Layout: 12B stride</span>
-            <span className="text-emerald-400">float32x3</span>
-          </div>
-        </div>
+        </>
       )}
-
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-primary border-2 border-background" />
-    </div>
+    </NodeShell>
   )
 }
 export const MeshNode = memo(MeshNodeComponent)

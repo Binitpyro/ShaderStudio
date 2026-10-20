@@ -1,5 +1,6 @@
 import { useState, useRef } from "react"
-import { Button } from "@/components/ui/button"
+import { useDialogA11y } from "@/lib/useDialogA11y"
+import { Button, IconButton, Label, Select } from "@/components/ui"
 import {
   X,
   Video,
@@ -8,7 +9,6 @@ import {
   RotateCcw,
   CheckCircle2,
   AlertCircle,
-  SlidersHorizontal,
 } from "lucide-react"
 import { videoLoopRecorder, type RecordResult } from "@/core/videoRecorder"
 import { viewportCapture } from "@/utils/frameCapture"
@@ -31,6 +31,9 @@ export function VideoLoopRecorderModal({ isOpen, onClose }: VideoLoopRecorderMod
   const [result, setResult] = useState<RecordResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogA11y(dialogRef, isOpen, onClose, !isRecording)
 
   if (!isOpen) return null
 
@@ -75,162 +78,80 @@ export function VideoLoopRecorderModal({ isOpen, onClose }: VideoLoopRecorderMod
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-      <div className="flex flex-col w-full max-w-lg rounded-lg border border-border bg-card shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+    <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 outline-none" role="dialog" aria-modal="true" aria-label="Record video loop">
+      <div className="flex w-full max-w-md flex-col overflow-hidden rounded-xl border border-line bg-overlay shadow-lg">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
           <div className="flex items-center gap-2">
-            <Video className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-semibold text-foreground">60fps Seamless Video Looper</h2>
+            <Video className="size-4 text-brand-text" />
+            <h2 className="text-sm font-medium text-fg">Record video loop</h2>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            disabled={isRecording}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <IconButton label="Close" onClick={onClose} disabled={isRecording}><X /></IconButton>
         </div>
 
-        {/* Content */}
-        <div className="p-4 flex flex-col gap-4">
+        <div className="flex flex-col gap-4 p-4">
           {isRecording ? (
-            <div className="flex flex-col items-center justify-center py-8 gap-4">
-              <div className="relative flex items-center justify-center">
-                <span className="absolute h-12 w-12 rounded-full bg-red-500/20 animate-ping" />
-                <span className="h-6 w-6 rounded-full bg-red-600 animate-pulse shadow-lg shadow-red-500/50" />
-              </div>
-
+            <div className="flex flex-col items-center gap-4 py-6">
+              <span className="size-3 animate-pulse rounded-full bg-danger-solid" />
               <div className="text-center">
-                <div className="text-sm font-semibold text-foreground">
-                  Recording Seamless Loop ({fps} FPS)
-                </div>
-                <div className="text-xs font-mono text-muted-foreground mt-1">
+                <div className="text-sm font-medium text-fg">Recording at <span className="num">{fps}</span> fps</div>
+                <div className="num mt-1 text-xs text-fg-muted">
                   {progress.elapsedSeconds.toFixed(1)}s / {progress.targetSeconds.toFixed(1)}s ({progress.percent}%)
                 </div>
               </div>
-
-              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-red-500 h-full transition-all duration-100 ease-out"
-                  style={{ width: `${progress.percent}%` }}
-                />
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-raised">
+                <div className="h-full bg-brand transition-all duration-100 ease-out" style={{ width: `${progress.percent}%` }} />
               </div>
-
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleStopRecording}
-                className="mt-2 text-xs border-red-500/40 hover:bg-red-500/10 text-red-400"
-              >
-                Stop Early & Save
-              </Button>
+              <Button variant="outline" size="sm" onClick={handleStopRecording}>Stop early and save</Button>
             </div>
           ) : result ? (
             <div className="flex flex-col gap-3">
-              <div className="relative aspect-video w-full rounded-md border border-border overflow-hidden bg-black">
-                <video
-                  ref={videoRef}
-                  src={result.url}
-                  autoPlay
-                  loop
-                  muted
-                  controls
-                  playsInline
-                  className="w-full h-full object-contain"
-                />
+              <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-line bg-canvas">
+                <video ref={videoRef} src={result.url} autoPlay loop muted controls playsInline className="h-full w-full object-contain" />
               </div>
-
-              <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-                <div className="flex items-center gap-1.5 text-emerald-400">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  <span>Loop Recorded Successfully</span>
-                </div>
-                <span className="font-mono text-[11px]">
-                  {(result.sizeBytes / (1024 * 1024)).toFixed(2)} MB • {fps} FPS
-                </span>
+              <div className="flex items-center justify-between text-xs text-fg-muted">
+                <span className="flex items-center gap-1.5 text-success"><CheckCircle2 className="size-3.5" />Loop recorded</span>
+                <span className="num">{(result.sizeBytes / (1024 * 1024)).toFixed(2)} MB, {fps} fps</span>
               </div>
-
-              <div className="flex items-center gap-2 mt-1">
-                <Button
-                  onClick={handleDownload}
-                  className="flex-1 gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download Video ({fps}fps WebM)
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => setResult(null)}
-                  className="gap-1.5 text-xs"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Record Another
-                </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="primary" onClick={handleDownload} className="flex-1"><Download />Download WebM</Button>
+                <Button variant="outline" onClick={() => setResult(null)}><RotateCcw />Record another</Button>
               </div>
             </div>
           ) : (
             <div className="flex flex-col gap-4">
-              <div className="rounded-md border border-border/70 bg-muted/20 p-3 flex flex-col gap-3 text-xs">
-                <div className="flex items-center gap-1.5 font-medium text-foreground">
-                  <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
-                  <span>Loop Parameters</span>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="loop-duration">Duration</Label>
+                  <Select id="loop-duration" value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
+                    <option value={2}>2 seconds</option>
+                    <option value={4}>4 seconds</option>
+                    <option value={6}>6 seconds</option>
+                    <option value={8}>8 seconds</option>
+                  </Select>
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[11px] text-muted-foreground block mb-1">Duration (Seconds)</label>
-                    <select
-                      value={duration}
-                      onChange={(e) => setDuration(Number(e.target.value))}
-                      className="w-full bg-background border border-border rounded px-2 py-1 text-xs focus:ring-1 focus:ring-primary"
-                    >
-                      <option value={2}>2.0 Seconds (Short loop)</option>
-                      <option value={4}>4.0 Seconds (Standard loop)</option>
-                      <option value={6}>6.0 Seconds (Extended loop)</option>
-                      <option value={8}>8.0 Seconds (Long loop)</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] text-muted-foreground block mb-1">Frame Rate</label>
-                    <select
-                      value={fps}
-                      onChange={(e) => setFps(Number(e.target.value))}
-                      className="w-full bg-background border border-border rounded px-2 py-1 text-xs focus:ring-1 focus:ring-primary"
-                    >
-                      <option value={60}>60 FPS (Ultra Smooth)</option>
-                      <option value={30}>30 FPS (Standard)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-[11px] text-muted-foreground block mb-1">Video Quality / Bitrate</label>
-                  <select
-                    value={bitrateMbps}
-                    onChange={(e) => setBitrateMbps(Number(e.target.value))}
-                    className="w-full bg-background border border-border rounded px-2 py-1 text-xs focus:ring-1 focus:ring-primary"
-                  >
-                    <option value={25}>25 Mbps (Crisp Ultra HD / Production)</option>
-                    <option value={15}>15 Mbps (High Quality / Web)</option>
-                    <option value={8}>8 Mbps (Compact / Social Media)</option>
-                  </select>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="loop-fps">Frame rate</Label>
+                  <Select id="loop-fps" value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+                    <option value={60}>60 fps</option>
+                    <option value={30}>30 fps</option>
+                  </Select>
                 </div>
               </div>
-
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="loop-bitrate">Quality</Label>
+                <Select id="loop-bitrate" value={bitrateMbps} onChange={(e) => setBitrateMbps(Number(e.target.value))}>
+                  <option value={25}>25 Mbps, production</option>
+                  <option value={15}>15 Mbps, web</option>
+                  <option value={8}>8 Mbps, compact</option>
+                </Select>
+              </div>
               {error && (
-                <div className="flex items-center gap-1.5 text-xs text-destructive">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  <span>{error}</span>
+                <div className="flex items-center gap-1.5 text-xs text-danger" role="alert">
+                  <AlertCircle className="size-3.5 shrink-0" /><span>{error}</span>
                 </div>
               )}
-
-              <Button onClick={handleStartRecording} className="gap-2 w-full">
-                <Play className="h-3.5 w-3.5" />
-                Start {duration}s Recording at {fps} FPS
+              <Button variant="primary" onClick={handleStartRecording} className="w-full">
+                <Play />Start recording
               </Button>
             </div>
           )}

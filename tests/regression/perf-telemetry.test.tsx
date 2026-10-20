@@ -523,7 +523,7 @@ describe("Milestone 5 (R5: Performance & Scale) Unit Test Suite", () => {
       expect(html).toContain("FPS")
       expect(html).toContain("Frame")
       expect(html).toContain("<canvas")
-      expect(html).toContain("60-FRAME TIMELINE")
+      expect(html).toContain("60-frame timeline")
       expect(html).toContain("Draw Calls / Tris")
       expect(html).toContain("VRAM")
       expect(html).toContain("50 MB / 1024 MB")
@@ -556,7 +556,7 @@ describe("Milestone 5 (R5: Performance & Scale) Unit Test Suite", () => {
       )
 
       expect(html).toContain("Mesh Geometry")
-      expect(html).toContain("Level of Detail")
+      expect(html).toContain("Level of detail")
       expect(html).toContain("LOD 0 (100% Detail)")
       expect(html).toContain("LOD 1 (50% Detail)")
       expect(html).toContain("LOD 2 (25% Detail)")
@@ -1384,7 +1384,7 @@ describe("Adversarial Milestone 5 Verification Suite", () => {
         expect(html).toContain("VRAM Alert: &gt;80% Budget")
         expect(html).toContain("animate-pulse")
         expect(html).toContain("800.1 MB / 1000 MB")
-        expect(html).toContain("text-red-400 font-bold")
+        expect(html).toContain("text-danger font-medium")
       })
 
       it("renders warning badge with dynamic ratio when warnThresholdRatio is customized", () => {

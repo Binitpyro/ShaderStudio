@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, type CSSProperties } from "react"
 import {
   ReactFlow,
   type Node,
@@ -19,6 +19,8 @@ import {
   Background,
   BackgroundVariant,
   Panel,
+  useReactFlow,
+  useStore,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 import { MeshNode } from "@/components/nodes/MeshNode"
@@ -38,7 +40,7 @@ import { GenericCustomNode } from "@/components/nodes/GenericCustomNode"
 import { MathExpressionNode } from "@/components/nodes/MathExpressionNode"
 import { CommentNode } from "@/components/nodes/CommentNode"
 import { FrameNode } from "@/components/nodes/FrameNode"
-import { Button } from "@/components/ui/button"
+import { Button, Kbd, Separator } from "@/components/ui"
 import { compileGraph, buildSdfTree, type GraphNodeData, type RenderQueue } from "@/core/graphCompiler"
 import { useProjectStore, registerLiveGraphProvider } from "@/stores/projectStore"
 import { collectSdfUniforms } from "@/core/sdf/sdfCompiler"
@@ -49,6 +51,34 @@ import { Plus } from "lucide-react"
 import { PostProcessDrawer } from "@/components/PostProcessDrawer"
 import { NodePaletteModal } from "@/components/NodePaletteModal"
 import { useState } from "react"
+
+// minZoom 0.1: never clip a node to keep text bigger; the user can zoom in from the fitted view.
+const FIT_OPTIONS = { padding: 0.12, minZoom: 0.1, maxZoom: 1 }
+
+/** Re-fits when the pane resizes (sidebar drag / panel toggle) until the user pans or zooms themselves. */
+function AutoFit({ userMoved }: { userMoved: { current: boolean } }) {
+  const { fitView } = useReactFlow()
+  const width = useStore((s) => s.width)
+  const height = useStore((s) => s.height)
+  useEffect(() => {
+    if (!userMoved.current && width > 0 && height > 0) void fitView(FIT_OPTIONS)
+  }, [width, height, fitView, userMoved])
+  return null
+}
+// React Flow's own CSS variables, mapped to design tokens so Controls follow the active theme.
+const RF_VARS = {
+  "--xy-controls-button-background-color": "var(--ds-overlay)",
+  "--xy-controls-button-background-color-hover": "var(--ds-hover)",
+  "--xy-controls-button-color": "var(--ds-fg-muted)",
+  "--xy-controls-button-color-hover": "var(--ds-fg)",
+  "--xy-controls-button-border-color": "var(--ds-line)",
+  "--xy-controls-box-shadow": "var(--ds-shadow-sm)",
+} as CSSProperties
+
+const QUICK_LABEL: Record<string, string> = {
+  mesh: "Mesh", compute: "Compute", audio: "Audio", material: "Material", texture: "Texture",
+  uniform: "Uniform", time: "Time", postprocess: "Post process", output: "Output",
+}
 
 export const nodeTypes: NodeTypes = {
   mesh: MeshNode,
@@ -620,22 +650,24 @@ export function NodeGraph({ className }: NodeGraphProps) {
     [updateNodes]
   )
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        (e.target as HTMLElement)?.isContentEditable
-      ) {
-        return
-      }
-      if (e.code === "Space" && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-        e.preventDefault()
-        setIsPaletteOpen(true)
-      }
+  const containerRef = useRef<HTMLDivElement>(null)
+  const userMovedRef = useRef(false)
+
+  // Space opens the palette only while focus is inside the graph (never as a window-level listener, so it
+  // cannot also toggle playback); the Toolbar ignores Space inside [data-node-graph].
+  const handleGraphKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement
+    if (t.closest("input, textarea, select, button, [contenteditable='true']")) return
+    if (e.code === "Space" && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      e.preventDefault()
+      setIsPaletteOpen(true)
     }
-    window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [])
+
+  // Clicking empty canvas puts focus on the graph container so Space keeps working there.
+  const handleGraphPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest("input, textarea, select, button, [contenteditable='true']")) return
+    containerRef.current?.focus({ preventScroll: true })
   }, [])
 
   const handleAddPaletteNode = useCallback(
@@ -649,7 +681,22 @@ export function NodeGraph({ className }: NodeGraphProps) {
   )
 
   return (
-    <div className={cn("h-full w-full relative", className)}>
+    <div
+      ref={containerRef}
+      data-node-graph
+      tabIndex={-1}
+      onKeyDown={handleGraphKeyDown}
+      onPointerDownCapture={handleGraphPointerDown}
+      className={cn(
+        "relative h-full w-full outline-none",
+        "[&_.react-flow__edge-path]:stroke-line-strong [&_.react-flow__edge-path]:transition-colors",
+        "[&_.react-flow__edge.selected_.react-flow__edge-path]:stroke-brand [&_.react-flow__edge:hover_.react-flow__edge-path]:stroke-fg-subtle",
+        "[&_.react-flow__connection-path]:stroke-brand",
+        "[&_.react-flow__controls]:overflow-hidden [&_.react-flow__controls]:rounded-lg [&_.react-flow__controls]:border [&_.react-flow__controls]:border-line [&_.react-flow__controls]:bg-overlay [&_.react-flow__controls]:shadow-sm",
+        "[&_.react-flow__controls-button]:border-line [&_.react-flow__controls-button]:bg-overlay [&_.react-flow__controls-button]:fill-fg-muted hover:[&_.react-flow__controls-button]:bg-hover",
+        className
+      )}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -659,37 +706,39 @@ export function NodeGraph({ className }: NodeGraphProps) {
         onSelectionChange={onSelectionChange}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.2 }}
-        className="bg-background"
+        fitViewOptions={FIT_OPTIONS}
+        minZoom={0.1}
+        onMoveStart={(e) => { if (e) userMovedRef.current = true }}
+        style={RF_VARS}
+        proOptions={{ hideAttribution: true }}
+        className="bg-canvas"
       >
-        <Background color="var(--border)" variant={BackgroundVariant.Dots} gap={16} size={1} />
-        <Controls className="!bg-card !border-border !rounded" />
+        <Background color="var(--ds-line, currentColor)" variant={BackgroundVariant.Dots} gap={20} size={1} />
+        <AutoFit userMoved={userMovedRef} />
+        <Controls showInteractive={false} position="bottom-left" />
         <Panel position="top-left" className="!m-2 max-w-[calc(100%-1rem)]">
-          <div className="flex items-center gap-1.5 bg-card/90 backdrop-blur-xs p-1.5 rounded-lg border border-border shadow-md max-w-full overflow-x-auto scrollbar-none">
-            <Button
-              variant="default"
-              size="sm"
-              onClick={() => setIsPaletteOpen(true)}
-              className="text-xs h-7 px-2.5 gap-1.5 font-medium shadow-xs shrink-0"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Add Node</span>
-              <kbd className="text-[10px] font-mono bg-primary-foreground/20 text-primary-foreground px-1 rounded">Space</kbd>
+          <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-line bg-overlay p-1 shadow-sm">
+            <Button variant="primary" size="sm" onClick={() => setIsPaletteOpen(true)} className="shrink-0">
+              <Plus />
+              <span>Add node</span>
+              <Kbd className="border-transparent bg-brand-fg/20 text-brand-fg">Space</Kbd>
             </Button>
-            <div className="h-4 w-px bg-border my-auto mx-0.5 shrink-0" />
+            <Separator orientation="vertical" className="mx-1 h-4" />
             {["mesh", "compute", "audio", "material", "texture", "uniform", "time", "postprocess", "output"].map((type) => (
-              <Button
-                key={type}
-                variant="ghost"
-                size="sm"
-                onClick={() => addNode(type)}
-                className="text-[11px] h-7 px-2 text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
-              >
-                +{type.charAt(0).toUpperCase() + type.slice(1)}
+              <Button key={type} variant="ghost" size="sm" onClick={() => addNode(type)} className="shrink-0 text-fg-muted">
+                {QUICK_LABEL[type]}
               </Button>
             ))}
           </div>
         </Panel>
+        {nodes.length === 0 && (
+          <Panel position="top-center" className="!pointer-events-none !m-0 !top-1/2 -translate-y-1/2">
+            <div data-testid="graph-empty-state" className="flex flex-col items-center gap-2 text-center">
+              <p className="text-sm text-fg-muted">This graph is empty</p>
+              <p className="flex items-center gap-1.5 text-xs text-fg-subtle">Press <Kbd>Space</Kbd> to add a node</p>
+            </div>
+          </Panel>
+        )}
       </ReactFlow>
       <PostProcessDrawer
         isOpen={drawer.isOpen}

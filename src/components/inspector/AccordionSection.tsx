@@ -15,65 +15,26 @@ export interface AccordionSectionProps {
   contentClassName?: string
 }
 
-export function AccordionSection({
-  id,
-  title,
-  icon,
-  badge,
-  isOpen,
-  onToggle,
-  children,
-  headerActions,
-  className,
-  contentClassName,
-}: AccordionSectionProps) {
+/** Controlled collapsible section (open state is owned + persisted by ParameterPanel). */
+export function AccordionSection({ id, title, icon, badge, isOpen, onToggle, children, headerActions, className, contentClassName }: AccordionSectionProps) {
   return (
-    <div
-      data-testid={id ? `accordion-${id}` : undefined}
-      className={cn("border-b border-border/60 transition-colors", className)}
-    >
-      <div className="flex items-center justify-between py-2 px-3 select-none hover:bg-muted/20 transition-colors">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={isOpen}
-          className="flex flex-1 items-center gap-2 text-left cursor-pointer group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded py-0.5"
-        >
-          <span
-            className={cn(
-              "text-muted-foreground transition-transform duration-200 shrink-0",
-              isOpen ? "rotate-0" : "-rotate-90"
-            )}
-            aria-hidden="true"
-          >
-            <ChevronDown className="h-4 w-4" />
+    <div data-testid={id ? `accordion-${id}` : undefined} className={cn("border-b border-line", className)}>
+      <div className="flex h-10 items-center justify-between px-3 select-none">
+        <button type="button" onClick={onToggle} aria-expanded={isOpen} className="group flex h-full flex-1 items-center gap-2 text-left">
+          <span className={cn("shrink-0 text-fg-subtle transition-transform", isOpen ? "rotate-0" : "-rotate-90")} aria-hidden="true">
+            <ChevronDown className="size-3.5" />
           </span>
-          {icon && <span className="text-primary/90 shrink-0 flex items-center">{icon}</span>}
-          <span className="text-xs font-semibold tracking-wide text-foreground group-hover:text-primary transition-colors">
-            {title}
-          </span>
-          {badge !== undefined && badge !== null && (
-            <span className="ml-1 rounded-full bg-muted/80 px-1.5 py-0.2 text-[10px] font-mono text-muted-foreground">
-              {badge}
-            </span>
-          )}
+          {icon ? <span className="flex shrink-0 items-center text-fg-subtle">{icon}</span> : null}
+          <span className="text-sm font-medium text-fg">{title}</span>
+          {badge !== undefined && badge !== null ? <span className="num rounded-full bg-raised px-1.5 text-2xs text-fg-muted">{badge}</span> : null}
         </button>
-
-        {headerActions && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="flex items-center gap-1.5 shrink-0 ml-2"
-          >
+        {headerActions ? (
+          <div onClick={(e) => e.stopPropagation()} className="ml-2 flex shrink-0 items-center gap-1">
             {headerActions}
           </div>
-        )}
+        ) : null}
       </div>
-
-      {isOpen && (
-        <div className={cn("px-3 pb-3 pt-1", contentClassName)}>
-          {children}
-        </div>
-      )}
+      {isOpen ? <div className={cn("px-3 pb-4 pt-1", contentClassName)}>{children}</div> : null}
     </div>
   )
 }

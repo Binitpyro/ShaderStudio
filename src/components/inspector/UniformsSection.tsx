@@ -1,33 +1,28 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, type ReactNode } from "react"
 import {
   useProjectStore,
   getDefaultUniformValue,
   type ParsedUniform,
   type UniformValue,
   type AudioBinding,
-  type AudioBand,
   type GraphUniform,
 } from "@/stores/projectStore"
 import { getActiveAdapter } from "@/adapters/activeAdapter"
 import { cn } from "@/lib/utils"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
-import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
-import { Search, X, RotateCcw, Activity } from "lucide-react"
+import { IconButton } from "@/components/ui/icon-button"
+import { Input } from "@/components/ui/input"
+import { NumericField } from "@/components/ui/numeric-field"
+import { ColorField } from "@/components/ui/color-field"
+import { Search, X, RotateCcw, Activity, ImagePlus } from "lucide-react"
 
-function getDefaultValueFor(
-  uniform: ParsedUniform,
-  graphUniforms: GraphUniform[]
-): UniformValue {
+function getDefaultValueFor(uniform: ParsedUniform, graphUniforms: GraphUniform[]): UniformValue {
   const gu = graphUniforms.find((g) => g.name === uniform.name)
   if (gu) {
-    if (typeof gu.defaultValue === "boolean") {
-      return { type: "bool", value: gu.defaultValue }
-    }
-    if (typeof gu.defaultValue === "number") {
-      return { type: "float", value: gu.defaultValue }
-    }
+    if (typeof gu.defaultValue === "boolean") return { type: "bool", value: gu.defaultValue }
+    if (typeof gu.defaultValue === "number") return { type: "float", value: gu.defaultValue }
     if (Array.isArray(gu.defaultValue)) {
       const len = gu.defaultValue.length
       const type = len === 2 ? "vec2" : len === 3 ? (gu.type === "color" ? "color" : "vec3") : "vec4"
@@ -37,611 +32,323 @@ function getDefaultValueFor(
   return getDefaultUniformValue(uniform)
 }
 
-interface MatrixControlProps {
+const BANDS = ["bass", "mid", "treble", "beat", "level"] as const
+
+/** Push a value to the store and straight to the active adapter (no recompile). */
+function useUniformWriter(name: string, onChange: (v: UniformValue) => void) {
+  return (v: UniformValue) => {
+    onChange(v)
+    getActiveAdapter()?.updateUniform(name, v)
+  }
+}
+
+interface RowProps {
   uniform: ParsedUniform
   value: UniformValue | undefined
   onChange: (value: UniformValue) => void
   onReset: () => void
 }
 
-function MatrixControl({ uniform, value, onChange, onReset }: MatrixControlProps) {
-  const dimension =
-    uniform.type === "mat2x2f" ? 2 : uniform.type === "mat3x3f" ? 3 : 4
-  const count = dimension * dimension
-  const defaultValues: Record<number, number[]> = {
-    2: [1, 0, 0, 1],
-    3: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-    4: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  }
+const REVEAL = "opacity-0 transition-opacity focus-visible:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100"
 
-  const raw = Array.isArray(value?.value)
-    ? (value.value as number[])
-    : defaultValues[dimension]
-  const current = raw.length === count ? raw : defaultValues[dimension]
-  const valType = dimension === 4 ? "mat4" : dimension === 3 ? "mat3" : "mat2"
-
-  const applyUpdate = (updated: number[]) => {
-    const newValue: UniformValue = { type: valType, value: updated }
-    onChange(newValue)
-    getActiveAdapter()?.updateUniform(uniform.name, newValue)
-  }
-
-  const updateCell = (index: number, val: number) => {
-    const updated = [...current]
-    updated[index] = val
-    applyUpdate(updated)
-  }
-
-  const setPreset = (preset: "identity" | "scale2" | "scaleHalf" | "reset") => {
-    if (preset === "reset") {
-      onReset()
-      return
-    }
-    let updated: number[]
-    switch (preset) {
-      case "identity":
-        updated = [...defaultValues[dimension]]
-        break
-      case "scale2":
-        updated = [...defaultValues[dimension]]
-        for (let i = 0; i < dimension; i++) {
-          updated[i * dimension + i] = 2.0
-        }
-        break
-      case "scaleHalf":
-        updated = [...defaultValues[dimension]]
-        for (let i = 0; i < dimension; i++) {
-          updated[i * dimension + i] = 0.5
-        }
-        break
-    }
-    applyUpdate(updated)
-  }
-
+/** Name + type on the left, small actions on the right, control below. */
+function Row({ uniform, typeLabel, actions, children }: { uniform: ParsedUniform; typeLabel?: string; actions?: ReactNode; children: ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5 p-2 rounded-md bg-muted/10 border border-border/40">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-          <span className="text-[10px] text-muted-foreground font-mono">
-            ({dimension}x{dimension})
-          </span>
+    <div className="group/row flex flex-col gap-1.5" data-uniform={uniform.name}>
+      <div className="flex min-h-7 items-center justify-between gap-2">
+        <div className="flex min-w-0 items-baseline gap-1.5">
+          <span className="truncate font-mono text-xs text-fg" title={uniform.name}>{uniform.name}</span>
+          <span className="num text-2xs text-fg-subtle">{typeLabel ?? uniform.type}</span>
         </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-5 px-1.5 text-[10px]"
-            onClick={() => setPreset("identity")}
-          >
-            Identity
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-5 px-1.5 text-[10px]"
-            onClick={() => setPreset("scale2")}
-          >
-            2x
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-5 px-1.5 text-[10px]"
-            onClick={() => setPreset("scaleHalf")}
-          >
-            0.5x
-          </Button>
-          <button
-            type="button"
-            onClick={onReset}
-            title="Reset matrix to default"
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-          >
-            <RotateCcw className="h-3 w-3" />
-          </button>
-        </div>
+        <div className="flex shrink-0 items-center">{actions}</div>
       </div>
-      <div
-        className="grid gap-1 pt-1"
-        style={{ gridTemplateColumns: `repeat(${dimension}, minmax(0, 1fr))` }}
-      >
-        {current.map((cellVal, idx) => (
-          <input
-            key={idx}
-            type="number"
-            step="0.1"
-            value={Number(cellVal.toFixed(2))}
-            onChange={(e) => updateCell(idx, parseFloat(e.target.value) || 0)}
-            className="h-6 rounded border border-border bg-background px-1 text-center font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          />
-        ))}
-      </div>
+      {children}
     </div>
   )
 }
 
-interface ParameterControlProps {
-  uniform: ParsedUniform
-  value: UniformValue | undefined
-  onChange: (value: UniformValue) => void
-  onReset: () => void
-  audioBinding?: AudioBinding
-  onAudioBindingChange?: (binding: AudioBinding | null) => void
+function ResetButton({ onReset, label }: { onReset: () => void; label: string }) {
+  return (
+    <IconButton label={label} onClick={onReset} className={cn("size-7", REVEAL)}>
+      <RotateCcw className="size-3.5" />
+    </IconButton>
+  )
 }
 
-function ScalarControl({
-  uniform,
-  value,
-  onChange,
-  onReset,
-  audioBinding,
-  onAudioBindingChange,
-}: ParameterControlProps) {
-  const [showAudioMenu, setShowAudioMenu] = useState(false)
+function MatrixControl({ uniform, value, onChange, onReset }: RowProps) {
+  const dimension = uniform.type === "mat2x2f" ? 2 : uniform.type === "mat3x3f" ? 3 : 4
+  const count = dimension * dimension
+  const identity = Array.from({ length: count }, (_, i) => (i % (dimension + 1) === 0 ? 1 : 0))
+  const raw = Array.isArray(value?.value) ? (value.value as number[]) : identity
+  const current = raw.length === count ? raw : identity
+  const valType = dimension === 4 ? "mat4" : dimension === 3 ? "mat3" : "mat2"
+  const write = useUniformWriter(uniform.name, onChange)
 
-  if (uniform.type === "bool") {
-    const boolValue = value?.type === "bool" ? (value.value as boolean) : false
-    return (
-      <div className="flex items-center justify-between p-2 rounded-md bg-muted/10 border border-border/40">
-        <div className="flex items-center gap-1.5">
-          <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-          <span className="text-[10px] text-muted-foreground font-mono">bool</span>
+  const apply = (updated: number[]) => write({ type: valType, value: updated })
+  const scaled = (s: number) => identity.map((v) => (v === 1 ? s : 0))
+
+  return (
+    <details className="group/mat rounded-md border border-line bg-raised/50" data-uniform={uniform.name}>
+      <summary className="flex h-8 cursor-pointer list-none items-center justify-between gap-2 px-2 select-none [&::-webkit-details-marker]:hidden">
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="truncate font-mono text-xs text-fg" title={uniform.name}>{uniform.name}</span>
+          <span className="num text-2xs text-fg-subtle">
+            {dimension}x{dimension} matrix
+          </span>
+        </span>
+        <span className="text-2xs text-fg-subtle group-open/mat:hidden">Advanced</span>
+      </summary>
+      <div className="flex flex-col gap-2 px-2 pb-2">
+        <div className="flex flex-wrap items-center gap-1">
+          <Button variant="outline" size="sm" onClick={() => apply([...identity])}>Identity</Button>
+          <Button variant="outline" size="sm" onClick={() => apply(scaled(2))}>2x</Button>
+          <Button variant="outline" size="sm" onClick={() => apply(scaled(0.5))}>0.5x</Button>
+          <IconButton label="Reset matrix" onClick={onReset} className="ml-auto size-7">
+            <RotateCcw className="size-3.5" />
+          </IconButton>
         </div>
-        <div className="flex items-center gap-2">
-          <Switch
-            checked={boolValue}
-            onCheckedChange={(checked) => {
-              const newValue: UniformValue = { type: "bool", value: checked }
-              onChange(newValue)
-              getActiveAdapter()?.updateUniform(uniform.name, newValue)
+        <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${dimension}, minmax(0, 1fr))` }}>
+          {current.map((cell, idx) => (
+            <NumericField
+              key={idx}
+              aria-label={`${uniform.name}[${idx}]`}
+              value={cell}
+              step={0.1}
+              precision={2}
+              className="w-full"
+              onChange={(v) => {
+                const u = [...current]
+                u[idx] = v
+                apply(u)
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    </details>
+  )
+}
+
+function BoolControl({ uniform, value, onChange, onReset }: RowProps) {
+  const write = useUniformWriter(uniform.name, onChange)
+  const on = value?.type === "bool" ? (value.value as boolean) : false
+  return (
+    <Row uniform={uniform} actions={<ResetButton onReset={onReset} label="Reset to default" />}>
+      <Switch aria-label={uniform.name} checked={on} onCheckedChange={(checked) => write({ type: "bool", value: checked })} />
+    </Row>
+  )
+}
+
+function AudioBindPanel({ binding, base, onChange }: { binding?: AudioBinding; base: number; onChange: (b: AudioBinding | null) => void }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-line bg-raised/50 p-2" data-testid="audio-bind-panel">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-fg-muted">{binding ? `Modulated by ${binding.band}` : "Not bound to audio"}</span>
+        {binding ? (
+          <Button variant="ghost" size="sm" onClick={() => onChange(null)}>
+            <X className="size-3.5" />
+            Unbind
+          </Button>
+        ) : null}
+      </div>
+      <div role="group" aria-label="Audio band" className="grid grid-cols-5 gap-1">
+        {BANDS.map((band) => (
+          <Button
+            key={band}
+            size="sm"
+            variant={binding?.band === band ? "primary" : "secondary"}
+            aria-pressed={binding?.band === band}
+            className="px-1"
+            onClick={() => onChange({ band, amount: binding?.amount ?? 1 })}
+          >
+            {band}
+          </Button>
+        ))}
+      </div>
+      {binding ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <span className="w-14 text-xs text-fg-muted">Intensity</span>
+            <Slider aria-label="Audio intensity" value={[binding.amount]} min={0.1} max={5} step={0.1} onValueChange={([amount]) => onChange({ band: binding.band, amount })} className="flex-1" />
+            <span className="num w-9 text-right text-xs text-fg-muted">{binding.amount.toFixed(1)}x</span>
+          </div>
+          <span className="num text-2xs text-fg-subtle">
+            Base {base.toFixed(2)} to peak {(base + binding.amount).toFixed(2)}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ScalarControl({ uniform, value, onChange, onReset }: RowProps) {
+  const audioBinding = useProjectStore((s) => s.audioBindings[uniform.name])
+  const setAudioBinding = useProjectStore((s) => s.setAudioBinding)
+  const [showAudio, setShowAudio] = useState(false)
+  const write = useUniformWriter(uniform.name, onChange)
+
+  const isInt = uniform.type === "i32" || uniform.type === "u32"
+  const num = typeof value?.value === "number" ? value.value : 0
+  const commit = (v: number) => {
+    const final = uniform.type === "i32" ? Math.round(v) : uniform.type === "u32" ? Math.max(0, Math.round(v)) : v
+    write({ type: uniform.type === "i32" ? "int" : uniform.type === "u32" ? "uint" : "float", value: final })
+  }
+
+  return (
+    <Row
+      uniform={uniform}
+      actions={
+        <>
+          <IconButton
+            label={audioBinding ? `Audio: ${audioBinding.band} (${audioBinding.amount}x)` : "Bind to audio"}
+            aria-pressed={showAudio}
+            onClick={() => setShowAudio((s) => !s)}
+            className={cn("size-7", audioBinding ? "text-brand-text" : REVEAL)}
+          >
+            <Activity className="size-3.5" />
+          </IconButton>
+          <ResetButton onReset={onReset} label="Reset to default" />
+        </>
+      }
+    >
+      <NumericField aria-label={uniform.name} value={isInt ? Math.round(num) : num} step={isInt ? 1 : 0.01} min={uniform.type === "u32" ? 0 : undefined} onChange={commit} className="w-full" />
+      {showAudio ? <AudioBindPanel binding={audioBinding} base={num} onChange={(b) => setAudioBinding(uniform.name, b)} /> : null}
+    </Row>
+  )
+}
+
+const toHex = (r: number, g: number, b: number) =>
+  "#" + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0")).join("")
+
+function ColorControl({ uniform, value, onChange, onReset }: RowProps) {
+  const write = useUniformWriter(uniform.name, onChange)
+  const isVec4 = uniform.type === "vec4f"
+  const arr = (value?.type === "color" || value?.type === "vec3" || value?.type === "vec4") && Array.isArray(value.value) ? (value.value as number[]) : [0.5, 0.5, 0.5, 1]
+  const [r, g, b] = [arr[0] ?? 0.5, arr[1] ?? 0.5, arr[2] ?? 0.5]
+  const a = isVec4 ? (arr[3] ?? 1) : 1
+
+  const onHex = (hex: string) => {
+    const clean = hex.replace(/^#/, "")
+    if (clean.length !== 6) return
+    const c = [0, 2, 4].map((i) => parseInt(clean.slice(i, i + 2), 16) / 255)
+    write({ type: isVec4 ? "vec4" : "color", value: isVec4 ? [c[0], c[1], c[2], a] : c })
+  }
+
+  return (
+    <Row uniform={uniform} typeLabel={`${uniform.type} color`} actions={<ResetButton onReset={onReset} label="Reset to default" />}>
+      <div className="flex items-center gap-2">
+        <ColorField hexInput aria-label={`${uniform.name} color`} value={toHex(r, g, b)} onChange={onHex} className="min-w-0 flex-1" />
+        {isVec4 ? (
+          <NumericField label="A" aria-label={`${uniform.name} alpha`} value={a} min={0} max={1} step={0.01} className="w-24" onChange={(alpha) => write({ type: "vec4", value: [r, g, b, alpha] })} />
+        ) : null}
+      </div>
+    </Row>
+  )
+}
+
+function VectorControl({ uniform, value, onChange, onReset }: RowProps) {
+  const write = useUniformWriter(uniform.name, onChange)
+  const vec = (value?.type === "vec2" || value?.type === "vec3" || value?.type === "vec4") && Array.isArray(value.value) ? (value.value as number[]) : [0, 0, 0, 0]
+  const comps = uniform.type === "vec2f" ? ["x", "y"] : uniform.type === "vec3f" ? ["x", "y", "z"] : ["x", "y", "z", "w"]
+  const targetType = uniform.type === "vec2f" ? "vec2" : uniform.type === "vec3f" ? "vec3" : "vec4"
+
+  return (
+    <Row uniform={uniform} actions={<ResetButton onReset={onReset} label="Reset to default" />}>
+      <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${comps.length}, minmax(0, 1fr))` }}>
+        {comps.map((c, i) => (
+          <NumericField
+            key={c}
+            label={c}
+            aria-label={`${uniform.name}.${c}`}
+            value={vec[i] ?? 0}
+            step={0.01}
+            className="w-full"
+            onChange={(v) => {
+              const next = [...vec]
+              next[i] = v
+              write({ type: targetType, value: next.slice(0, comps.length) })
             }}
           />
-          <button
-            type="button"
-            onClick={onReset}
-            title="Reset boolean to default"
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-          >
-            <RotateCcw className="h-3 w-3" />
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  const numValue = typeof value?.value === "number" ? value.value : 0
-  const isInt = uniform.type === "i32" || uniform.type === "u32"
-  const min = uniform.type === "u32" ? 0 : -100
-  const max = 100
-  const step = isInt ? 1 : 0.01
-
-  const bandStyles: Record<AudioBand, string> = {
-    bass: "bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-xs shadow-amber-500/20",
-    mid: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-xs shadow-cyan-500/20",
-    treble: "bg-pink-500/20 text-pink-300 border-pink-500/40 shadow-xs shadow-pink-500/20",
-    beat: "bg-purple-500/20 text-purple-300 border-purple-500/40 shadow-xs shadow-purple-500/20",
-    level: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-xs shadow-emerald-500/20",
-  }
-
-  const handleNumericChange = (v: number) => {
-    const finalVal =
-      uniform.type === "i32"
-        ? Math.round(v)
-        : uniform.type === "u32"
-        ? Math.max(0, Math.round(v))
-        : v
-    const newValue: UniformValue = {
-      type: uniform.type === "i32" ? "int" : uniform.type === "u32" ? "uint" : "float",
-      value: finalVal,
-    }
-    onChange(newValue)
-    getActiveAdapter()?.updateUniform(uniform.name, newValue)
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5 p-2 rounded-md bg-muted/10 border border-border/40">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-          <span className="text-[10px] text-muted-foreground font-mono">
-            {uniform.type}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setShowAudioMenu(!showAudioMenu)}
-            className={cn(
-              "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono font-medium transition-all cursor-pointer border",
-              audioBinding
-                ? bandStyles[audioBinding.band]
-                : "bg-muted/40 text-muted-foreground border-transparent hover:text-foreground hover:bg-muted/60"
-            )}
-            title={
-              audioBinding
-                ? `Modulated by ${audioBinding.band.toUpperCase()} (${audioBinding.amount}x)`
-                : "Bind to audio frequency spectrum"
-            }
-          >
-            <Activity className={cn("h-2.5 w-2.5", audioBinding ? "animate-pulse" : "")} />
-            <span>{audioBinding ? audioBinding.band.toUpperCase() : "Audio"}</span>
-          </button>
-          <input
-            type="number"
-            step={step}
-            value={isInt ? Math.round(numValue) : Number(numValue.toFixed(2))}
-            onChange={(e) => handleNumericChange(parseFloat(e.target.value) || 0)}
-            className="h-5 w-14 rounded border border-border bg-background px-1 text-right font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          />
-          <button
-            type="button"
-            onClick={onReset}
-            title="Reset to default"
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-          >
-            <RotateCcw className="h-3 w-3" />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 pt-1">
-        <Slider
-          value={[numValue]}
-          min={min}
-          max={max}
-          step={step}
-          onValueChange={([v]) => handleNumericChange(v)}
-          className="flex-1"
-        />
-      </div>
-
-      {showAudioMenu && (
-        <div className="flex flex-col gap-1.5 p-2 rounded bg-muted/40 border border-border/60 text-[10px] font-mono mt-1">
-          <div className="flex items-center justify-between gap-1">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-semibold text-foreground">Audio Modulation</span>
-              {audioBinding ? (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[9px] font-bold">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  CONNECTED ({audioBinding.band.toUpperCase()})
-                </span>
-              ) : (
-                <span className="text-muted-foreground text-[9px]">UNBOUND</span>
-              )}
-            </div>
-            {audioBinding && (
-              <button
-                type="button"
-                onClick={() => onAudioBindingChange?.(null)}
-                className="flex items-center gap-1 text-[10px] text-destructive hover:text-destructive/80 hover:bg-destructive/10 px-1.5 py-0.5 rounded transition-colors cursor-pointer border border-destructive/30"
-                title="Remove audio modulation from this parameter"
-              >
-                <X className="h-2.5 w-2.5" />
-                <span>Unbind</span>
-              </button>
-            )}
-          </div>
-          <div className="grid grid-cols-5 gap-1 pt-0.5">
-            {(["bass", "mid", "treble", "beat", "level"] as const).map((b) => (
-              <button
-                key={b}
-                type="button"
-                onClick={() => {
-                  onAudioBindingChange?.({
-                    band: b,
-                    amount: audioBinding?.amount ?? 1.0,
-                  })
-                }}
-                className={cn(
-                  "py-1 rounded text-center uppercase text-[9px] font-bold tracking-wider transition-all border cursor-pointer",
-                  audioBinding?.band === b
-                    ? "bg-primary text-primary-foreground border-primary shadow-xs"
-                    : "bg-background/80 text-muted-foreground border-border hover:text-foreground hover:border-primary/40"
-                )}
-              >
-                {b}
-              </button>
-            ))}
-          </div>
-          {audioBinding && (
-            <div className="flex flex-col gap-1 pt-1 border-t border-border/40">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-muted-foreground">Modulation Range</span>
-                <span className="text-foreground font-semibold">
-                  Base {numValue.toFixed(2)} → Peak {(numValue + audioBinding.amount).toFixed(2)}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground w-14">Intensity</span>
-                <Slider
-                  value={[audioBinding.amount]}
-                  min={0.1}
-                  max={5.0}
-                  step={0.1}
-                  onValueChange={([val]) => {
-                    onAudioBindingChange?.({ band: audioBinding.band, amount: val })
-                  }}
-                  className="flex-1"
-                />
-                <span className="w-8 text-right text-muted-foreground font-bold">
-                  {audioBinding.amount.toFixed(1)}x
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ColorControl({ uniform, value, onChange, onReset }: ParameterControlProps) {
-  const isVec4 = uniform.type === "vec4f"
-  const rawArray =
-    value?.type === "color" || value?.type === "vec3" || value?.type === "vec4"
-      ? Array.isArray(value.value)
-        ? (value.value as number[])
-        : [0.5, 0.5, 0.5, 1.0]
-      : [0.5, 0.5, 0.5, 1.0]
-
-  const r = rawArray[0] ?? 0.5
-  const g = rawArray[1] ?? 0.5
-  const b = rawArray[2] ?? 0.5
-  const a = isVec4 ? (rawArray[3] ?? 1.0) : 1.0
-
-  const hexValue =
-    "#" +
-    [r, g, b]
-      .map((v) =>
-        Math.max(0, Math.min(255, Math.round(v * 255)))
-          .toString(16)
-          .padStart(2, "0")
-      )
-      .join("")
-
-  const handleHexChange = (hexStr: string) => {
-    let clean = hexStr.replace(/^#/, "")
-    if (clean.length === 6) {
-      const nr = parseInt(clean.slice(0, 2), 16) / 255
-      const ng = parseInt(clean.slice(2, 4), 16) / 255
-      const nb = parseInt(clean.slice(4, 6), 16) / 255
-      const newValue: UniformValue = {
-        type: isVec4 ? "vec4" : "color",
-        value: isVec4 ? [nr, ng, nb, a] : [nr, ng, nb],
-      }
-      onChange(newValue)
-      getActiveAdapter()?.updateUniform(uniform.name, newValue)
-    }
-  }
-
-  const handleAlphaChange = (newAlpha: number) => {
-    const newValue: UniformValue = {
-      type: "vec4",
-      value: [r, g, b, newAlpha],
-    }
-    onChange(newValue)
-    getActiveAdapter()?.updateUniform(uniform.name, newValue)
-  }
-
-  return (
-    <div className="flex flex-col gap-2 p-2 rounded-md bg-muted/10 border border-border/40">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-          <span className="text-[10px] text-muted-foreground font-mono">
-            {uniform.type} (color)
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onReset}
-          title="Reset color to default"
-          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-        >
-          <RotateCcw className="h-3 w-3" />
-        </button>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <div className="relative h-7 w-7 rounded overflow-hidden border border-border shrink-0 shadow-xs">
-          <input
-            type="color"
-            value={hexValue}
-            onChange={(e) => handleHexChange(e.target.value)}
-            className="absolute -top-2 -left-2 h-11 w-11 cursor-pointer border-0 p-0"
-          />
-        </div>
-        <input
-          type="text"
-          value={hexValue}
-          onChange={(e) => handleHexChange(e.target.value)}
-          className="h-6 w-20 rounded border border-border bg-background px-1.5 font-mono text-xs uppercase text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-        />
-        <div
-          className="h-6 flex-1 rounded border border-border/50"
-          style={{
-            backgroundColor: `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(
-              b * 255
-            )}, ${a})`,
-          }}
-        />
-      </div>
-
-      {isVec4 && (
-        <div className="flex items-center gap-2 pt-1">
-          <span className="w-10 text-[11px] text-muted-foreground font-mono">Alpha</span>
-          <Slider
-            value={[a]}
-            min={0.0}
-            max={1.0}
-            step={0.01}
-            onValueChange={([val]) => handleAlphaChange(val)}
-            className="flex-1"
-          />
-          <span className="w-10 text-right text-xs font-mono text-muted-foreground">
-            {a.toFixed(2)}
-          </span>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function VectorControl({ uniform, value, onChange, onReset }: ParameterControlProps) {
-  const vecValue =
-    value?.type === "vec2" || value?.type === "vec3" || value?.type === "vec4"
-      ? Array.isArray(value.value)
-        ? (value.value as number[])
-        : [0, 0, 0, 0]
-      : [0, 0, 0, 0]
-
-  const components =
-    uniform.type === "vec2f"
-      ? ["x", "y"]
-      : uniform.type === "vec3f"
-      ? ["x", "y", "z"]
-      : ["x", "y", "z", "w"]
-
-  const compStyles: Record<string, string> = {
-    x: "text-rose-400 bg-rose-500/10 border-rose-500/20",
-    y: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
-    z: "text-sky-400 bg-sky-500/10 border-sky-500/20",
-    w: "text-amber-400 bg-amber-500/10 border-amber-500/20",
-  }
-
-  const updateComponent = (index: number, val: number) => {
-    const newVec = [...vecValue]
-    newVec[index] = val
-    const targetType =
-      uniform.type === "vec2f" ? "vec2" : uniform.type === "vec3f" ? "vec3" : "vec4"
-    const newValue: UniformValue = {
-      type: targetType,
-      value: newVec.slice(0, components.length),
-    }
-    onChange(newValue)
-    getActiveAdapter()?.updateUniform(uniform.name, newValue)
-  }
-
-  return (
-    <div className="flex flex-col gap-2 p-2 rounded-md bg-muted/10 border border-border/40">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-          <span className="text-[10px] text-muted-foreground font-mono">
-            {uniform.type}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onReset}
-          title="Reset vector to default"
-          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-        >
-          <RotateCcw className="h-3 w-3" />
-        </button>
-      </div>
-
-      <div className="flex flex-col gap-2 pt-1">
-        {components.map((comp, i) => (
-          <div key={comp} className="flex items-center gap-2">
-            <span
-              className={cn(
-                "h-5 w-5 rounded border text-[11px] font-mono font-bold flex items-center justify-center shrink-0",
-                compStyles[comp] || "text-muted-foreground"
-              )}
-            >
-              .{comp}
-            </span>
-            <Slider
-              value={[vecValue[i] ?? 0]}
-              min={-10}
-              max={10}
-              step={0.01}
-              onValueChange={([v]) => updateComponent(i, v)}
-              className="flex-1"
-            />
-            <input
-              type="number"
-              step="0.01"
-              value={Number((vecValue[i] ?? 0).toFixed(2))}
-              onChange={(e) => updateComponent(i, parseFloat(e.target.value) || 0)}
-              className="h-5 w-14 rounded border border-border bg-background px-1 text-right font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            />
-          </div>
         ))}
       </div>
-    </div>
+    </Row>
   )
 }
 
-function TextureControl({ uniform }: { uniform: ParsedUniform }) {
-  return (
-    <div className="flex flex-col gap-1.5 p-2 rounded-md bg-muted/10 border border-border/40">
-      <div className="flex items-center justify-between">
-        <Label className="text-xs font-mono font-medium">{uniform.name}</Label>
-        <span className="text-[10px] text-muted-foreground font-mono">sampler2D / texture</span>
-      </div>
-      <div className="flex h-12 items-center justify-center rounded border border-dashed border-border/70 text-xs text-muted-foreground bg-muted/20">
-        Texture bound via Node Graph
-      </div>
-    </div>
-  )
-}
-
-export function UniformsSection() {
-  const parsedUniforms = useProjectStore((state) => state.parsedUniforms)
-  const graphUniforms = useProjectStore((state) => state.graphUniforms)
-  const uniformValues = useProjectStore((state) => state.uniformValues)
-  const setUniformValue = useProjectStore((state) => state.setUniformValue)
-  const audioBindings = useProjectStore((state) => state.audioBindings)
-  const setAudioBinding = useProjectStore((state) => state.setAudioBinding)
-
-  const [searchQuery, setSearchQuery] = useState("")
-
-  const allUniforms: ParsedUniform[] =
-    parsedUniforms.length > 0
-      ? parsedUniforms
-      : [{ name: "u_color", type: "vec3f", kind: "color" }]
-
-  const fromGraph: ParsedUniform[] = graphUniforms.map((u) => ({
-    name: u.name,
-    type:
-      u.type === "float"
-        ? "f32"
-        : u.type === "vec2"
-        ? "vec2f"
-        : u.type === "vec3"
-        ? "vec3f"
-        : u.type === "vec4"
-        ? "vec4f"
-        : "f32",
-    kind: u.type === "color" ? "color" : "scalar",
-  }))
-
-  const combined = useMemo(() => {
-    const list = [...allUniforms]
-    for (const g of fromGraph) {
-      if (!list.some((u) => u.name === g.name)) {
-        list.push(g)
-      }
+function TextureControl({ uniform, value, onChange }: RowProps) {
+  const write = useUniformWriter(uniform.name, onChange)
+  const input = useRef<HTMLInputElement>(null)
+  const src = value?.type === "texture" && typeof value.value === "string" ? value.value : ""
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === "string") write({ type: "texture", value: reader.result })
     }
-    return list
-  }, [allUniforms, fromGraph])
+    reader.readAsDataURL(file)
+    e.target.value = ""
+  }
+  return (
+    <Row uniform={uniform} typeLabel="texture">
+      <div className="flex items-center gap-2">
+        <div className="size-12 shrink-0 overflow-hidden rounded-md border border-line bg-raised">
+          {src ? <img src={src} alt={`${uniform.name} preview`} className="size-full object-cover" /> : null}
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
+          <span className="text-xs text-fg-subtle">{src ? "Custom texture" : "Bound via node graph"}</span>
+          <Button variant="outline" size="sm" onClick={() => input.current?.click()}>
+            <ImagePlus />
+            {src ? "Replace" : "Choose image"}
+          </Button>
+        </div>
+        <input ref={input} type="file" accept="image/*" aria-label={`Replace ${uniform.name} texture`} className="hidden" onChange={onFile} />
+      </div>
+    </Row>
+  )
+}
 
-  const filteredUniforms = useMemo(() => {
-    const trimmed = searchQuery.trim().toLowerCase()
-    if (!trimmed) return combined
-    return combined.filter((u) => u.name.toLowerCase().includes(trimmed))
-  }, [combined, searchQuery])
-
-  const handleResetUniform = (uniform: ParsedUniform) => {
+function UniformRow({ uniform, graphUniforms }: { uniform: ParsedUniform; graphUniforms: GraphUniform[] }) {
+  const value = useProjectStore((s) => s.uniformValues[uniform.name])
+  const setUniformValue = useProjectStore((s) => s.setUniformValue)
+  const onChange = (v: UniformValue) => setUniformValue(uniform.name, v)
+  const onReset = () => {
     const def = getDefaultValueFor(uniform, graphUniforms)
     setUniformValue(uniform.name, def)
     getActiveAdapter()?.updateUniform(uniform.name, def)
   }
+  const p = { uniform, value, onChange, onReset }
+  if (uniform.kind === "texture") return <TextureControl {...p} />
+  if (uniform.kind === "matrix" || uniform.type.startsWith("mat")) return <MatrixControl {...p} />
+  if (uniform.kind === "color") return <ColorControl {...p} />
+  if (uniform.kind === "vector") return <VectorControl {...p} />
+  if (uniform.type === "bool") return <BoolControl {...p} />
+  return <ScalarControl {...p} />
+}
 
-  const handleResetAll = () => {
+const GRAPH_TYPE: Record<string, ParsedUniform["type"]> = { float: "f32", vec2: "vec2f", vec3: "vec3f", vec4: "vec4f" }
+
+export function UniformsSection() {
+  const parsedUniforms = useProjectStore((s) => s.parsedUniforms)
+  const graphUniforms = useProjectStore((s) => s.graphUniforms)
+  const setUniformValue = useProjectStore((s) => s.setUniformValue)
+  const [query, setQuery] = useState("")
+
+  const combined = useMemo(() => {
+    const list: ParsedUniform[] = parsedUniforms.length > 0 ? [...parsedUniforms] : [{ name: "u_color", type: "vec3f", kind: "color" }]
+    for (const u of graphUniforms) {
+      if (list.some((x) => x.name === u.name)) continue
+      list.push({ name: u.name, type: GRAPH_TYPE[u.type] ?? "f32", kind: u.type === "color" ? "color" : "scalar" })
+    }
+    return list
+  }, [parsedUniforms, graphUniforms])
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? combined.filter((u) => u.name.toLowerCase().includes(q)) : combined
+  }, [combined, query])
+
+  const resetAll = () => {
     for (const u of combined) {
       const def = getDefaultValueFor(u, graphUniforms)
       setUniformValue(u.name, def)
@@ -651,109 +358,35 @@ export function UniformsSection() {
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Search Bar + Controls */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
-          <Search className="absolute left-2 top-2 h-3.5 w-3.5 text-muted-foreground" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search uniforms..."
-            className="h-7.5 w-full rounded border border-border bg-background pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery("")}
-              className="absolute right-2 top-2 text-muted-foreground hover:text-foreground cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
+          <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle" />
+          <Input type="text" aria-label="Search uniforms" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search uniforms..." className="pl-8" />
+          {query ? (
+            <button type="button" aria-label="Clear search" onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-fg-subtle hover:text-fg">
+              <X className="size-3.5" />
             </button>
-          )}
+          ) : null}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleResetAll}
-          className="h-7.5 px-2 text-[11px] font-mono gap-1 text-muted-foreground hover:text-foreground shrink-0"
-          title="Reset all uniforms to default parsed values"
-        >
-          <RotateCcw className="h-3 w-3" />
-          <span>Reset All</span>
+        <Button variant="ghost" size="sm" onClick={resetAll} title="Reset all uniforms to their defaults">
+          <RotateCcw />
+          Reset all
         </Button>
       </div>
 
-      {/* Match count badge */}
-      {searchQuery && (
-        <div className="text-[11px] text-muted-foreground font-mono px-0.5">
-          Found {filteredUniforms.length} matching {filteredUniforms.length === 1 ? "uniform" : "uniforms"}
+      {query ? (
+        <div className="num text-xs text-fg-subtle">
+          Found {filtered.length} matching {filtered.length === 1 ? "uniform" : "uniforms"}
         </div>
-      )}
+      ) : null}
 
-      {/* Uniform Controls List */}
-      {filteredUniforms.length === 0 ? (
-        <div className="py-6 text-center text-xs text-muted-foreground bg-muted/10 rounded-md border border-dashed border-border">
-          No uniforms matching &quot;{searchQuery}&quot;
-        </div>
+      {filtered.length === 0 ? (
+        <div className="rounded-md border border-dashed border-line py-6 text-center text-xs text-fg-subtle">No uniforms matching &quot;{query}&quot;</div>
       ) : (
-        <div className="flex flex-col gap-2">
-          {filteredUniforms.map((uniform) => {
-            const val = uniformValues[uniform.name]
-            const reset = () => handleResetUniform(uniform)
-
-            if (uniform.kind === "texture") {
-              return <TextureControl key={uniform.name} uniform={uniform} />
-            }
-
-            if (uniform.kind === "matrix" || uniform.type.startsWith("mat")) {
-              return (
-                <MatrixControl
-                  key={uniform.name}
-                  uniform={uniform}
-                  value={val}
-                  onChange={(v) => setUniformValue(uniform.name, v)}
-                  onReset={reset}
-                />
-              )
-            }
-
-            if (uniform.kind === "color") {
-              return (
-                <ColorControl
-                  key={uniform.name}
-                  uniform={uniform}
-                  value={val}
-                  onChange={(v) => setUniformValue(uniform.name, v)}
-                  onReset={reset}
-                />
-              )
-            }
-
-            if (uniform.kind === "vector") {
-              return (
-                <VectorControl
-                  key={uniform.name}
-                  uniform={uniform}
-                  value={val}
-                  onChange={(v) => setUniformValue(uniform.name, v)}
-                  onReset={reset}
-                />
-              )
-            }
-
-            return (
-              <ScalarControl
-                key={uniform.name}
-                uniform={uniform}
-                value={val}
-                onChange={(v) => setUniformValue(uniform.name, v)}
-                onReset={reset}
-                audioBinding={audioBindings[uniform.name]}
-                onAudioBindingChange={(binding) => setAudioBinding(uniform.name, binding)}
-              />
-            )
-          })}
+        <div className="flex flex-col gap-3">
+          {filtered.map((u) => (
+            <UniformRow key={u.name} uniform={u} graphUniforms={graphUniforms} />
+          ))}
         </div>
       )}
     </div>

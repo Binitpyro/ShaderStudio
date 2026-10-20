@@ -28,6 +28,48 @@ let reconnectTimeout: ReturnType<typeof setTimeout> | null = null
 let isConnecting = false
 let cachedToken: string | null = null
 
+/** Removes ?token= / ?bridge_token= from the address bar so the secret is not left in history or screenshots. */
+function stripTokenFromUrl() {
+  try {
+    const url = new URL(window.location.href)
+    url.searchParams.delete("token")
+    url.searchParams.delete("bridge_token")
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash)
+  } catch {
+    /* ignore */
+  }
+}
+
+// --- Auth state: close code 4401 means the token is missing/wrong; stop retrying and let the UI ask. ---
+let authFailed = false
+const authListeners = new Set<() => void>()
+function setAuthFailed(v: boolean) {
+  if (authFailed === v) return
+  authFailed = v
+  authListeners.forEach((l) => l())
+}
+export function subscribeBridgeAuth(listener: () => void) {
+  authListeners.add(listener)
+  return () => { authListeners.delete(listener) }
+}
+export function bridgeNeedsToken() {
+  return authFailed
+}
+/** Store a pasted token and reconnect immediately. */
+export function submitBridgeToken(token: string) {
+  const t = token.trim()
+  if (!t) return
+  reconnectAttempts = 0
+  setAuthFailed(false)
+  connect(t)
+}
+/** Retry with the stored token (e.g. after restarting the bridge). */
+export function retryBridge() {
+  reconnectAttempts = 0
+  setAuthFailed(false)
+  connect()
+}
+
 /**
  * Resolves current bridge authentication token from in-memory cache,
  * URL query parameters (?token=... or ?bridge_token=...), localStorage, or environment.
@@ -42,6 +84,8 @@ export function getBridgeToken(): string | null {
       const urlToken = params.get("token") || params.get("bridge_token")
       if (urlToken) {
         cachedToken = urlToken
+        setBridgeToken(urlToken)
+        stripTokenFromUrl()
         return cachedToken
       }
     } catch {
@@ -194,7 +238,7 @@ export async function executeShaderLocally(
   // 6. Capture frame if requested
   let screenshotBase64: string | null = null
   if (params.captureSnapshot !== false) {
-    screenshotBase64 = viewportCapture.captureBase64(params.snapshotOptions)
+    screenshotBase64 = await viewportCapture.captureFrameBase64(params.snapshotOptions)
   }
 
   const perf = viewportCapture.getPerfMetrics()
@@ -219,8 +263,8 @@ async function handleAgentExecute(msg: AgentExecuteMessage) {
   sendAgentFeedback(feedback)
 }
 
-function handleAgentCapture(msg: AgentCaptureMessage) {
-  const screenshotBase64 = viewportCapture.captureBase64(msg.snapshotOptions)
+async function handleAgentCapture(msg: AgentCaptureMessage) {
+  const screenshotBase64 = await viewportCapture.captureFrameBase64(msg.snapshotOptions)
   const perf = viewportCapture.getPerfMetrics()
   const currentError = useProjectStore.getState().lastCompileError
   const errors = parseDiagnosticErrors(currentError)
@@ -269,6 +313,7 @@ export function connect(tokenOverride?: string) {
     ws.onopen = () => {
       isConnecting = false
       reconnectAttempts = 0
+      setAuthFailed(false)
       useFileSystemStore.getState().setBridgeConnected(true)
       useFileSystemStore.getState().setSyncMode("bridge")
     }
@@ -287,7 +332,7 @@ export function connect(tokenOverride?: string) {
         } else if (isAgentExecuteMessage(data)) {
           await handleAgentExecute(data)
         } else if (isAgentCaptureMessage(data)) {
-          handleAgentCapture(data)
+          await handleAgentCapture(data)
         } else if (isAgentDiagnosticsMessage(data)) {
           handleAgentDiagnostics(data)
         }
@@ -303,6 +348,8 @@ export function connect(tokenOverride?: string) {
       if (currentMode === "bridge") useFileSystemStore.getState().setSyncMode("local")
       if (event && event.code === 4401) {
         console.warn("[BridgeClient] Unauthorized: Bridge rejected WebSocket connection with code 4401")
+        setAuthFailed(true)
+        return // no retry loop: the user must supply a token (SyncStatusBanner)
       }
       scheduleReconnect()
     }

@@ -1,7 +1,8 @@
 import { memo, useState, useEffect } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Sparkles } from "lucide-react"
+import { Button, Select } from "@/components/ui"
+import { NodeShell, NodeDetails, DetailRow, Port, Position, nodeRangeClass } from "./NodeShell"
 import type { FlowNodeProps } from "./types"
-import { cn } from "@/lib/utils"
 import type { PostProcessNodeData } from "@/core/graphCompiler"
 import type { PostProcessPassType } from "@/core/postProcessChain"
 import { getActiveAdapter } from "@/adapters/activeAdapter"
@@ -79,194 +80,76 @@ function PostProcessNodeComponent({ id, data, selected }: FlowNodeProps<PostProc
     document.dispatchEvent(event)
   }
 
-  return (
-    <div
-      className={cn(
-        "bg-card border rounded-md p-3 shadow-sm select-none text-foreground transition-all duration-150",
-        selected
-          ? "border-primary ring-2 ring-primary/30 min-w-[210px] max-w-[240px] shadow-lg"
-          : "border-border min-w-[190px] max-w-[220px]"
-      )}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold">Post Process</span>
-        <span className="text-[10px] text-muted-foreground uppercase font-mono">{passType}</span>
+  const range = (name: string, label: string, min: number, max: number, step: number, fallback: number, digits: number) => (
+    <div>
+      <div className="mb-1 flex justify-between text-2xs text-fg-muted">
+        <span>{label}</span>
+        <span className="num text-fg">{(params[name] ?? fallback).toFixed(digits)}</span>
       </div>
+      <input
+        type="range"
+        aria-label={label}
+        min={min}
+        max={max}
+        step={step}
+        value={params[name] ?? fallback}
+        onChange={(e) => handleSliderChange(name, parseFloat(e.target.value))}
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        className={nodeRangeClass}
+      />
+    </div>
+  )
 
-      <select
-        value={passType}
-        onChange={(e) => handleTypeChange(e.target.value as PostProcessPassType)}
-        className="w-full bg-background text-xs border border-border rounded px-2 py-1 mb-2 font-mono nodrag"
-      >
+  return (
+    <NodeShell
+      title="Post Process"
+      icon={Sparkles}
+      selected={selected}
+      meta={<span>{passType}</span>}
+      ports={
+        <>
+          <Port type="target" position={Position.Left} portType="surface" />
+          <Port type="source" position={Position.Right} portType="surface" />
+        </>
+      }
+    >
+      <Select aria-label="Pass type" value={passType} onChange={(e) => handleTypeChange(e.target.value as PostProcessPassType)} className="nodrag">
         {PASS_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
-      </select>
+      </Select>
 
-      {/* Contextual Sliders based on passType */}
       {passType === "vignette" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Intensity</span>
-              <span>{(params.intensity ?? 0.5).toFixed(2)}</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={params.intensity ?? 0.5}
-              onChange={(e) => handleSliderChange("intensity", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Radius</span>
-              <span>{(params.radius ?? 0.8).toFixed(2)}</span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="2.0"
-              step="0.05"
-              value={params.radius ?? 0.8}
-              onChange={(e) => handleSliderChange("radius", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
+        <div className="flex flex-col gap-2 nodrag">
+          {range("intensity", "Intensity", 0, 1, 0.05, 0.5, 2)}
+          {range("radius", "Radius", 0.1, 2.0, 0.05, 0.8, 2)}
         </div>
       )}
-
       {passType === "blur" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Blur Amount</span>
-              <span>{(params.blurAmount ?? 2.0).toFixed(1)}</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="10"
-              step="0.2"
-              value={params.blurAmount ?? 2.0}
-              onChange={(e) => handleSliderChange("blurAmount", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
-        </div>
+        <div className="flex flex-col gap-2 nodrag">{range("blurAmount", "Blur amount", 0, 10, 0.2, 2.0, 1)}</div>
       )}
-
       {passType === "chromatic_aberration" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Offset</span>
-              <span>{(params.aberrationOffset ?? 0.008).toFixed(3)}</span>
-            </div>
-            <input
-              type="range"
-              min="0.001"
-              max="0.05"
-              step="0.001"
-              value={params.aberrationOffset ?? 0.008}
-              onChange={(e) => handleSliderChange("aberrationOffset", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
-        </div>
+        <div className="flex flex-col gap-2 nodrag">{range("aberrationOffset", "Offset", 0.001, 0.05, 0.001, 0.008, 3)}</div>
       )}
-
       {passType === "bloom" && (
-        <div className="space-y-2 pt-1 border-t border-border/50 text-[11px] nodrag">
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Threshold</span>
-              <span>{(params.bloomThreshold ?? 0.7).toFixed(2)}</span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="1.0"
-              step="0.05"
-              value={params.bloomThreshold ?? 0.7}
-              onChange={(e) => handleSliderChange("bloomThreshold", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
-          <div>
-            <div className="flex justify-between text-muted-foreground mb-0.5">
-              <span>Intensity</span>
-              <span>{(params.bloomIntensity ?? 0.5).toFixed(2)}</span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="2.0"
-              step="0.05"
-              value={params.bloomIntensity ?? 0.5}
-              onChange={(e) => handleSliderChange("bloomIntensity", parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
+        <div className="flex flex-col gap-2 nodrag">
+          {range("bloomThreshold", "Threshold", 0.1, 1.0, 0.05, 0.7, 2)}
+          {range("bloomIntensity", "Intensity", 0.1, 2.0, 0.05, 0.5, 2)}
         </div>
       )}
-
       {passType === "custom" && (
-        <div className="pt-2 border-t border-border/50">
-          <button
-            type="button"
-            onClick={handleEditCustom}
-            className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 rounded px-2 py-1 text-xs font-medium transition-colors nodrag"
-          >
-            Edit Shader Code
-          </button>
-        </div>
+        <Button variant="secondary" size="sm" onClick={handleEditCustom} className="w-full nodrag">Edit shader code</Button>
       )}
 
       {selected && (
-        <div className="mt-2 pt-2 border-t border-border/60 flex flex-col gap-1.5 font-mono text-[10px]">
-          <div className="flex items-center justify-between text-muted-foreground">
-            <span className="font-semibold text-foreground text-[11px]">Pass Pipeline</span>
-            <span className="text-[9px] text-primary font-bold">STAGE ACTIVE</span>
-          </div>
-
-          <div className="p-1.5 rounded bg-muted/30 border border-border/50 flex flex-col gap-1">
-            <div className="flex justify-between text-muted-foreground">
-              <span>Node ID</span>
-              <span className="text-foreground truncate max-w-[120px]">{id}</span>
-            </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>Buffer Format</span>
-              <span className="text-foreground">RGBA16Float</span>
-            </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>Sampling</span>
-              <span className="text-foreground">Bilinear Filtering</span>
-            </div>
-          </div>
-        </div>
+        <NodeDetails title="Pass pipeline">
+          <DetailRow label="Node id" value={id} />
+          <DetailRow label="Buffer format" value="RGBA16Float" />
+          <DetailRow label="Sampling" value="Bilinear" />
+        </NodeDetails>
       )}
-
-      <Handle type="target" position={Position.Left} className="w-3 h-3 bg-secondary border-2 border-background" />
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-primary border-2 border-background" />
-    </div>
+    </NodeShell>
   )
 }
 

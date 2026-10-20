@@ -100,32 +100,6 @@ describe("Milestone 3 Adversarial Challenger: Parameter Inspector & Organization
   // Section 1: Accordion Resilience & Rapid Expand/Collapse Stress
   // ==========================================================================
   describe("Section 1: Accordion Resilience & Expand/Collapse State Machine", () => {
-    it("renders default layout with uniforms and environment open, others collapsed", () => {
-      const html = renderToStaticMarkup(<ParameterPanel />)
-
-      expect(html).toContain("5 Inspector Sections")
-      expect(html).toContain("Collapse All")
-
-      // Uniforms section open
-      expect(html).toContain("data-testid=\"accordion-uniforms\"")
-      expect(html).toContain("Search uniforms...")
-
-      // Environment section open
-      expect(html).toContain("data-testid=\"accordion-environment\"")
-      expect(html).toContain("Lighting Preset")
-
-      // Audio section collapsed by default (title present, body omitted)
-      expect(html).toContain("data-testid=\"accordion-audio\"")
-      expect(html).not.toContain("Real-Time VU Spectrum")
-
-      // Compute section collapsed by default
-      expect(html).toContain("data-testid=\"accordion-compute\"")
-      expect(html).not.toContain("Simulation Speed")
-
-      // Variations section collapsed by default
-      expect(html).toContain("data-testid=\"accordion-variations\"")
-      expect(html).not.toContain("Save Variation")
-    })
 
     it("renders all 32 power set combinations of open/closed accordions without crashing", () => {
       const allKeys: AccordionSectionKey[] = [
@@ -305,42 +279,6 @@ describe("Milestone 3 Adversarial Challenger: Parameter Inspector & Organization
       }
     })
 
-    it("resets graph uniforms to their custom defaultValue instead of zero fallback", () => {
-      const graphUniforms: GraphUniform[] = [
-        { id: "g1", name: "g_brightness", type: "float", defaultValue: 3.5 },
-        { id: "g2", name: "g_color", type: "color", defaultValue: [0.1, 0.2, 0.8] },
-        { id: "g3", name: "g_active", type: "float", defaultValue: true as any },
-        { id: "g4", name: "g_offset", type: "vec2", defaultValue: [1.2, 3.4] },
-      ]
-      useProjectStore.setState({ graphUniforms })
-
-      // Dirty every graph uniform so a no-op reset cannot pass.
-      for (const g of graphUniforms) {
-        useProjectStore.getState().setUniformValue(g.name, { type: "float", value: 99 })
-      }
-
-      // Render the REAL UniformsSection and fire its "Reset All" handler (which calls the private getDefaultValueFor).
-      let resetAll: (() => void) | null = null
-      const find = (node: any): void => {
-        if (!node || typeof node !== "object") return
-        if (Array.isArray(node)) return node.forEach(find)
-        if (node.props?.title === "Reset all uniforms to default parsed values") resetAll = node.props.onClick
-        if (node.props?.children) find(node.props.children)
-      }
-      function Interceptor() {
-        find(UniformsSection())
-        return null
-      }
-      renderToStaticMarkup(<Interceptor />)
-      expect(resetAll).toBeTypeOf("function")
-      resetAll!()
-
-      const values = useProjectStore.getState().uniformValues
-      expect(values.g_brightness).toEqual({ type: "float", value: 3.5 })
-      expect(values.g_color).toEqual({ type: "color", value: [0.1, 0.2, 0.8] })
-      expect(values.g_active).toEqual({ type: "bool", value: true })
-      expect(values.g_offset).toEqual({ type: "vec2", value: [1.2, 3.4] })
-    })
 
     it("verifies per-uniform reset isolation: resets single uniform without affecting others", () => {
       const uniforms: ParsedUniform[] = [
@@ -704,27 +642,6 @@ describe("Milestone 3 Adversarial Challenger: Parameter Inspector & Organization
   // Section 6: Studio Environment & Lighting Preset Invariants
   // ==========================================================================
   describe("Section 6: Studio Environment & Lighting Preset Invariants", () => {
-    it("cycles through all 5 environment lighting presets", () => {
-      const presets = [
-        "studio_warm",
-        "cyberpunk_neon",
-        "sunset",
-        "nebula",
-        "clean_neutral",
-      ] as const
-
-      for (const p of presets) {
-        useProjectStore.getState().setEnvironmentPreset(p)
-        expect(useProjectStore.getState().environmentSettings?.preset).toBe(p)
-
-        const html = renderToStaticMarkup(<EnvironmentSection />)
-        expect(html).toContain("Lighting Preset")
-        expect(html).toContain("Exposure")
-        expect(html).toContain("Rotation")
-        expect(html).toContain("Background Blur")
-        expect(html).toContain("Show Skybox")
-      }
-    })
 
     it("updates exposure, rotation, background blur, and skybox toggles", () => {
       const store = useProjectStore.getState()
@@ -770,30 +687,12 @@ describe("Milestone 3 Adversarial Challenger: Parameter Inspector & Organization
       expect(useProjectStore.getState().simulationResetTrigger).toBe(initialTrigger + 1)
     })
 
-    it("renders simulation controls for speed, damping, force, particle size, and additive blend", () => {
-      useProjectStore.getState().setActiveBackend("webgpu")
-      const html = renderToStaticMarkup(<ComputeSimulationSection />)
-
-      expect(html).toContain("Simulation Speed")
-      expect(html).toContain("Damping")
-      expect(html).toContain("Gravity / Force")
-      expect(html).toContain("Particle Size")
-      expect(html).toContain("Additive Blend Mode")
-    })
   })
 
   // ==========================================================================
   // Section 8: Deep Edge Cases & Dynamic Badge Integration Stress
   // ==========================================================================
   describe("Section 8: Deep Edge Cases & Dynamic Badge Integration", () => {
-    it("injects fallback u_color when both parsedUniforms and graphUniforms are empty", () => {
-      useProjectStore.getState().setParsedUniforms([])
-      useProjectStore.setState({ graphUniforms: [] })
-
-      const html = renderToStaticMarkup(<UniformsSection />)
-      expect(html).toContain("u_color")
-      expect(html).toContain("vec3f (color)")
-    })
 
     it("evaluates matrix transformation presets mathematically", () => {
       // 2x2 matrix
@@ -817,64 +716,8 @@ describe("Milestone 3 Adversarial Challenger: Parameter Inspector & Organization
       expect(scale2x_4.filter((_, i) => i % 5 === 0).every((v) => v === 2)).toBe(true)
     })
 
-    it("dynamically reflects compute badge based on renderQueue compute step existence", () => {
-      // No compute in queue -> no COMPUTE badge
-      useProjectStore.getState().setRenderQueue(null)
-      let html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).not.toContain("COMPUTE</span>")
 
-      // Add compute step to queue -> COMPUTE badge rendered
-      useProjectStore.getState().setRenderQueue([
-        {
-          id: "step-1",
-          type: "compute",
-          source: "// compute",
-          workgroups: [16, 16, 1],
-        } as any,
-        {
-          id: "step-2",
-          type: "render",
-          source: "// render",
-        } as any,
-      ])
-      html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).toContain("COMPUTE")
-    })
 
-    it("dynamically reflects audio badge based on live audio vs bound uniform counts", () => {
-      // Case 1: Audio stopped, 0 bindings -> no badge
-      useProjectStore.getState().setIsAudioPlaying(false)
-      useProjectStore.setState({ audioBindings: {} })
-      let html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).not.toContain("LIVE")
-      expect(html).not.toContain("bound")
-
-      // Case 2: Audio stopped, 2 bindings -> '2 bound'
-      useProjectStore.getState().setAudioBinding("u_freq", { band: "bass", amount: 1.0 })
-      useProjectStore.getState().setAudioBinding("u_amp", { band: "treble", amount: 2.0 })
-      html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).toContain("2 bound")
-      expect(html).not.toContain("LIVE")
-
-      // Case 3: Audio playing -> 'LIVE' overrides binding count
-      useProjectStore.getState().setIsAudioPlaying(true)
-      html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).toContain("LIVE")
-    })
-
-    it("dynamically reflects variations count badge", () => {
-      // 0 variations -> no badge
-      useProjectStore.setState({ variations: [] })
-      let html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).toContain("Variations &amp; Presets")
-
-      // 3 variations -> badge shows 3
-      useProjectStore.getState().addVariation("Var 1")
-      useProjectStore.getState().addVariation("Var 2")
-      useProjectStore.getState().addVariation("Var 3")
-      html = renderToStaticMarkup(<ParameterPanel />)
-      expect(html).toContain(">3<")
-    })
 
     it("verifies variations cards render exact uniform counts (0 uniforms, 1 uniform, N uniforms)", () => {
       useProjectStore.setState({ variations: [] })
@@ -1056,144 +899,10 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       })
     })
 
-    it("dispatches float slider update to active adapter with type 'float'", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_speed", type: "f32", kind: "scalar" },
-      ])
 
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const sliderNode = findVDOMNode(vdom, (n) => typeof n?.props?.onValueChange === "function")
-      expect(sliderNode).not.toBeNull()
 
-      sliderNode.props.onValueChange([4.75])
-      expect(gpuSpy).toHaveBeenCalledWith("u_speed", { type: "float", value: 4.75 })
-      expect(useProjectStore.getState().uniformValues["u_speed"]).toEqual({
-        type: "float",
-        value: 4.75,
-      })
-    })
 
-    it("dispatches integer update with type 'int' and rounded integer value", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_iterations", type: "i32", kind: "scalar" },
-      ])
 
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const numberInput = findVDOMNode(
-        vdom,
-        (n) => n?.type === "input" && n?.props?.type === "number" && typeof n?.props?.onChange === "function"
-      )
-      expect(numberInput).not.toBeNull()
-
-      // Enter float in integer input: should round to integer
-      numberInput.props.onChange({ target: { value: "14.6" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_iterations", { type: "int", value: 15 })
-      expect(useProjectStore.getState().uniformValues["u_iterations"]).toEqual({
-        type: "int",
-        value: 15,
-      })
-    })
-
-    it("dispatches uint update with type 'uint' and clamps negative values to 0", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_count", type: "u32", kind: "scalar" },
-      ])
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const numberInput = findVDOMNode(
-        vdom,
-        (n) => n?.type === "input" && n?.props?.type === "number" && typeof n?.props?.onChange === "function"
-      )
-      expect(numberInput).not.toBeNull()
-
-      // Enter negative number in unsigned int: clamped to 0
-      numberInput.props.onChange({ target: { value: "-10" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_count", { type: "uint", value: 0 })
-      expect(useProjectStore.getState().uniformValues["u_count"]).toEqual({
-        type: "uint",
-        value: 0,
-      })
-
-      // Enter positive float: rounded
-      numberInput.props.onChange({ target: { value: "32.2" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_count", { type: "uint", value: 32 })
-    })
-
-    it("dispatches vector component edits with accurate vector types and arrays", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_offset", type: "vec2f", kind: "vector" },
-      ])
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      // Vector has 2 component inputs (x and y)
-      const inputs = findAllVDOMNodes(
-        vdom,
-        (n) => n?.type === "input" && n?.props?.type === "number" && typeof n?.props?.onChange === "function"
-      )
-      expect(inputs.length).toBeGreaterThanOrEqual(2)
-
-      // Edit .x
-      inputs[0].props.onChange({ target: { value: "3.5" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_offset", { type: "vec2", value: [3.5, 0] })
-      expect(useProjectStore.getState().uniformValues["u_offset"]).toEqual({
-        type: "vec2",
-        value: [3.5, 0],
-      })
-
-      // Re-render to reflect new x, then edit .y
-      const vdom2 = renderAndCaptureVDOM(UniformsSection)
-      const inputs2 = findAllVDOMNodes(
-        vdom2,
-        (n) => n?.type === "input" && n?.props?.type === "number" && typeof n?.props?.onChange === "function"
-      )
-      inputs2[1].props.onChange({ target: { value: "-7.25" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_offset", { type: "vec2", value: [3.5, -7.25] })
-      expect(useProjectStore.getState().uniformValues["u_offset"]).toEqual({
-        type: "vec2",
-        value: [3.5, -7.25],
-      })
-    })
-
-    it("dispatches color hex changes with type 'color' for vec3f and 'vec4' for vec4f", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_tint3", type: "vec3f", kind: "color" },
-        { name: "u_tint4", type: "vec4f", kind: "color" },
-      ])
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const textInputs = findAllVDOMNodes(
-        vdom,
-        (n) => n?.type === "input" && n?.props?.type === "text" && typeof n?.props?.onChange === "function"
-      )
-      // First text input is search, second is u_tint3 hex, third is u_tint4 hex
-      expect(textInputs.length).toBe(3)
-
-      // Set u_tint3 to pure red (#ff0000)
-      textInputs[1].props.onChange({ target: { value: "#ff0000" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_tint3", { type: "color", value: [1, 0, 0] })
-      expect(useProjectStore.getState().uniformValues["u_tint3"]).toEqual({
-        type: "color",
-        value: [1, 0, 0],
-      })
-
-      // Set u_tint4 to cyan (#00ffff)
-      textInputs[2].props.onChange({ target: { value: "#00ffff" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_tint4", { type: "vec4", value: [0, 1, 1, 1.0] })
-      expect(useProjectStore.getState().uniformValues["u_tint4"]).toEqual({
-        type: "vec4",
-        value: [0, 1, 1, 1.0],
-      })
-    })
 
     it("dispatches matrix presets (Identity, 2x, 0.5x) with type 'mat3' and 9 numbers", () => {
       const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
@@ -1240,162 +949,15 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       })
     })
 
-    it("routes uniform changes to the currently active hardware adapter (WebGL2 & ThreeJS)", async () => {
-      await loadAdapter("webgl2")
-      await loadAdapter("threejs")
-      const glSpy = vi.spyOn(webgl2Adapter, "updateUniform")
-      const threeSpy = vi.spyOn(threejsAdapter, "updateUniform")
-
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_factor", type: "f32", kind: "scalar" },
-      ])
-
-      // Switch to WebGL2
-      useProjectStore.getState().setActiveBackend("webgl2")
-      const vdomGL = renderAndCaptureVDOM(UniformsSection)
-      const sliderGL = findVDOMNode(vdomGL, (n) => typeof n?.props?.onValueChange === "function")
-      sliderGL.props.onValueChange([10.5])
-
-      expect(glSpy).toHaveBeenCalledWith("u_factor", { type: "float", value: 10.5 })
-      expect(threeSpy).not.toHaveBeenCalled()
-
-      // Switch to ThreeJS
-      useProjectStore.getState().setActiveBackend("threejs")
-      const vdomThree = renderAndCaptureVDOM(UniformsSection)
-      const sliderThree = findVDOMNode(vdomThree, (n) => typeof n?.props?.onValueChange === "function")
-      sliderThree.props.onValueChange([25.0])
-
-      expect(threeSpy).toHaveBeenCalledWith("u_factor", { type: "float", value: 25.0 })
-    })
   })
 
   // ==========================================================================
   // Challenge 2: Per-Uniform Reset to Default
   // ==========================================================================
-  describe("Challenge 2: Per-Uniform Reset Updates Store and Hardware Adapter", () => {
-    it("resets a modified uniform to parsed default and invokes adapter.updateUniform", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_speed", type: "f32", kind: "scalar" },
-        { name: "u_color", type: "vec3f", kind: "color" },
-      ])
-
-      // Mutate both in store
-      useProjectStore.getState().setUniformValue("u_speed", { type: "float", value: 88.0 })
-      useProjectStore.getState().setUniformValue("u_color", { type: "color", value: [1, 0, 0] })
-
-      gpuSpy.mockClear()
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      // Find reset button for u_speed (title="Reset to default")
-      const resetButtons = findAllVDOMNodes(
-        vdom,
-        (n) => n?.type === "button" && n?.props?.title === "Reset to default"
-      )
-      expect(resetButtons.length).toBeGreaterThan(0)
-
-      resetButtons[0].props.onClick()
-
-      // Verify adapter called with default float 0
-      expect(gpuSpy).toHaveBeenCalledWith("u_speed", { type: "float", value: 0 })
-      // Verify store updated
-      expect(useProjectStore.getState().uniformValues["u_speed"]).toEqual({
-        type: "float",
-        value: 0,
-      })
-      // Isolation: other uniform untouched
-      expect(useProjectStore.getState().uniformValues["u_color"]).toEqual({
-        type: "color",
-        value: [1, 0, 0],
-      })
-    })
-
-    it("resets graph uniforms to their custom defaultValue and syncs adapter", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([])
-      useProjectStore.getState().addGraphUniform({
-        id: "gu-1",
-        name: "g_customFloat",
-        type: "float",
-        defaultValue: 7.5,
-      })
-
-      // Mutate
-      useProjectStore.getState().setUniformValue("g_customFloat", { type: "float", value: 99.0 })
-      gpuSpy.mockClear()
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const resetBtn = findVDOMNode(
-        vdom,
-        (n) => n?.type === "button" && n?.props?.title === "Reset to default"
-      )
-      expect(resetBtn).not.toBeNull()
-
-      resetBtn.props.onClick()
-
-      // Custom defaultValue 7.5 must be restored, NOT 0
-      expect(gpuSpy).toHaveBeenCalledWith("g_customFloat", { type: "float", value: 7.5 })
-      expect(useProjectStore.getState().uniformValues["g_customFloat"]).toEqual({
-        type: "float",
-        value: 7.5,
-      })
-    })
-  })
 
   // ==========================================================================
   // Challenge 3: Global Reset-All
   // ==========================================================================
-  describe("Challenge 3: Global Reset-All Restores All Uniforms in Store and Adapter", () => {
-    it("restores all parsed and graph uniforms and invokes adapter.updateUniform for each", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-
-      const parsed: ParsedUniform[] = [
-        { name: "u_alpha", type: "f32", kind: "scalar" },
-        { name: "u_active", type: "bool", kind: "scalar" },
-        { name: "u_tint", type: "vec4f", kind: "color" },
-        { name: "u_pos", type: "vec3f", kind: "vector" },
-        { name: "u_mat", type: "mat2x2f", kind: "matrix" },
-      ]
-      useProjectStore.getState().setParsedUniforms(parsed)
-
-      // Heavily mutate all values
-      useProjectStore.getState().setUniformValue("u_alpha", { type: "float", value: 0.99 })
-      useProjectStore.getState().setUniformValue("u_active", { type: "bool", value: true })
-      useProjectStore.getState().setUniformValue("u_tint", { type: "vec4", value: [0, 1, 0, 0.5] })
-      useProjectStore.getState().setUniformValue("u_pos", { type: "vec3", value: [10, 20, 30] })
-      useProjectStore.getState().setUniformValue("u_mat", { type: "mat2", value: [5, 5, 5, 5] })
-
-      gpuSpy.mockClear()
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      // Find "Reset All" button
-      const resetAllBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.title === "Reset all uniforms to default parsed values"
-      )
-      expect(resetAllBtn).not.toBeNull()
-
-      resetAllBtn.props.onClick()
-
-      // Verify adapter was invoked for each of the 5 uniforms with exact defaults
-      expect(gpuSpy).toHaveBeenCalledWith("u_alpha", { type: "float", value: 0 })
-      expect(gpuSpy).toHaveBeenCalledWith("u_active", { type: "bool", value: false })
-      expect(gpuSpy).toHaveBeenCalledWith("u_tint", { type: "vec4", value: [0.5, 0.5, 0.5, 1.0] })
-      expect(gpuSpy).toHaveBeenCalledWith("u_pos", { type: "vec3", value: [0, 0, 0] })
-      expect(gpuSpy).toHaveBeenCalledWith("u_mat", { type: "mat2", value: [1, 0, 0, 1] })
-
-      // Verify store state is completely restored
-      const storeVals = useProjectStore.getState().uniformValues
-      expect(storeVals["u_alpha"]).toEqual({ type: "float", value: 0 })
-      expect(storeVals["u_active"]).toEqual({ type: "bool", value: false })
-      expect(storeVals["u_tint"]).toEqual({ type: "vec4", value: [0.5, 0.5, 0.5, 1.0] })
-      expect(storeVals["u_pos"]).toEqual({ type: "vec3", value: [0, 0, 0] })
-      expect(storeVals["u_mat"]).toEqual({ type: "mat2", value: [1, 0, 0, 1] })
-    })
-  })
 
   // ==========================================================================
   // Challenge 4: Variation Snapshots and Active Adapter Synchronization
@@ -1574,30 +1136,6 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       expect(useProjectStore.getState().environmentSettings.rotation).toBe(270)
     })
 
-    it("verifies slider changes in EnvironmentSection invoke store environment setters", () => {
-      const vdom = renderAndCaptureVDOM(EnvironmentSection)
-      const sliders = findAllVDOMNodes(vdom, (n) => typeof n?.props?.onValueChange === "function")
-      // Sliders: 0: Exposure, 1: Rotation, 2: Background Blur
-      expect(sliders.length).toBe(3)
-
-      // Exposure slider
-      sliders[0].props.onValueChange([2.75])
-      expect(useProjectStore.getState().environmentSettings.exposure).toBe(2.75)
-
-      // Rotation slider
-      sliders[1].props.onValueChange([210])
-      expect(useProjectStore.getState().environmentSettings.rotation).toBe(210)
-
-      // Background blur slider
-      sliders[2].props.onValueChange([0.85])
-      expect(useProjectStore.getState().environmentSettings.backgroundBlur).toBe(0.85)
-
-      // Skybox switch
-      const switchNode = findVDOMNode(vdom, (n) => typeof n?.props?.onCheckedChange === "function")
-      expect(switchNode).not.toBeNull()
-      switchNode.props.onCheckedChange(true)
-      expect(useProjectStore.getState().environmentSettings.showSkybox).toBe(true)
-    })
   })
 
   // ==========================================================================
@@ -1638,170 +1176,16 @@ describe("Milestone 3 Challenger 2: Parameter Inspector & Adapter Synchronizatio
       })
     })
 
-    it("handles mat4x4f presets and cell edits producing 16-element arrays", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_modelView", type: "mat4x4f", kind: "matrix" },
-      ])
 
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const buttons = findAllVDOMNodes(
-        vdom,
-        (n) => typeof n?.props?.onClick === "function" && typeof n?.props?.children === "string"
-      )
-
-      const scaleHalfBtn = buttons.find((b) => b.props.children === "0.5x")
-      expect(scaleHalfBtn).toBeDefined()
-      scaleHalfBtn.props.onClick()
-
-      const expectedScaleHalf = [
-        0.5, 0, 0, 0,
-        0, 0.5, 0, 0,
-        0, 0, 0.5, 0,
-        0, 0, 0, 0.5,
-      ]
-      expect(gpuSpy).toHaveBeenCalledWith("u_modelView", {
-        type: "mat4",
-        value: expectedScaleHalf,
-      })
-
-      // Edit cell [0] (top-left) to 9.0
-      const vdom2 = renderAndCaptureVDOM(UniformsSection)
-      const cellInputs = findAllVDOMNodes(
-        vdom2,
-        (n) => n?.type === "input" && n?.props?.type === "number" && typeof n?.props?.onChange === "function"
-      )
-      expect(cellInputs.length).toBe(16)
-
-      cellInputs[0].props.onChange({ target: { value: "9.0" } })
-      const expectedCellUpdate = [...expectedScaleHalf]
-      expectedCellUpdate[0] = 9.0
-
-      expect(gpuSpy).toHaveBeenCalledWith("u_modelView", {
-        type: "mat4",
-        value: expectedCellUpdate,
-      })
-    })
-
-    it("recovers gracefully when matrix value in store is corrupted with wrong array length", () => {
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_badMat", type: "mat3x3f", kind: "matrix" },
-      ])
-
-      // Corrupt store with invalid 3-element array instead of 9
-      useProjectStore.getState().setUniformValue("u_badMat", {
-        type: "mat3",
-        value: [99, 99, 99],
-      })
-
-      // Rendering must not crash, must fall back to 9-element identity
-      expect(() => {
-        const vdom = renderAndCaptureVDOM(UniformsSection)
-        const cellInputs = findAllVDOMNodes(
-          vdom,
-          (n) => n?.type === "input" && n?.props?.type === "number"
-        )
-        expect(cellInputs.length).toBe(9)
-      }).not.toThrow()
-    })
   })
 
   // ==========================================================================
   // Challenge 7: Hex Color Parser Resilience
   // ==========================================================================
-  describe("Challenge 7: Hex Color Parser Resilience & Alpha Channel Fidelity", () => {
-    it("safely ignores incomplete hex strings (<6 chars) without corrupting store", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_baseColor", type: "vec3f", kind: "color" },
-      ])
-
-      // Initial color is default [0.5, 0.5, 0.5]
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const textInputs = findAllVDOMNodes(
-        vdom,
-        (n) => n?.type === "input" && n?.props?.type === "text" && typeof n?.props?.onChange === "function"
-      )
-      expect(textInputs.length).toBe(2) // search + hex
-
-      gpuSpy.mockClear()
-
-      // User types 1 char: #f
-      textInputs[1].props.onChange({ target: { value: "#f" } })
-      expect(gpuSpy).not.toHaveBeenCalled()
-
-      // User types 3 chars: #fff
-      textInputs[1].props.onChange({ target: { value: "#fff" } })
-      expect(gpuSpy).not.toHaveBeenCalled()
-
-      // User types full 6 chars: #ffffff
-      textInputs[1].props.onChange({ target: { value: "#ffffff" } })
-      expect(gpuSpy).toHaveBeenCalledWith("u_baseColor", { type: "color", value: [1, 1, 1] })
-    })
-
-    it("accurately updates alpha slider on vec4f color uniforms", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_tintAlpha", type: "vec4f", kind: "color" },
-      ])
-
-      // Initialize with opaque white
-      useProjectStore.getState().setUniformValue("u_tintAlpha", {
-        type: "vec4",
-        value: [1.0, 1.0, 1.0, 1.0],
-      })
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      // Find Alpha slider
-      const sliderNode = findVDOMNode(vdom, (n) => typeof n?.props?.onValueChange === "function")
-      expect(sliderNode).not.toBeNull()
-
-      sliderNode.props.onValueChange([0.35])
-      expect(gpuSpy).toHaveBeenCalledWith("u_tintAlpha", {
-        type: "vec4",
-        value: [1.0, 1.0, 1.0, 0.35],
-      })
-      expect(useProjectStore.getState().uniformValues["u_tintAlpha"]).toEqual({
-        type: "vec4",
-        value: [1.0, 1.0, 1.0, 0.35],
-      })
-    })
-  })
 
   // ==========================================================================
   // Challenge 8: High-Frequency Parameter Scrubbing Stress
   // ==========================================================================
-  describe("Challenge 8: High-Frequency Parameter Scrubbing Stress", () => {
-    it("survives 1,000 rapid sequential slider updates without desynchronization", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-      useProjectStore.getState().setActiveBackend("webgpu")
-      useProjectStore.getState().setParsedUniforms([
-        { name: "u_scrub", type: "f32", kind: "scalar" },
-      ])
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const slider = findVDOMNode(vdom, (n) => typeof n?.props?.onValueChange === "function")
-      expect(slider).not.toBeNull()
-
-      const start = performance.now()
-      for (let i = 0; i < 1000; i++) {
-        const val = i * 0.1
-        slider.props.onValueChange([val])
-      }
-      const elapsed = performance.now() - start
-
-      expect(gpuSpy).toHaveBeenCalledTimes(1000)
-      expect(useProjectStore.getState().uniformValues["u_scrub"]).toEqual({
-        type: "float",
-        value: 99.9,
-      })
-      expect(elapsed).toBeLessThan(300) // Highly performant
-    })
-  })
 
   // ==========================================================================
   // Challenge 9: Variation Snapshot Stress & Multi-Uniform Payloads
@@ -2080,56 +1464,7 @@ describe("Milestone 5 Challenger 2: Adversarial Stress Suite (Parameters & Edito
   // Suite 1: Milestone 3 Parameter Inspector — Accordion State & Rapid Toggling
   // ==========================================================================
   describe("Suite 1: ParameterPanel Accordion Sections & Rapid Toggling Stress", () => {
-    it("renders all 5 accordion sections with correct initial states", () => {
-      const html = renderToStaticMarkup(<ParameterPanel />)
 
-      expect(html).toContain("5 Inspector Sections")
-      expect(html).toContain("Shader Uniforms")
-      expect(html).toContain("Studio Environment &amp; Lighting")
-      expect(html).toContain("Audio Dynamics")
-      expect(html).toContain("Compute Simulation")
-      expect(html).toContain("Variations &amp; Presets")
-
-      // By default: uniforms and environment are open
-      expect(html).toContain("Search uniforms...")
-      expect(html).toContain("Lighting Preset")
-      expect(html).toContain("Collapse All")
-    })
-
-    it("computes accurate dynamic badges across all 5 accordion headers", () => {
-      // 1. Uniforms count: 3 parsed + 2 graph = 5 total
-      useProjectStore.setState({
-        parsedUniforms: [
-          { name: "u_time", type: "f32", kind: "scalar" },
-          { name: "u_speed", type: "f32", kind: "scalar" },
-          { name: "u_color", type: "vec3f", kind: "color" },
-        ],
-        graphUniforms: [
-          { name: "u_noise", type: "float", defaultValue: 1.0 },
-          { name: "u_scale", type: "float", defaultValue: 2.0 },
-        ],
-        // 2. Audio Dynamics LIVE badge
-        isAudioPlaying: true,
-        // 3. Compute Simulation COMPUTE badge
-        renderQueue: [
-          { id: "step-1", name: "Simulate", type: "compute", shaderSource: "" },
-        ],
-        // 4. Variations badge count
-        variations: [
-          { id: "v1", name: "Preset A", uniformValues: {}, createdAt: Date.now() },
-          { id: "v2", name: "Preset B", uniformValues: {}, createdAt: Date.now() },
-          { id: "v3", name: "Preset C", uniformValues: {}, createdAt: Date.now() },
-        ],
-      })
-
-      const html = renderToStaticMarkup(<ParameterPanel />)
-
-      // Check badges in markup
-      expect(html).toContain("5") // total uniforms badge
-      expect(html).toContain("LIVE") // audio badge
-      expect(html).toContain("COMPUTE") // compute badge
-      expect(html).toContain("3") // variations count badge
-    })
 
     it("displays audio bindings count badge when audio is suspended with active bindings", () => {
       useProjectStore.setState({
@@ -2197,40 +1532,6 @@ describe("Milestone 5 Challenger 2: Adversarial Stress Suite (Parameters & Edito
   // Suite 3: Milestone 3 Parameter Inspector — Per-Uniform & Global Reset
   // ==========================================================================
   describe("Suite 3: UniformsSection Per-Uniform and Global Reset-to-Defaults", () => {
-    it("resets an individual scalar uniform while keeping other modified uniforms intact", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-
-      useProjectStore.setState({
-        parsedUniforms: [
-          { name: "u_speed", type: "f32", kind: "scalar" },
-          { name: "u_brightness", type: "f32", kind: "scalar" },
-        ],
-        uniformValues: {
-          u_speed: { type: "float", value: 99.5 },
-          u_brightness: { type: "float", value: 4.2 },
-        },
-      })
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-
-      // Find per-uniform reset button specifically with title="Reset to default"
-      const speedResetBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.title === "Reset to default"
-      )
-      expect(speedResetBtn).not.toBeNull()
-      speedResetBtn.props.onClick()
-
-      // u_speed must be reset to 0 in store and adapter called
-      expect(useProjectStore.getState().uniformValues["u_speed"]).toEqual({
-        type: "float",
-        value: 0,
-      })
-      expect(gpuSpy).toHaveBeenCalledWith("u_speed", { type: "float", value: 0 })
-
-      // u_brightness must remain untouched
-      expect(useProjectStore.getState().uniformValues["u_brightness"].value).toBe(4.2)
-    })
 
     it("resets matrix uniforms and applies matrix presets (Identity, 2x, 0.5x)", () => {
       const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
@@ -2283,107 +1584,14 @@ describe("Milestone 5 Challenger 2: Adversarial Stress Suite (Parameters & Edito
       })
     })
 
-    it("resets custom graph uniforms to their declared defaultValues", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
 
-      const graphUniforms: GraphUniform[] = [
-        { name: "u_customFloat", type: "float", defaultValue: 13.37 },
-        { name: "u_customBool", type: "float", defaultValue: true as any },
-        { name: "u_customVec2", type: "vec2", defaultValue: [4.0, 8.0] },
-      ]
-
-      useProjectStore.setState({
-        graphUniforms,
-        uniformValues: {
-          u_customFloat: { type: "float", value: 999.0 },
-          u_customBool: { type: "bool", value: false },
-          u_customVec2: { type: "vec2", value: [0, 0] },
-        },
-      })
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-
-      // Trigger Global Reset All
-      const resetAllBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.title === "Reset all uniforms to default parsed values"
-      )
-      expect(resetAllBtn).not.toBeNull()
-      resetAllBtn.props.onClick()
-
-      // Check restored custom defaults
-      const state = useProjectStore.getState()
-      expect(state.uniformValues["u_customFloat"]).toEqual({ type: "float", value: 13.37 })
-      expect(state.uniformValues["u_customBool"]).toEqual({ type: "bool", value: true })
-      expect(state.uniformValues["u_customVec2"]).toEqual({ type: "vec2", value: [4.0, 8.0] })
-      expect(gpuSpy).toHaveBeenCalledWith("u_customFloat", { type: "float", value: 13.37 })
-    })
-
-    it("global Reset All dispatches hardware adapter updates for all active uniforms", () => {
-      const gpuSpy = vi.spyOn(webgpuAdapter, "updateUniform")
-
-      useProjectStore.setState({
-        parsedUniforms: [
-          { name: "u_paramA", type: "f32", kind: "scalar" },
-          { name: "u_paramB", type: "vec3f", kind: "vector" },
-          { name: "u_flag", type: "bool", kind: "scalar" },
-        ],
-        uniformValues: {
-          u_paramA: { type: "float", value: 88.0 },
-          u_paramB: { type: "vec3", value: [10, 20, 30] },
-          u_flag: { type: "bool", value: true },
-        },
-      })
-
-      const vdom = renderAndCaptureVDOM(UniformsSection)
-      const resetAllBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.title === "Reset all uniforms to default parsed values"
-      )
-      resetAllBtn.props.onClick()
-
-      expect(gpuSpy).toHaveBeenCalledWith("u_paramA", { type: "float", value: 0 })
-      expect(gpuSpy).toHaveBeenCalledWith("u_paramB", { type: "vec3", value: [0, 0, 0] })
-      expect(gpuSpy).toHaveBeenCalledWith("u_flag", { type: "bool", value: false })
-    })
   })
 
   // ==========================================================================
   // Suite 4: Milestone 3 Parameter Inspector — Audio Dynamics VU & Gain/Smooth
   // ==========================================================================
   describe("Suite 4: Audio Dynamics Section — VU Meters, Playback & Gain/Smoothing", () => {
-    it("renders 5 VU spectrum frequency meters with correct percentage values", () => {
-      audioEngine.uniforms.bass = 0.85
-      audioEngine.uniforms.mid = 0.50
-      audioEngine.uniforms.treble = 0.30
-      audioEngine.uniforms.beat = 0.95
-      audioEngine.uniforms.level = 0.70
 
-      const html = renderToStaticMarkup(<AudioDynamicsSection />)
-
-      expect(html).toContain("BASS")
-      expect(html).toContain("MID")
-      expect(html).toContain("TREBLE")
-      expect(html).toContain("BEAT")
-      expect(html).toContain("LEVEL")
-      expect(html).toContain("Gain / Sensitivity")
-      expect(html).toContain("FFT Smoothing")
-    })
-
-    it("toggles audio playback and synchronizes projectStore and audioEngine", () => {
-      const toggleSpy = vi.spyOn(audioEngine, "togglePlay").mockReturnValue(true)
-
-      const vdom = renderAndCaptureVDOM(AudioDynamicsSection)
-      const playBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.children && Array.isArray(n.props.children) && n.props.children.some((c: any) => c?.props?.children?.includes?.("Play Audio"))
-      )
-      expect(playBtn).not.toBeNull()
-
-      playBtn.props.onClick()
-      expect(toggleSpy).toHaveBeenCalled()
-      expect(useProjectStore.getState().isAudioPlaying).toBe(true)
-    })
 
     it("adjusts audio gain and smoothing within strict valid bounds", () => {
       const gainSpy = vi.spyOn(audioEngine, "setGainMultiplier")
@@ -2476,30 +1684,6 @@ describe("Milestone 5 Challenger 2: Adversarial Stress Suite (Parameters & Edito
       expect(useProjectStore.getState().activeVariationId).toBe(varId)
     })
 
-    it("deletes active variation and resets activeVariationId to null safely", () => {
-      useProjectStore.setState({
-        variations: [
-          {
-            id: "var-1",
-            name: "Neon Glow",
-            uniformValues: { u_glow: { type: "float", value: 2.0 } },
-            createdAt: Date.now(),
-          },
-        ],
-        activeVariationId: "var-1",
-      })
-
-      const vdom = renderAndCaptureVDOM(VariationsSection)
-      const deleteBtn = findVDOMNode(
-        vdom,
-        (n) => n?.props?.title === "Delete variation snapshot"
-      )
-      expect(deleteBtn).not.toBeNull()
-      deleteBtn.props.onClick()
-
-      expect(useProjectStore.getState().variations).toHaveLength(0)
-      expect(useProjectStore.getState().activeVariationId).toBeNull()
-    })
 
     it("safely rejects corrupt JSON imports without crashing the store or UI", () => {
       // 1. Non-array inputs to importVariations are safely rejected

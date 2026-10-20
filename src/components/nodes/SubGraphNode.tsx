@@ -1,7 +1,7 @@
 import { memo, useState } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Badge, IconButton } from "@/components/ui"
+import { NodeShell, Port, Position } from "./NodeShell"
 import type { FlowNodeProps } from "./types"
-import { cn } from "@/lib/utils"
 import type { SubGraphNodeData } from "@/core/subGraphLibrary"
 import { subGraphLibrary } from "@/core/subGraphLibrary"
 import { Layers, ChevronDown, ChevronRight } from "lucide-react"
@@ -16,93 +16,56 @@ function SubGraphNodeComponent({ data, selected }: FlowNodeProps<SubGraphNodeDat
   const outputs = def?.outputs || []
 
   return (
-    <div
-      className={cn(
-        "bg-card border rounded-lg p-3 shadow-md select-none text-foreground transition-all duration-150 min-w-[200px] max-w-[280px]",
-        selected
-          ? "border-primary ring-2 ring-primary/40 shadow-xl"
-          : "border-border hover:border-border/80"
-      )}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-border/60">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Layers className="h-3.5 w-3.5 text-primary shrink-0" />
-          <span className="text-xs font-bold text-foreground truncate" title={displayName}>
-            {displayName}
-          </span>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">
-            {category}
-          </span>
-          <button
-            type="button"
-            onClick={() => setCollapsed(!collapsed)}
-            className="text-muted-foreground hover:text-foreground p-0.5 rounded hover:bg-muted"
+    <NodeShell
+      title={displayName}
+      icon={Layers}
+      selected={selected}
+      meta={
+        <span className="flex items-center gap-1">
+          <Badge tone="brand">{category}</Badge>
+          <IconButton
+            label={collapsed ? "Expand ports" : "Collapse ports"}
+            tooltip={false}
             title={collapsed ? "Expand ports" : "Collapse ports"}
+            onClick={() => setCollapsed(!collapsed)}
+            className="size-6 min-w-6 nodrag"
           >
-            {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-          </button>
-        </div>
-      </div>
+            {collapsed ? <ChevronRight /> : <ChevronDown />}
+          </IconButton>
+        </span>
+      }
+    >
+      {def?.description && !collapsed && <p className="text-2xs leading-relaxed text-fg-muted">{def.description}</p>}
 
-      {/* Description */}
-      {def?.description && !collapsed && (
-        <p className="text-[10px] text-muted-foreground mb-2 leading-relaxed italic">
-          {def.description}
-        </p>
-      )}
-
-      {/* Ports List */}
-      <div className="flex justify-between gap-4 text-[10px] font-mono">
-        {/* Input Ports */}
-        <div className="flex flex-col gap-2 relative">
+      <div className="flex justify-between gap-4 text-xs">
+        <div className="relative flex flex-col gap-1.5">
           {inputs.map((port) => (
-            <div key={port.id} className="relative flex items-center gap-1.5 h-5">
-              <Handle
-                type="target"
-                position={Position.Left}
-                id={port.id}
-                className="!w-2.5 !h-2.5 !bg-primary !border-2 !border-background"
-                style={{ left: "-18px" }}
-              />
-              <span className="text-foreground/90 font-medium">{port.name}</span>
-              <span className="text-[8px] text-muted-foreground/70 lowercase">({port.type})</span>
+            <div key={port.id} className="relative flex h-5 items-center gap-1.5">
+              <Port type="target" position={Position.Left} id={port.id} portType="value" style={{ left: "-18px" }} />
+              <span className="font-medium">{port.name}</span>
+              <span className="text-2xs lowercase text-fg-subtle">({port.type})</span>
             </div>
           ))}
-          {inputs.length === 0 && (
-            <span className="text-[9px] text-muted-foreground italic">No inputs</span>
-          )}
+          {inputs.length === 0 && <span className="text-2xs text-fg-subtle">No inputs</span>}
         </div>
 
-        {/* Output Ports */}
-        <div className="flex flex-col gap-2 items-end relative">
+        <div className="relative flex flex-col items-end gap-1.5">
           {outputs.map((port) => (
-            <div key={port.id} className="relative flex items-center gap-1.5 h-5">
-              <span className="text-[8px] text-muted-foreground/70 lowercase">({port.type})</span>
-              <span className="text-foreground/90 font-medium">{port.name}</span>
-              <Handle
-                type="source"
-                position={Position.Right}
-                id={port.id}
-                className="!w-2.5 !h-2.5 !bg-emerald-400 !border-2 !border-background"
-                style={{ right: "-18px" }}
-              />
+            <div key={port.id} className="relative flex h-5 items-center gap-1.5">
+              <span className="text-2xs lowercase text-fg-subtle">({port.type})</span>
+              <span className="font-medium">{port.name}</span>
+              <Port type="source" position={Position.Right} id={port.id} portType="value" style={{ right: "-18px" }} />
             </div>
           ))}
-          {outputs.length === 0 && (
-            <span className="text-[9px] text-muted-foreground italic">No outputs</span>
-          )}
+          {outputs.length === 0 && <span className="text-2xs text-fg-subtle">No outputs</span>}
         </div>
       </div>
 
-      {/* Footer Info */}
-      <div className="mt-2.5 pt-1.5 border-t border-border/40 flex items-center justify-between text-[9px] text-muted-foreground font-mono">
-        <span>{def?.nodes.length ?? 0} internal nodes</span>
-        <span className="text-primary/80">{def?.isBuiltin ? "built-in" : "custom"}</span>
+      <div className="flex items-center justify-between border-t border-line pt-2 text-2xs text-fg-muted">
+        <span><span className="num">{def?.nodes.length ?? 0}</span> internal nodes</span>
+        <span>{def?.isBuiltin ? "built-in" : "custom"}</span>
       </div>
-    </div>
+    </NodeShell>
   )
 }
 

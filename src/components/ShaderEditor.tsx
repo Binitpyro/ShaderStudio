@@ -5,10 +5,11 @@ import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { useLayoutStore } from "@/stores/layoutStore"
 import { debounce, type Debounced } from "@/utils/throttle"
 import { renderCoordinator } from "@/core/renderCoordinator"
-import { Button } from "@/components/ui/button"
+import { Button, IconButton, Tabs, TabsList, TabsTrigger } from "@/components/ui"
 import { LazyMonaco as Editor } from "./LazyMonaco"
 import { SyncStatusBanner } from "./SyncStatusBanner"
 import { cn } from "@/lib/utils"
+import { useTheme } from "@/components/theme-provider"
 import { getLoadedWebgpuAdapter } from "@/adapters/activeAdapter"
 import { getComputePresetCode } from "@/core/computePresets"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
@@ -63,6 +64,7 @@ export function doesTabMatch(
 }
 
 export function ShaderEditor() {
+  const { resolvedTheme } = useTheme()
   const shaderSource = useProjectStore((state) => state.shaderSource)
   const setShaderSource = useProjectStore((state) => state.setShaderSource)
   const vertexShaderSource = useProjectStore((state) => state.vertexShaderSource)
@@ -163,10 +165,6 @@ export function ShaderEditor() {
   // Tab evaluation
   const isComputeTab = activeEditorTab === "compute"
   const isVertexTab = activeEditorTab === "vertex"
-  const isFragmentTab =
-    activeEditorTab === "fragment" || (activeEditorTab === "render" && activeBackend !== "webgpu")
-  const isRenderTab =
-    activeEditorTab === "render" || (activeEditorTab === "fragment" && activeBackend === "webgpu")
 
   // Determine language based on backend / tab
   const language = isComputeTab || activeBackend === "webgpu" ? "rust" : "glsl"
@@ -405,136 +403,46 @@ export function ShaderEditor() {
   }, [setComputeShaderSource, setActiveEditorTab])
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      {/* Top Editor Action Bar & Multi-Tabs (F-EDIT-01, F-EDIT-03, F-EDIT-04, F-EDIT-05) */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3 bg-card/60">
-        <div className="flex items-center gap-3">
-          {/* Multi-Tab Switcher (F-EDIT-01) */}
-          <div className="flex items-center gap-1 bg-muted/60 p-0.5 rounded border border-border">
-            {activeBackend === "webgpu" ? (
-              <>
-                <button
-                  type="button"
-                  data-testid="tab-render"
-                  onClick={() => setActiveEditorTab("render")}
-                  className={cn(
-                    "px-2 py-0.5 text-xs rounded transition-colors cursor-pointer",
-                    isRenderTab
-                      ? "bg-background text-foreground shadow-xs font-medium"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  Render Shader
-                </button>
-                <button
-                  type="button"
-                  data-testid="tab-compute"
-                  onClick={() => setActiveEditorTab("compute")}
-                  className={cn(
-                    "px-2 py-0.5 text-xs rounded transition-colors cursor-pointer flex items-center gap-1.5",
-                    isComputeTab
-                      ? "bg-background text-foreground shadow-xs font-medium"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                  Compute Shader (WGSL)
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  data-testid="tab-fragment"
-                  onClick={() => setActiveEditorTab("fragment")}
-                  className={cn(
-                    "px-2 py-0.5 text-xs rounded transition-colors cursor-pointer",
-                    isFragmentTab
-                      ? "bg-background text-foreground shadow-xs font-medium"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  Fragment Shader
-                </button>
-                <button
-                  type="button"
-                  data-testid="tab-vertex"
-                  onClick={() => setActiveEditorTab("vertex")}
-                  className={cn(
-                    "px-2 py-0.5 text-xs rounded transition-colors cursor-pointer",
-                    isVertexTab
-                      ? "bg-background text-foreground shadow-xs font-medium"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  Vertex Shader
-                </button>
-              </>
-            )}
-          </div>
-
+    <div className="flex h-full flex-col overflow-hidden bg-canvas">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-line bg-panel px-2">
+        <div className="flex min-w-0 items-center gap-3">
+          {activeBackend === "webgpu" ? (
+            <Tabs value={isComputeTab ? "compute" : "render"} onValueChange={(v) => setActiveEditorTab(v as EditorTab)}>
+              <TabsList className="h-9 border-b-0 px-0">
+                <TabsTrigger value="render" data-testid="tab-render" onClick={() => setActiveEditorTab("render")}>Render Shader</TabsTrigger>
+                <TabsTrigger value="compute" data-testid="tab-compute" onClick={() => setActiveEditorTab("compute")}>Compute Shader (WGSL)</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          ) : (
+            <Tabs value={isVertexTab ? "vertex" : "fragment"} onValueChange={(v) => setActiveEditorTab(v as EditorTab)}>
+              <TabsList className="h-9 border-b-0 px-0">
+                <TabsTrigger value="fragment" data-testid="tab-fragment" onClick={() => setActiveEditorTab("fragment")}>Fragment Shader</TabsTrigger>
+                <TabsTrigger value="vertex" data-testid="tab-vertex" onClick={() => setActiveEditorTab("vertex")}>Vertex Shader</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
           <SyncStatusBanner />
         </div>
 
-        {/* Top Editor Action Bar Buttons (F-EDIT-03, F-EDIT-04, F-EDIT-05) */}
-        <div className="flex items-center gap-1">
-          {/* Recompile Button (F-EDIT-05) */}
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="recompile-btn"
-            onClick={() => triggerRecompile()}
-            title="Recompile (Ctrl+Enter)"
-            aria-label="Recompile"
-            className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/60 cursor-pointer"
-          >
-            <Play className="h-3 w-3 fill-current text-primary" />
-            <span className="hidden sm:inline">Run</span>
-          </Button>
-
-          {/* Format Code Button (F-EDIT-03) */}
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="format-code-btn"
-            onClick={handleFormatCode}
-            title="Format Code"
-            aria-label="Format Code"
-            className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/60 cursor-pointer"
-          >
-            <AlignLeft className="h-3 w-3" />
-            <span className="hidden sm:inline">Format</span>
-          </Button>
-
-          {/* Minimap Toggle Button (F-EDIT-04) */}
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="toggle-minimap-btn"
-            onClick={toggleEditorMinimap}
-            title="Toggle Minimap"
-            aria-label="Toggle Minimap"
-            className={cn(
-              "h-6 gap-1 px-2 text-xs transition-colors cursor-pointer",
-              editorMinimap
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/60"
-            )}
-          >
-            <Map className="h-3 w-3" />
-            <span className="hidden sm:inline">Minimap</span>
-          </Button>
-
+        <div className="flex shrink-0 items-center gap-0.5">
           {isReadOnly && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleDetach}
-              className="h-6 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
-            >
-              Detach & edit
-            </Button>
+            <Button variant="outline" size="sm" onClick={handleDetach} className="mr-1">Detach & edit</Button>
           )}
+          <IconButton label="Recompile (Ctrl+Enter)" data-testid="recompile-btn" onClick={() => triggerRecompile()}>
+            <Play className="fill-current text-brand-text" />
+          </IconButton>
+          <IconButton label="Format code" data-testid="format-code-btn" onClick={handleFormatCode}>
+            <AlignLeft />
+          </IconButton>
+          <IconButton
+            label={editorMinimap ? "Hide minimap" : "Show minimap"}
+            data-testid="toggle-minimap-btn"
+            aria-pressed={editorMinimap}
+            onClick={toggleEditorMinimap}
+            className={cn(editorMinimap && "bg-active text-fg")}
+          >
+            <Map />
+          </IconButton>
         </div>
       </div>
 
@@ -547,7 +455,7 @@ export function ShaderEditor() {
           value={activeValue}
           onChange={handleChange}
           onMount={handleEditorMount}
-          theme="vs-dark"
+          theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
           options={{
             readOnly: isReadOnly,
             minimap: { enabled: editorMinimap },

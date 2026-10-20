@@ -3,6 +3,7 @@ import "../setup/rtl"
 import { describe, it, expect, vi } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
 import { Button, IconButton, Segmented, NumericField, Tabs, TabsList, TabsTrigger, TabsContent, Section, Select, Tooltip } from "@/components/ui"
+import { ColorField, parseHex } from "@/components/ui/color-field"
 import { ThemeProvider, useTheme } from "@/components/theme-provider"
 
 describe("ui primitives", () => {
@@ -93,5 +94,40 @@ describe("ThemeProvider purity", () => {
     render(<ThemeProvider storageKey="pure-key"><span /></ThemeProvider>)
     expect(document.documentElement.classList.contains("light")).toBe(true)
     expect(document.documentElement.classList.contains("dark")).toBe(false)
+  })
+})
+
+describe("ColorField hex input", () => {
+  it("parseHex accepts #rgb/#rrggbb and rejects junk", () => {
+    expect(parseHex("#F0a")).toBe("#ff00aa")
+    expect(parseHex("00FF80")).toBe("#00ff80")
+    expect(parseHex("#12")).toBeNull()
+    expect(parseHex("#gggggg")).toBeNull()
+  })
+
+  it("commits valid hex on Enter and on blur, reverts invalid", () => {
+    const onChange = vi.fn()
+    render(<ColorField hexInput aria-label="Tint" value="#112233" onChange={onChange} />)
+    const hex = screen.getByLabelText("Tint hex") as HTMLInputElement
+    fireEvent.change(hex, { target: { value: "#f0a" } })
+    fireEvent.keyDown(hex, { key: "Enter" })
+    expect(onChange).toHaveBeenLastCalledWith("#ff00aa")
+    fireEvent.change(hex, { target: { value: "445566" } })
+    fireEvent.blur(hex)
+    expect(onChange).toHaveBeenLastCalledWith("#445566")
+    onChange.mockClear()
+    fireEvent.change(hex, { target: { value: "nope" } })
+    fireEvent.blur(hex)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(hex.value).toBe("#112233")
+    fireEvent.change(hex, { target: { value: "#abcdef" } })
+    fireEvent.keyDown(hex, { key: "Escape" })
+    expect(hex.value).toBe("#112233")
+  })
+
+  it("without hexInput it renders a read-only readout", () => {
+    render(<ColorField value="#112233" onChange={() => {}} />)
+    expect(screen.queryByLabelText("Color hex")).toBeNull()
+    expect(screen.getByText("#112233")).toBeTruthy()
   })
 })

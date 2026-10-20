@@ -1,208 +1,249 @@
-import { useState } from "react"
-import { useAISettingsStore } from "@/core/ai/aiSettingsStore"
+import { useEffect, useRef, useState } from "react"
 import { useShallow } from "zustand/react/shallow"
+import { useAISettingsStore } from "@/core/ai/aiSettingsStore"
 import { useCopilotSessionStore } from "@/stores/copilotSessionStore"
-import type { AIProvider } from "@/core/ai/types"
-import { Button } from "@/components/ui/button"
-import { Switch } from "@/components/ui/switch"
-import { Label } from "@/components/ui/label"
+import { useProjectStore } from "@/stores/projectStore"
 import { useLayoutStore } from "@/stores/layoutStore"
-import {
-  Sparkles,
-  Settings2,
-  CheckCircle2,
-  AlertTriangle,
-  RefreshCw,
-  Terminal,
-  PanelLeftClose,
-} from "lucide-react"
+import type { AIProvider } from "@/core/ai/types"
+import { Badge, Button, Input, Label, Select, Switch, Textarea } from "@/components/ui"
+import { CheckCircle2, AlertTriangle, RefreshCw, Settings2, Sparkles } from "lucide-react"
+import { TipIconButton } from "@/components/layout/ShortcutTip"
+import { SidebarFrame } from "./SidebarFrame"
 
 const PRESET_PROMPTS = [
-  { label: "🔮 Iridescent Bubble", prompt: "An iridescent soap bubble with rainbow Fresnel rim lighting and subtle wave distortion" },
-  { label: "🌊 Liquid Gold", prompt: "Liquid molten gold with metallic sheen, reflective ripples and animated specular highlights" },
-  { label: "⚡ Neon Shield", prompt: "A glowing cyberpunk hexagonal forcefield with pulsating energy waves and edge bloom" },
-  { label: "🪐 Cosmic Nebula", prompt: "A deep space volumetric nebula with swirling purple and cyan dust clouds and twinkling stars" },
-  { label: "📺 Retro CRT", prompt: "A retro 80s arcade monitor effect with scanlines, chromatic aberration and subtle barrel curvature" },
+  { label: "Iridescent bubble", prompt: "An iridescent soap bubble with rainbow Fresnel rim lighting and subtle wave distortion" },
+  { label: "Liquid gold", prompt: "Liquid molten gold with metallic sheen, reflective ripples and animated specular highlights" },
+  { label: "Neon shield", prompt: "A glowing cyberpunk hexagonal forcefield with pulsating energy waves and edge bloom" },
+  { label: "Cosmic nebula", prompt: "A deep space volumetric nebula with swirling purple and cyan dust clouds and twinkling stars" },
+  { label: "Retro CRT", prompt: "A retro 80s arcade monitor effect with scanlines, chromatic aberration and subtle barrel curvature" },
 ]
 
-export function AICopilotSidebar() {
-  const activeProvider = useAISettingsStore((s) => s.activeProvider)
-  const setActiveProvider = useAISettingsStore((s) => s.setActiveProvider)
-  const visualCritique = useAISettingsStore((s) => s.visualCritique)
-  const setVisualCritique = useAISettingsStore((s) => s.setVisualCritique)
+const PROVIDERS: { value: AIProvider; label: string }[] = [
+  { value: "gemini", label: "Google Gemini (cloud)" },
+  { value: "anthropic", label: "Anthropic Claude (cloud)" },
+  { value: "openai", label: "OpenAI GPT-4o (cloud)" },
+  { value: "ollama", label: "Ollama (local)" },
+  { value: "lmstudio", label: "LM Studio (local)" },
+  { value: "custom", label: "Custom OpenAI-compatible endpoint" },
+]
 
+const KEY_PLACEHOLDER = { gemini: "AIzaSy...", anthropic: "sk-ant-...", openai: "sk-..." } as const
+const ENDPOINT_PLACEHOLDER = { ollama: "http://localhost:11434", lmstudio: "http://localhost:1234", custom: "http://localhost:8080/v1" } as const
+const MODEL_PLACEHOLDER = { ollama: "qwen2.5-coder:7b", lmstudio: "local-model", custom: "model-name" } as const
+
+type KeyProvider = keyof typeof KEY_PLACEHOLDER
+type EndpointProvider = keyof typeof ENDPOINT_PLACEHOLDER
+
+/** The one Copilot surface (sidebar tab). Session state lives in copilotSessionStore so runs survive tab switches. */
+export function AICopilotSidebar() {
+  const activeBackend = useProjectStore((state) => state.activeBackend)
+  const focusNonce = useLayoutStore((s) => s.copilotFocusNonce)
+  const ai = useAISettingsStore(
+    useShallow((s) => ({
+      activeProvider: s.activeProvider,
+      apiKeys: s.apiKeys,
+      endpoints: s.endpoints,
+      models: s.models,
+      visualCritique: s.visualCritique,
+      setActiveProvider: s.setActiveProvider,
+      setApiKey: s.setApiKey,
+      setEndpoint: s.setEndpoint,
+      setModel: s.setModel,
+      setVisualCritique: s.setVisualCritique,
+    })),
+  )
   const { prompt, setPrompt, isRunning, currentSession, run: handleGenerate } = useCopilotSessionStore(
-    useShallow((s) => ({ prompt: s.prompt, setPrompt: s.setPrompt, isRunning: s.isRunning, currentSession: s.currentSession, run: s.run }))
+    useShallow((s) => ({ prompt: s.prompt, setPrompt: s.setPrompt, isRunning: s.isRunning, currentSession: s.currentSession, run: s.run })),
   )
   const [showSettings, setShowSettings] = useState(false)
+  const [testStatus, setTestStatus] = useState<string | null>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
 
-  const setLeftSidebarOpen = useLayoutStore((state) => state.setLeftSidebarOpen)
+  // The top-bar Copilot button bumps the nonce: focus the prompt whenever it changes.
+  useEffect(() => {
+    if (focusNonce > 0) promptRef.current?.focus()
+  }, [focusNonce])
+
+  const handleTestConnection = async () => {
+    setTestStatus("Testing...")
+    try {
+      const provider = ai.activeProvider
+      if (provider === "ollama") {
+        const res = await fetch(`${ai.endpoints.ollama.replace(/\/+$/, "")}/api/tags`)
+        if (res.ok) {
+          const data = await res.json()
+          setTestStatus(`Ollama online (${data.models?.length || 0} local models available)`)
+        } else setTestStatus(`Ollama responded with status ${res.status}`)
+      } else if (provider === "lmstudio") {
+        const res = await fetch(`${ai.endpoints.lmstudio.replace(/\/+$/, "")}/v1/models`)
+        setTestStatus(res.ok ? "LM Studio local server connected" : `LM Studio returned status ${res.status}`)
+      } else {
+        setTestStatus("Provider configured")
+      }
+    } catch (e) {
+      setTestStatus(`Connection failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const provider = ai.activeProvider
+  const isKeyProvider = provider === "gemini" || provider === "anthropic" || provider === "openai"
 
   return (
-    <div className="flex h-full min-w-[240px] flex-col overflow-hidden bg-card">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-primary shrink-0" />
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">
-            AI Copilot
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowSettings(!showSettings)}
-            className="h-6 w-6 text-muted-foreground hover:text-foreground cursor-pointer"
-            title="AI Settings"
-            aria-label="AI Settings"
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-          </Button>
-          <button
-            type="button"
-            onClick={() => setLeftSidebarOpen(false)}
-            title="Close Sidebar (Ctrl+B)"
-            aria-label="Close Sidebar"
-            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-          >
-            <PanelLeftClose className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
+    <SidebarFrame
+      title="Copilot"
+      className="flex flex-col gap-4 p-3"
+      actions={
+        <TipIconButton label="Provider settings" aria-pressed={showSettings} onClick={() => setShowSettings((v) => !v)} className={showSettings ? "bg-active text-fg" : undefined}>
+          <Settings2 />
+        </TipIconButton>
+      }
+    >
+      {showSettings && (
+        <section aria-label="Provider settings" className="flex flex-col gap-3 rounded-lg bg-raised p-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="copilot-provider">Provider</Label>
+            <Select id="copilot-provider" value={provider} onChange={(e) => ai.setActiveProvider(e.target.value as AIProvider)}>
+              {PROVIDERS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </Select>
+          </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
-        {/* Settings view */}
-        {showSettings && (
-          <div className="rounded-md border border-border bg-background/50 p-2.5 space-y-2 text-xs">
-            <h4 className="font-semibold text-foreground">AI Configuration</h4>
-            <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">Provider</Label>
-              <select
-                value={activeProvider}
-                onChange={(e) => setActiveProvider(e.target.value as AIProvider)}
-                className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
-              >
-                <option value="gemini">Google Gemini</option>
-                <option value="ollama">Ollama (Local)</option>
-                <option value="lmstudio">LM Studio (Local)</option>
-              </select>
-            </div>
-            <div className="flex items-center justify-between pt-1">
-              <Label htmlFor="sidebar-autofix" className="text-[11px] text-muted-foreground">
-                Visual Critique
-              </Label>
-              <Switch
-                id="sidebar-autofix"
-                checked={visualCritique}
-                onCheckedChange={setVisualCritique}
+          {isKeyProvider && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="copilot-key">API key</Label>
+              <Input
+                id="copilot-key"
+                type="password"
+                autoComplete="off"
+                placeholder={KEY_PLACEHOLDER[provider as KeyProvider]}
+                value={ai.apiKeys[provider as KeyProvider] || ""}
+                onChange={(e) => ai.setApiKey(provider as KeyProvider, e.target.value)}
+                className="font-mono"
               />
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Prompt Input */}
-        <div className="space-y-1.5">
-          <Label className="text-xs font-medium text-foreground">Shader Description</Label>
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Describe visual effects, raymarching, particles, or lighting..."
-            rows={3}
-            className="w-full resize-none rounded-md border border-border bg-background p-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-            disabled={isRunning}
-          />
-          <Button
-            size="sm"
-            onClick={() => handleGenerate()}
-            disabled={isRunning || !prompt.trim()}
-            className="w-full h-7 text-xs font-medium gap-1.5 cursor-pointer"
-          >
-            {isRunning ? (
-              <>
-                <RefreshCw className="h-3 w-3 animate-spin" /> Generating...
-              </>
-            ) : (
-              <>
-                <Sparkles className="h-3 w-3" /> Generate Shader
-              </>
+          {!isKeyProvider && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="copilot-endpoint">Endpoint URL</Label>
+                <Input
+                  id="copilot-endpoint"
+                  placeholder={ENDPOINT_PLACEHOLDER[provider as EndpointProvider]}
+                  value={ai.endpoints[provider as EndpointProvider]}
+                  onChange={(e) => ai.setEndpoint(provider as EndpointProvider, e.target.value)}
+                  className="font-mono"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="copilot-model">Model</Label>
+                <Input
+                  id="copilot-model"
+                  placeholder={MODEL_PLACEHOLDER[provider as EndpointProvider]}
+                  value={ai.models[provider as EndpointProvider]}
+                  onChange={(e) => ai.setModel(provider as EndpointProvider, e.target.value)}
+                  className="font-mono"
+                />
+              </div>
+            </>
+          )}
+
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="copilot-critique">Visual critique</Label>
+            <Switch id="copilot-critique" checked={ai.visualCritique} onCheckedChange={ai.setVisualCritique} />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Button size="sm" variant="secondary" onClick={handleTestConnection}>
+              Test connection
+            </Button>
+            {testStatus && (
+              <p role="status" className="text-xs text-fg-muted">
+                {testStatus}
+              </p>
             )}
-          </Button>
-        </div>
-
-        {/* Quick Presets */}
-        <div className="space-y-1.5 pt-1 border-t border-border/60">
-          <span className="text-[11px] font-medium text-muted-foreground">Preset Inspirations</span>
-          <div className="flex flex-col gap-1">
-            {PRESET_PROMPTS.map((p) => (
-              <button
-                key={p.label}
-                onClick={() => {
-                  setPrompt(p.prompt)
-                  handleGenerate(p.prompt)
-                }}
-                disabled={isRunning}
-                className="text-left rounded border border-border/40 bg-background/30 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer truncate"
-              >
-                {p.label}
-              </button>
-            ))}
           </div>
+        </section>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <Label htmlFor="copilot-prompt">Describe a shader</Label>
+          <Badge>{activeBackend}</Badge>
         </div>
-
-        {/* Session Progress Steps */}
-        {currentSession && (
-          <div className="space-y-2 pt-2 border-t border-border">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-foreground">Generation Steps</span>
-              <span className="text-[11px] text-muted-foreground">
-                {currentSession.status === "success" ? (
-                  <span className="text-green-400 font-medium flex items-center gap-1">
-                    <CheckCircle2 className="h-3 w-3" /> Done
-                  </span>
-                ) : currentSession.status === "error" ? (
-                  <span className="text-destructive font-medium flex items-center gap-1">
-                    <AlertTriangle className="h-3 w-3" /> Failed
-                  </span>
-                ) : (
-                  <span className="text-primary font-medium flex items-center gap-1">
-                    <RefreshCw className="h-3 w-3 animate-spin" /> In Progress
-                  </span>
-                )}
-              </span>
-            </div>
-
-            <div className="space-y-1.5">
-              {currentSession.steps.map((step) => (
-                <div
-                  key={step.stepNumber}
-                  className="rounded border border-border/50 bg-background/40 p-2 text-[11px] space-y-1"
-                >
-                  <div className="flex items-center justify-between font-mono">
-                    <span className="text-muted-foreground">Step {step.stepNumber}</span>
-                    <span
-                      className={
-                        step.status === "success"
-                          ? "text-green-400"
-                          : step.status === "error"
-                          ? "text-destructive"
-                          : "text-primary"
-                      }
-                    >
-                      {step.status}
-                    </span>
-                  </div>
-                  {step.errorMessages && step.errorMessages.length > 0 && (
-                    <div className="flex items-start gap-1 text-destructive font-mono text-[10px]">
-                      <Terminal className="h-3 w-3 shrink-0 mt-0.5" />
-                      <span className="line-clamp-2">{step.errorMessages.join(", ")}</span>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <Textarea
+          id="copilot-prompt"
+          ref={promptRef}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          disabled={isRunning}
+          rows={4}
+          placeholder="Raymarched clouds, a glowing forcefield, a CRT scanline pass..."
+          className="resize-none"
+        />
+        <Button onClick={() => handleGenerate()} disabled={isRunning || !prompt.trim()} className="w-full">
+          {isRunning ? (
+            <>
+              <RefreshCw className="animate-spin" /> Generating...
+            </>
+          ) : (
+            <>
+              <Sparkles /> Generate shader
+            </>
+          )}
+        </Button>
       </div>
-    </div>
+
+      <div className="flex flex-col gap-1.5">
+        <h3 className="text-xs font-medium text-fg-muted">Try one</h3>
+        <div className="flex flex-wrap gap-1">
+          {PRESET_PROMPTS.map((p) => (
+            <Button
+              key={p.label}
+              size="sm"
+              variant="secondary"
+              disabled={isRunning}
+              onClick={() => {
+                setPrompt(p.prompt)
+                handleGenerate(p.prompt)
+              }}
+            >
+              {p.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      {currentSession && (
+        <section aria-label="Generation progress" className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium text-fg-muted">Generation steps</h3>
+            <Badge tone={currentSession.status === "success" ? "success" : currentSession.status === "error" ? "danger" : "warning"}>
+              {currentSession.status === "success" ? "Done" : currentSession.status === "error" ? "Failed" : "In progress"}
+            </Badge>
+          </div>
+          <ol className="flex flex-col gap-2">
+            {currentSession.steps.map((step) => (
+              <li key={step.stepNumber} className="flex flex-col gap-1.5 rounded-lg bg-raised p-2.5 text-xs">
+                <span className="flex items-center gap-1.5 font-medium text-fg">
+                  {step.status === "success" && <CheckCircle2 className="size-3.5 text-success" />}
+                  {step.status === "running" && <RefreshCw className="size-3.5 animate-spin text-warning" />}
+                  {step.status === "error" && <AlertTriangle className="size-3.5 text-danger" />}
+                  <span>
+                    Step <span className="num">{step.stepNumber}</span>: {step.type}
+                  </span>
+                </span>
+                {step.description && <p className="text-fg-muted">{step.description}</p>}
+                {step.screenshotBase64 && <img src={step.screenshotBase64} alt="Rendered preview" className="h-28 w-full rounded-md bg-canvas object-contain" />}
+                {step.errorMessages && step.errorMessages.length > 0 && <p className="line-clamp-3 rounded-md bg-danger-soft p-1.5 font-mono text-2xs text-danger">{step.errorMessages.join(", ")}</p>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+    </SidebarFrame>
   )
 }

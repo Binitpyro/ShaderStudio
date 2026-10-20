@@ -1,6 +1,7 @@
 import { useState, useEffect, Suspense } from "react"
 import { LazyMonaco as Editor } from "@/components/LazyMonaco"
 import { Button } from "@/components/ui/button"
+import { useTheme } from "@/components/theme-provider"
 import { useProjectStore } from "@/stores/projectStore"
 import { CUSTOM_WGSL_TEMPLATE, CUSTOM_GLSL_TEMPLATE } from "@/core/postProcessChain"
 
@@ -20,6 +21,7 @@ export function PostProcessDrawer({
   onSave,
 }: PostProcessDrawerProps) {
   const activeBackend = useProjectStore((s) => s.activeBackend)
+  const { resolvedTheme } = useTheme()
   const defaultTemplate = activeBackend === "webgpu" ? CUSTOM_WGSL_TEMPLATE : CUSTOM_GLSL_TEMPLATE
   const [code, setCode] = useState<string>(initialCode || defaultTemplate)
 
@@ -69,7 +71,7 @@ export function PostProcessDrawer({
           language={language}
           value={code}
           onChange={handleChange}
-          theme="vs-dark"
+          theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
           options={{
             minimap: { enabled: false },
             fontSize: 12,

@@ -1,22 +1,47 @@
+import { useState, useSyncExternalStore } from "react"
 import { useFileSystemStore } from "@/stores/fileSystemStore"
-import { cn } from "@/lib/utils"
+import { bridgeNeedsToken, subscribeBridgeAuth, submitBridgeToken, retryBridge } from "@/bridge/wsBridgeClient"
+import { Badge, Button, Input } from "@/components/ui"
 
-const STATUS_CONFIG = {
-  bridge: { dot: "bg-green-500", text: "Synced via local bridge" },
-  folder: { dot: "bg-yellow-500", text: "Synced via folder (this tab)" },
-  local: { dot: "bg-muted-foreground", text: "Editing locally - not saved to disk" },
+const STATUS = {
+  bridge: { tone: "success", label: "Bridge", title: "Synced via local bridge" },
+  folder: { tone: "info", label: "Folder", title: "Synced via folder (this tab)" },
+  local: { tone: "neutral", label: "Local", title: "Editing locally, not saved to disk" },
 } as const
 
+/** Sync status as a Badge. When the dev bridge rejects us (close code 4401) it asks for a token instead. */
 export function SyncStatusBanner() {
-  const syncMode = useFileSystemStore((state) => state.syncMode)
-  const activeFilePath = useFileSystemStore((state) => state.activeFilePath)
-  const config = STATUS_CONFIG[syncMode]
+  const syncMode = useFileSystemStore((s) => s.syncMode)
+  const activeFilePath = useFileSystemStore((s) => s.activeFilePath)
+  const needsToken = useSyncExternalStore(subscribeBridgeAuth, bridgeNeedsToken, bridgeNeedsToken)
+  const [token, setToken] = useState("")
+  const status = STATUS[syncMode]
+
+  if (needsToken) {
+    return (
+      <form
+        className="flex flex-wrap items-center gap-2 text-xs"
+        onSubmit={(e) => { e.preventDefault(); submitBridgeToken(token); setToken("") }}
+      >
+        <Badge tone="warning">Bridge needs a token</Badge>
+        <Input
+          type="password"
+          aria-label="Bridge token"
+          placeholder="Paste token"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          className="h-7 w-40"
+        />
+        <Button type="submit" size="sm" variant="secondary" disabled={!token.trim()}>Connect</Button>
+        <Button type="button" size="sm" variant="ghost" onClick={retryBridge}>Retry</Button>
+      </form>
+    )
+  }
 
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className={cn("h-1.5 w-1.5 rounded-full", config.dot)} />
-      <span>{config.text}</span>
-      {activeFilePath && <span className="font-mono text-foreground/60 truncate max-w-[200px]">- {activeFilePath}</span>}
+    <div className="flex min-w-0 items-center gap-2 text-xs text-fg-muted">
+      <Badge tone={status.tone} title={status.title}>{status.label}</Badge>
+      {activeFilePath && <span className="num truncate max-w-[200px]">{activeFilePath}</span>}
     </div>
   )
 }

@@ -1,5 +1,6 @@
 export * from "./AccordionSection"
 export * from "./UniformsSection"
+export * from "./RenderSection"
 export * from "./EnvironmentSection"
 export * from "./AudioDynamicsSection"
 export * from "./ComputeSimulationSection"

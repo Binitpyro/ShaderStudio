@@ -13,13 +13,13 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "mesh-1",
     type: "mesh",
-    position: { x: 50, y: 100 },
+    position: { x: 50, y: 60 },
     data: { type: "mesh", geometry: "torus_knot" },
   },
   {
     id: "audio-1",
     type: "audio",
-    position: { x: 50, y: 280 },
+    position: { x: 50, y: 250 },
     data: {
       type: "audio",
       sourceType: "builtin",
@@ -31,13 +31,13 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "material-1",
     type: "material",
-    position: { x: 270, y: 100 },
+    position: { x: 270, y: 130 },
     data: { type: "material", shaderPath: "starter.wgsl" },
   },
   {
     id: "postprocess-1",
     type: "postprocess",
-    position: { x: 490, y: 100 },
+    position: { x: 490, y: 0 },
     data: {
       type: "postprocess",
       passType: "bloom",
@@ -47,7 +47,7 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "postprocess-2",
     type: "postprocess",
-    position: { x: 710, y: 100 },
+    position: { x: 490, y: 190 },
     data: {
       type: "postprocess",
       passType: "vignette",
@@ -57,7 +57,7 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "output-1",
     type: "output",
-    position: { x: 930, y: 120 },
+    position: { x: 490, y: 390 },
     data: { type: "output" },
   },
 ]

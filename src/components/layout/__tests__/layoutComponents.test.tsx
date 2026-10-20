@@ -1,55 +1,25 @@
+// @vitest-environment happy-dom
+import "../../../../tests/setup/rtl"
 import { describe, it, expect, beforeEach, vi } from "vitest"
-import { renderToStaticMarkup } from "react-dom/server"
+import { render, screen, within, fireEvent } from "@testing-library/react"
 import { useLayoutStore } from "@/stores/layoutStore"
 import { useProjectStore } from "@/stores/projectStore"
 import { ActivityBar } from "../ActivityBar"
 import { SidebarDock } from "../SidebarDock"
 import { CenterStage } from "../CenterStage"
 import { RightInspector } from "../RightInspector"
-import { ConsoleDrawer } from "../ConsoleDrawer"
 import { StatusBar } from "../StatusBar"
 import { WorkspaceLayout } from "../WorkspaceLayout"
 
-// Mock next-themes
-vi.mock("@/components/theme-provider", () => ({
-  useTheme: () => ({
-    theme: "dark",
-    setTheme: vi.fn(),
-    resolvedTheme: "dark",
-  }),
-}))
+vi.mock("@/components/Viewport", () => ({ Viewport: () => <div data-testid="mock-viewport">Mock Viewport</div> }))
+vi.mock("@/components/ShaderEditor", () => ({ ShaderEditor: () => <div data-testid="mock-shader-editor">Mock Shader Editor</div>, COMPILER_MARKER_OWNER: "shaderstudio-compiler" }))
+vi.mock("@/components/ParameterPanel", () => ({ ParameterPanel: () => <div data-testid="mock-parameter-panel">Mock Parameter Panel</div> }))
+vi.mock("@/components/NodeGraph", () => ({ NodeGraph: () => <div data-testid="mock-node-graph">Mock Node Graph</div> }))
+vi.mock("@/components/ProjectPanel", () => ({ ProjectPanel: () => <div>Mock Project Panel</div> }))
+vi.mock("@/components/FileImporter", () => ({ FileImporter: () => <div>Mock File Importer</div> }))
+vi.mock("@/components/layout/ConsoleDrawer", () => ({ ConsoleDrawer: () => <div data-testid="console-drawer">Mock Console</div> }))
 
-// Mock heavy sub-components to keep unit tests fast and focused on layout
-vi.mock("@/components/Viewport", () => ({
-  Viewport: ({ className }: { className?: string }) => (
-    <div data-testid="mock-viewport" className={className}>Mock Viewport</div>
-  ),
-}))
-
-vi.mock("@/components/ShaderEditor", () => ({
-  ShaderEditor: () => <div data-testid="mock-shader-editor">Mock Shader Editor</div>,
-  COMPILER_MARKER_OWNER: "shaderstudio-compiler",
-}))
-
-vi.mock("@/components/ParameterPanel", () => ({
-  ParameterPanel: () => <div data-testid="mock-parameter-panel">Mock Parameter Panel</div>,
-}))
-
-vi.mock("@/components/NodeGraph", () => ({
-  NodeGraph: ({ className }: { className?: string }) => (
-    <div data-testid="mock-node-graph" className={className}>Mock Node Graph</div>
-  ),
-}))
-
-vi.mock("@/components/ProjectPanel", () => ({
-  ProjectPanel: () => <div data-testid="mock-project-panel">Mock Project Panel</div>,
-}))
-
-vi.mock("@/components/FileImporter", () => ({
-  FileImporter: () => <div data-testid="mock-file-importer">Mock File Importer</div>,
-}))
-
-describe("Layout Components (Requirement R1)", () => {
+describe("Layout components", () => {
   beforeEach(() => {
     useLayoutStore.setState({
       activeActivityTab: "graph",
@@ -65,198 +35,124 @@ describe("Layout Components (Requirement R1)", () => {
   })
 
   describe("ActivityBar", () => {
-    it("renders 4 activity tabs with labels and icons", () => {
-      const html = renderToStaticMarkup(<ActivityBar />)
-
-      expect(html).toContain("Node Graph")
-      expect(html).toContain("Project Explorer")
-      expect(html).toContain("Shaders &amp; Templates")
-      expect(html).toContain("AI Copilot")
-      expect(html).toContain("data-testid=\"activity-bar\"")
+    it("renders the four views as a labelled tablist inside a labelled navigation landmark", () => {
+      render(<ActivityBar />)
+      expect(screen.getByRole("navigation", { name: "Activity bar" })).toBeTruthy()
+      const tabs = within(screen.getByRole("tablist")).getAllByRole("tab")
+      expect(tabs.map((t) => t.getAttribute("aria-label"))).toEqual(["Graph", "Project", "Templates", "Copilot"])
+      expect(tabs[0].getAttribute("aria-selected")).toBe("true")
+      expect(tabs[0].getAttribute("aria-controls")).toBe("left-sidebar-dock")
     })
 
-    it("indicates active tab when left sidebar is open", () => {
-      useLayoutStore.setState({ activeActivityTab: "graph", isLeftSidebarOpen: true })
-      const html = renderToStaticMarkup(<ActivityBar />)
-      expect(html).toContain("data-active=\"true\"")
-    })
-
-    it("provides W3C ARIA landmarks, roles, and controls in ActivityBar", () => {
-      useLayoutStore.setState({ activeActivityTab: "graph", isLeftSidebarOpen: true })
-      const html = renderToStaticMarkup(<ActivityBar />)
-      expect(html).toContain("aria-label=\"Activity Bar\"")
-      expect(html).toContain("role=\"tablist\"")
-      expect(html).toContain("role=\"tab\"")
-      expect(html).toContain("aria-controls=\"left-sidebar-dock\"")
-      expect(html).toContain("aria-selected=\"true\"")
-    })
-
-    it("renders theme toggle and inspector toggle buttons", () => {
-      const html = renderToStaticMarkup(<ActivityBar />)
-      expect(html).toContain("Toggle Theme")
-      expect(html).toContain("Toggle Inspector")
-    })
-
-    it("toggling activity tab updates layoutStore state correctly", () => {
-      useLayoutStore.getState().toggleActivityTab("graph")
+    it("clicking the active tab collapses the sidebar; another tab switches and opens it", () => {
+      render(<ActivityBar />)
+      fireEvent.click(screen.getByRole("tab", { name: "Graph" }))
       expect(useLayoutStore.getState().isLeftSidebarOpen).toBe(false)
-      expect(useLayoutStore.getState().activeActivityTab).toBeNull()
+      fireEvent.click(screen.getByRole("tab", { name: "Project" }))
+      expect(useLayoutStore.getState()).toMatchObject({ isLeftSidebarOpen: true, activeActivityTab: "project" })
+    })
 
-      useLayoutStore.getState().toggleActivityTab("project")
-      expect(useLayoutStore.getState().isLeftSidebarOpen).toBe(true)
-      expect(useLayoutStore.getState().activeActivityTab).toBe("project")
+    it("arrow keys move roving focus", () => {
+      render(<ActivityBar />)
+      const graph = screen.getByRole("tab", { name: "Graph" })
+      graph.focus()
+      fireEvent.keyDown(graph, { key: "ArrowDown" })
+      expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Project" }))
+    })
+
+    it("carries no theme or inspector toggles (single home: the top bar)", () => {
+      render(<ActivityBar />)
+      expect(screen.queryByLabelText(/theme/i)).toBeNull()
+      expect(screen.queryByLabelText(/inspector/i)).toBeNull()
     })
   })
 
   describe("SidebarDock", () => {
-    it("renders NodeGraphSidebar when active tab is 'graph' with ARIA region and close button", () => {
-      useLayoutStore.setState({ activeActivityTab: "graph", isLeftSidebarOpen: true })
-      const html = renderToStaticMarkup(<SidebarDock />)
-      expect(html).toContain("Mock Node Graph")
-      expect(html).toContain("Node Graph")
-      expect(html).toContain("id=\"left-sidebar-dock\"")
-      expect(html).toContain("role=\"region\"")
-      expect(html).toContain("aria-label=\"Primary Sidebar\"")
-      expect(html).toContain("Close Sidebar (Ctrl+B)")
-      expect(html).not.toContain("select-none")
+    it("shows the graph sidebar with a close button that collapses the dock", () => {
+      render(<SidebarDock />)
+      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy()
+      expect(screen.getByTestId("mock-node-graph")).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Close sidebar" }))
+      expect(useLayoutStore.getState().isLeftSidebarOpen).toBe(false)
     })
 
-    it("returns null if activeActivityTab is null", () => {
+    it("renders nothing when there is no active tab and none was shown", () => {
       useLayoutStore.setState({ activeActivityTab: null, isLeftSidebarOpen: false })
-      const html = renderToStaticMarkup(<SidebarDock />)
-      expect(html).toBe("")
+      const { container } = render(<SidebarDock />)
+      expect(container.innerHTML).toBe("")
+    })
+
+    it("keeps the last tab mounted but inert after collapsing", () => {
+      const { container, rerender } = render(<SidebarDock />)
+      useLayoutStore.getState().setLeftSidebarOpen(false)
+      rerender(<SidebarDock />)
+      const aside = container.querySelector("aside")!
+      expect(aside.hasAttribute("inert")).toBe(true)
+      expect(screen.getByTestId("mock-node-graph")).toBeTruthy()
     })
   })
 
   describe("CenterStage", () => {
-    it("renders dual-split Viewport and Monaco Editor in normal mode", () => {
-      useLayoutStore.setState({ maximizedPanel: "none", splitOrientation: "vertical" })
-      const html = renderToStaticMarkup(<CenterStage />)
-
-      expect(html).toContain("data-testid=\"center-stage-split\"")
-      expect(html).toContain("3D Viewport")
-      expect(html).toContain("Shader Editor")
-      expect(html).toContain("Mock Viewport")
-      expect(html).toContain("Mock Shader Editor")
-      expect(html).toContain("Maximize Viewport")
-      expect(html).toContain("Maximize Editor")
-      expect(html).toContain("Split Horizontally")
+    it("shows viewport and editor with maximize and split controls", () => {
+      render(<CenterStage />)
+      expect(screen.getByTestId("mock-viewport")).toBeTruthy()
+      expect(screen.getByTestId("mock-shader-editor")).toBeTruthy()
+      expect(screen.getByRole("button", { name: "Maximize viewport" })).toBeTruthy()
+      expect(screen.getByRole("button", { name: "Maximize editor" })).toBeTruthy()
+      expect(screen.getByRole("button", { name: "Split horizontally" })).toBeTruthy()
     })
 
-    it("renders horizontal split toggle button when in horizontal orientation", () => {
-      useLayoutStore.setState({ maximizedPanel: "none", splitOrientation: "horizontal" })
-      const html = renderToStaticMarkup(<CenterStage />)
-      expect(html).toContain("Split Vertically")
-    })
-
-    it("renders 100% Viewport with Restore button when Viewport is maximized", () => {
-      useLayoutStore.setState({ maximizedPanel: "viewport" })
-      const html = renderToStaticMarkup(<CenterStage />)
-
-      expect(html).toContain("data-testid=\"center-stage-max-viewport\"")
-      expect(html).toContain("3D Viewport (Maximized)")
-      expect(html).toContain("Restore Split")
-      expect(html).toContain("Mock Viewport")
-      expect(html).not.toContain("Mock Shader Editor")
-    })
-
-    it("renders 100% Shader Editor with Restore button when Editor is maximized", () => {
-      useLayoutStore.setState({ maximizedPanel: "editor" })
-      const html = renderToStaticMarkup(<CenterStage />)
-
-      expect(html).toContain("data-testid=\"center-stage-max-editor\"")
-      expect(html).toContain("Shader Editor (Maximized)")
-      expect(html).toContain("Restore Split")
-      expect(html).toContain("Mock Shader Editor")
-      expect(html).not.toContain("Mock Viewport")
-    })
-
-    it("restores split mode when toggleMaximizeViewport is invoked from maximized state", () => {
-      useLayoutStore.setState({ maximizedPanel: "viewport" })
-      useLayoutStore.getState().toggleMaximizeViewport()
+    it("maximize toggles store state and the label becomes Restore layout", () => {
+      render(<CenterStage />)
+      fireEvent.click(screen.getByRole("button", { name: "Maximize viewport" }))
+      expect(useLayoutStore.getState().maximizedPanel).toBe("viewport")
+      expect(screen.getByTestId("center-stage").getAttribute("data-maximized")).toBe("viewport")
+      fireEvent.click(screen.getByRole("button", { name: "Restore layout" }))
       expect(useLayoutStore.getState().maximizedPanel).toBe("none")
+    })
+
+    it("split toggle flips the orientation", () => {
+      render(<CenterStage />)
+      fireEvent.click(screen.getByRole("button", { name: "Split horizontally" }))
+      expect(useLayoutStore.getState().splitOrientation).toBe("horizontal")
+      expect(screen.getByRole("button", { name: "Split vertically" })).toBeTruthy()
     })
   })
 
   describe("RightInspector", () => {
-    it("renders Inspector header, toggle collapse button and ParameterPanel", () => {
-      const html = renderToStaticMarkup(<RightInspector />)
-
-      expect(html).toContain("data-testid=\"right-inspector\"")
-      expect(html).toContain("Inspector")
-      expect(html).toContain("Collapse Inspector")
-      expect(html).toContain("Mock Parameter Panel")
-    })
-
-    it("toggleRightInspector updates layoutStore state", () => {
-      expect(useLayoutStore.getState().isRightInspectorOpen).toBe(true)
-      useLayoutStore.getState().toggleRightInspector()
+    it("renders a labelled inspector with a collapse button and the parameter panel", () => {
+      render(<RightInspector />)
+      expect(screen.getByRole("complementary", { name: "Inspector" })).toBeTruthy()
+      expect(screen.getByTestId("mock-parameter-panel")).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Collapse inspector" }))
       expect(useLayoutStore.getState().isRightInspectorOpen).toBe(false)
     })
   })
 
-  describe("ConsoleDrawer", () => {
-    it("renders clean state when there are 0 compile errors", () => {
-      useProjectStore.getState().setLastCompileError(null)
-      const html = renderToStaticMarkup(<ConsoleDrawer />)
-
-      expect(html).toContain("data-testid=\"console-drawer\"")
-      expect(html).toContain("Console &amp; Diagnostics")
-      expect(html).toContain("0 Errors")
-      expect(html).toContain("No compilation errors or diagnostics.")
-    })
-
-    it("renders error cards with line numbers, clear button, and jump button when compile error occurs", () => {
-      useProjectStore.getState().setLastCompileError(":15:8 error: invalid type")
-      const html = renderToStaticMarkup(<ConsoleDrawer />)
-
-      expect(html).toContain("1 Error")
-      expect(html).toContain("[Line 15:8]")
-      expect(html).toContain("Clear")
-      expect(html).toContain("Jump")
-    })
-
-    it("clearing error resets compile error in store", () => {
-      useProjectStore.getState().setLastCompileError(":15:8 error: invalid type")
-      expect(useProjectStore.getState().lastCompileError).not.toBeNull()
-      useProjectStore.getState().setLastCompileError(null)
-      expect(useProjectStore.getState().lastCompileError).toBeNull()
-    })
-
-    it("invoking jumpToLine sets jumpTarget in layoutStore", () => {
-      useLayoutStore.getState().jumpToLine(15, 8)
-      expect(useLayoutStore.getState().jumpTarget?.line).toBe(15)
-      expect(useLayoutStore.getState().jumpTarget?.column).toBe(8)
-    })
-  })
-
   describe("StatusBar", () => {
-    it("renders footer with console toggle, error count, language, and telemetry", () => {
-      const html = renderToStaticMarkup(<StatusBar />)
-
-      expect(html).toContain("data-testid=\"status-bar\"")
-      expect(html).toContain("Toggle Console Drawer")
-      expect(html).toContain("0 Errors")
-      expect(html).toContain("Node Graph")
-      expect(html).toContain("WGSL")
-      expect(html).toContain("Bridge:")
-      expect(html).toContain("FPS")
+    it("shows error count, language, bridge state and toggles the console", () => {
+      render(<StatusBar />)
+      expect(screen.getByTestId("status-bar")).toBeTruthy()
+      expect(screen.getByTestId("status-error-count").textContent).toBe("0 errors")
+      expect(screen.getByText(/WGSL/)).toBeTruthy()
+      expect(screen.getByText(/Bridge/)).toBeTruthy()
+      fireEvent.click(screen.getByRole("button", { name: "Toggle console" }))
+      expect(useLayoutStore.getState().isConsoleOpen).toBe(true)
     })
 
-    it("toggling console updates isConsoleOpen in layoutStore", () => {
-      expect(useLayoutStore.getState().isConsoleOpen).toBe(false)
-      useLayoutStore.getState().toggleConsole()
-      expect(useLayoutStore.getState().isConsoleOpen).toBe(true)
+    it("counts a compile error", () => {
+      useProjectStore.getState().setLastCompileError(":15:8 error: invalid type")
+      render(<StatusBar />)
+      expect(screen.getByTestId("status-error-count").textContent).toBe("1 error")
     })
   })
 
   describe("WorkspaceLayout", () => {
-    it("renders the root layout coordinator with ActivityBar, stage, and StatusBar", () => {
-      const html = renderToStaticMarkup(<WorkspaceLayout />)
-
-      expect(html).toContain("data-testid=\"workspace-layout\"")
-      expect(html).toContain("data-testid=\"activity-bar\"")
-      expect(html).toContain("data-testid=\"status-bar\"")
+    it("renders activity bar, stage, inspector, console and status bar together", () => {
+      render(<WorkspaceLayout />)
+      for (const id of ["workspace-layout", "activity-bar", "center-stage", "right-inspector", "console-drawer", "status-bar"]) {
+        expect(screen.getByTestId(id)).toBeTruthy()
+      }
     })
   })
 })

@@ -1,13 +1,20 @@
-import { useState } from "react"
+import { useState, useRef, useEffect } from "react"
 import { useProjectStore } from "@/stores/projectStore"
-import { useLayoutStore } from "@/stores/layoutStore"
-import { Button } from "@/components/ui/button"
-import { Palette, Check, Sparkles, PanelLeftClose } from "lucide-react"
+import { Button } from "@/components/ui"
+import { Check, Layers } from "lucide-react"
 import { SHADER_TEMPLATES, type ShaderTemplate } from "@/core/templates"
+import { SidebarFrame } from "./SidebarFrame"
+
+/** Every template category, in display order. Categories found in data but not listed are appended. */
+export const TEMPLATE_CATEGORIES = ["Sci-Fi & VFX", "Atmospheric", "Surfaces & PBR", "Retro & Stylized", "Raymarching & SDF"] as const
+
+const geometryLabel = (g: string) => g.replace("_", " ").replace(/^./, (c) => c.toUpperCase())
 
 export function TemplatesSidebar() {
   const [selectedCategory, setSelectedCategory] = useState<string>("All")
   const [loadedId, setLoadedId] = useState<string | null>(null)
+  const loadedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(loadedTimer.current), [])
 
   const setShaderSource = useProjectStore((state) => state.setShaderSource)
   const setActiveBackend = useProjectStore((state) => state.setActiveBackend)
@@ -15,127 +22,72 @@ export function TemplatesSidebar() {
   const triggerRecompile = useProjectStore((state) => state.triggerRecompile)
   const setGraphNodes = useProjectStore((state) => state.setGraphNodes)
 
-  const categories = ["All", "Sci-Fi & VFX", "Atmospheric", "Surfaces & PBR", "Retro & Stylized"]
+  const extra = [...new Set(SHADER_TEMPLATES.map((t) => t.category))].filter((c) => !(TEMPLATE_CATEGORIES as readonly string[]).includes(c))
+  const categories = ["All", ...TEMPLATE_CATEGORIES, ...extra]
 
-  const filteredTemplates = selectedCategory === "All"
-    ? SHADER_TEMPLATES
-    : SHADER_TEMPLATES.filter((t) => t.category === selectedCategory)
+  const filteredTemplates = selectedCategory === "All" ? SHADER_TEMPLATES : SHADER_TEMPLATES.filter((t) => t.category === selectedCategory)
 
   const handleApplyTemplate = (template: ShaderTemplate) => {
     // Templates are GLSL: write the glsl slot and never leave a WebGPU (WGSL) backend active.
     setActiveBackend(template.backend === "webgpu" ? "webgl2" : template.backend)
     setShaderSource(template.shaderSource, "glsl")
 
-    // Set uniform values in store
     for (const [key, val] of Object.entries(template.uniforms)) {
       setUniformValue(key, val)
     }
 
-    // Update geometry on mesh node in graph
+    // Update geometry on the mesh node in the graph
     const graphNodes = useProjectStore.getState()._graphNodes
     if (graphNodes.length > 0) {
-      const updatedNodes = graphNodes.map((n) => {
-        if (n.type === "mesh") {
-          return {
-            ...n,
-            data: {
-              ...n.data,
-              geometry: template.geometry,
-            },
-          }
-        }
-        return n
-      })
-      setGraphNodes(updatedNodes)
+      setGraphNodes(graphNodes.map((n) => (n.type === "mesh" ? { ...n, data: { ...n.data, geometry: template.geometry } } : n)))
     }
 
     triggerRecompile()
     setLoadedId(template.id)
-    setTimeout(() => {
-      setLoadedId(null)
-    }, 2000)
+    clearTimeout(loadedTimer.current)
+    loadedTimer.current = setTimeout(() => setLoadedId(null), 2000)
   }
 
-  const setLeftSidebarOpen = useLayoutStore((state) => state.setLeftSidebarOpen)
-
   return (
-    <div className="flex h-full min-w-[240px] flex-col overflow-hidden bg-card">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
-        <div className="flex items-center gap-2">
-          <Palette className="h-4 w-4 text-primary shrink-0" />
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap">
-            Shader Gallery
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <Sparkles className="h-3.5 w-3.5 text-primary/60" />
-          <button
-            type="button"
-            onClick={() => setLeftSidebarOpen(false)}
-            title="Close Sidebar (Ctrl+B)"
-            aria-label="Close Sidebar"
-            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-          >
-            <PanelLeftClose className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Category Pills */}
-      <div className="flex gap-1 overflow-x-auto p-2 border-b border-border text-xs">
+    <SidebarFrame title="Templates" className="flex flex-col">
+      <div role="group" aria-label="Template category" className="flex flex-wrap gap-1 px-3 py-2">
         {categories.map((cat) => (
-          <button
+          <Button
             key={cat}
+            size="sm"
+            variant={selectedCategory === cat ? "secondary" : "ghost"}
+            aria-pressed={selectedCategory === cat}
             onClick={() => setSelectedCategory(cat)}
-            className={`px-2 py-0.5 rounded text-[11px] whitespace-nowrap transition-colors cursor-pointer ${
-              selectedCategory === cat
-                ? "bg-primary text-primary-foreground font-medium"
-                : "bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
-            }`}
+            className={selectedCategory === cat ? "text-fg" : undefined}
           >
             {cat}
-          </button>
+          </Button>
         ))}
       </div>
 
-      {/* Template Cards */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
+      <ul className="flex flex-col gap-2 px-3 pb-3">
         {filteredTemplates.map((template) => (
-          <div
-            key={template.id}
-            className="rounded-md border border-border bg-background/50 p-2.5 transition-colors hover:border-primary/50"
-          >
-            <div className="flex items-center justify-between gap-1">
-              <h4 className="text-xs font-medium text-foreground truncate">{template.name}</h4>
-              <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground uppercase">
-                {template.backend}
+          <li key={template.id} className="rounded-lg bg-raised p-3 transition-colors hover:bg-hover">
+            <h3 className="truncate text-sm font-medium text-fg">{template.name}</h3>
+            <p className="mt-1 line-clamp-2 text-xs text-fg-muted">{template.description}</p>
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1 text-xs text-fg-subtle">
+                <Layers className="size-3" />
+                {geometryLabel(template.geometry)} · {Object.keys(template.uniforms).length} uniforms
               </span>
-            </div>
-            <p className="mt-1 text-[11px] text-muted-foreground line-clamp-2">
-              {template.description}
-            </p>
-            <div className="mt-2.5 flex items-center justify-between pt-1 border-t border-border/50">
-              <span className="text-[10px] text-muted-foreground font-mono">
-                {template.geometry}
-              </span>
-              <Button
-                size="sm"
-                variant={loadedId === template.id ? "default" : "outline"}
-                onClick={() => handleApplyTemplate(template)}
-                className="h-6 px-2 text-xs"
-              >
+              <Button size="sm" variant="secondary" onClick={() => handleApplyTemplate(template)} aria-label={loadedId === template.id ? `Loaded: ${template.name}` : `Load shader: ${template.name}`}>
                 {loadedId === template.id ? (
                   <>
-                    <Check className="h-3 w-3 mr-1 text-green-400" /> Loaded
+                    <Check className="text-success" /> Loaded
                   </>
                 ) : (
-                  "Load Shader"
+                  "Load shader"
                 )}
               </Button>
             </div>
-          </div>
+          </li>
         ))}
-      </div>
-    </div>
+      </ul>
+    </SidebarFrame>
   )
 }

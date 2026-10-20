@@ -247,7 +247,9 @@ describe("cross-feature combinations", () => {
       viewportCapture.unregisterCanvas()
     })
 
-    it("compiles a shader and returns structured success feedback", async () => {
+    it("compiles a shader and returns structured success feedback (frame captured via captureFrameBase64)", async () => {
+      const cap = vi.spyOn(viewportCapture, "captureFrameBase64").mockResolvedValue("data:image/png;base64,AAAA")
+      const raw = vi.spyOn(viewportCapture, "captureBase64")
       const fb = await executeShaderLocally({
         id: "test_1",
         source: "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }",
@@ -260,6 +262,11 @@ describe("cross-feature combinations", () => {
       expect(fb.backend).toBe("webgl2")
       expect(fb.executionTimeMs).toBeGreaterThanOrEqual(0)
       expect(fb.perf).toBeDefined()
+      expect(cap).toHaveBeenCalledTimes(1)
+      expect(raw).not.toHaveBeenCalled()
+      expect(fb.screenshotBase64).toBe("data:image/png;base64,AAAA")
+      cap.mockRestore()
+      raw.mockRestore()
     })
 
     it("reports compile errors with parsed diagnostics", async () => {
@@ -276,6 +283,7 @@ describe("cross-feature combinations", () => {
         source: "uniform float u_speed;\nvoid main() { fragColor = vec4(1.0); }",
         backend: "webgl2",
         uniforms: { u_speed: 2.5, u_color: [0.2, 0.4, 0.8] },
+        captureSnapshot: false,
       })
       const u = useProjectStore.getState().uniformValues
       expect(u["u_speed"].value).toBe(2.5)

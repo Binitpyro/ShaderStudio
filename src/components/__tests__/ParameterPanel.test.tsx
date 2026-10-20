@@ -69,19 +69,18 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       const html = renderToStaticMarkup(<ParameterPanel />)
 
       expect(html).toContain("data-testid=\"parameter-panel\"")
-      expect(html).toContain("5 Inspector Sections")
-      expect(html).toContain("Collapse All")
+      expect(html).toContain("Collapse all sections")
 
       // All 5 section titles
-      expect(html).toContain("Shader Uniforms")
-      expect(html).toContain("Studio Environment &amp; Lighting")
-      expect(html).toContain("Audio Dynamics")
-      expect(html).toContain("Compute Simulation")
-      expect(html).toContain("Variations &amp; Presets")
+      expect(html).toContain("Parameters")
+      expect(html).toContain("Environment &amp; lighting")
+      expect(html).toContain("Audio")
+      expect(html).not.toContain("accordion-compute")
+      expect(html).toContain("Variations")
 
-      // By default: uniforms and environment are open
+      // By default: parameters and render are open
       expect(html).toContain("Search uniforms...")
-      expect(html).toContain("Lighting Preset")
+      expect(html).toContain("Render mode")
     })
   })
 
@@ -104,7 +103,7 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
 
       // Search and global reset
       expect(html).toContain("Search uniforms...")
-      expect(html).toContain("Reset All")
+      expect(html).toContain("Reset all")
 
       // Individual controls
       expect(html).toContain("u_speed")
@@ -115,8 +114,8 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       expect(html).toContain("u_albedo")
 
       // Vector components
-      expect(html).toContain(".x")
-      expect(html).toContain(".y")
+      expect(html).toContain("u_offset.x")
+      expect(html).toContain("u_offset.y")
 
       // Matrix presets
       expect(html).toContain("Identity")
@@ -124,7 +123,7 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       expect(html).toContain("0.5x")
 
       // Texture status
-      expect(html).toContain("Texture bound via Node Graph")
+      expect(html).toContain("Bound via node graph")
     })
 
     it("getDefaultUniformValue returns accurate defaults for all uniform kinds", () => {
@@ -160,8 +159,8 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       // Sliders & controls
       expect(html).toContain("Exposure")
       expect(html).toContain("Rotation")
-      expect(html).toContain("Background Blur")
-      expect(html).toContain("Show Skybox")
+      expect(html).toContain("Background blur")
+      expect(html).toContain("Show skybox")
     })
   })
 
@@ -192,8 +191,8 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       expect(html).toContain("LEVEL")
 
       // Sensitivity and smoothing
-      expect(html).toContain("Gain / Sensitivity")
-      expect(html).toContain("FFT Smoothing")
+      expect(html).toContain("Gain")
+      expect(html).toContain("Smoothing")
 
       // Active bindings list
       expect(html).toContain("Active Audio Bindings (1)")
@@ -220,7 +219,7 @@ describe("Parameter Inspector Components (Requirement R3)", () => {
       expect(htmlWebGPU).toContain("Damping")
       expect(htmlWebGPU).toContain("Gravity / Force")
       expect(htmlWebGPU).toContain("Particle Size")
-      expect(htmlWebGPU).toContain("Additive Blend Mode")
+      expect(htmlWebGPU).toContain("Additive blend")
     })
   })
 

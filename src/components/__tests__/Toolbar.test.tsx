@@ -34,20 +34,20 @@ describe("Toolbar Component (Requirement R2)", () => {
     expect(html).toContain("data-testid=\"toolbar-sidebar-toggle\"")
     expect(html).toContain("aria-controls=\"left-sidebar-dock\"")
     expect(html).toContain("aria-expanded=\"true\"")
-    expect(html).toContain("aria-label=\"Collapse Primary Sidebar\"")
-    expect(html).toContain("Collapse Primary Sidebar (Ctrl+B)")
+    expect(html).toContain("aria-label=\"Collapse sidebar\"")
+    expect(html).toContain("Collapse sidebar")
 
     useLayoutStore.setState({ isLeftSidebarOpen: false })
     html = renderToStaticMarkup(<Toolbar />)
     expect(html).toContain("aria-expanded=\"false\"")
-    expect(html).toContain("aria-label=\"Expand Primary Sidebar\"")
-    expect(html).toContain("Expand Primary Sidebar (Ctrl+B)")
+    expect(html).toContain("aria-label=\"Expand sidebar\"")
+    expect(html).toContain("<kbd")
   })
 
-  it("renders studio brand title and bridge connection status", () => {
+  it("renders studio brand title and project name", () => {
     const html = renderToStaticMarkup(<Toolbar />)
     expect(html).toContain("ShaderStudio")
-    expect(html).toContain("Bridge server connected")
+    expect(html).toContain("Untitled")
   })
 
   it("renders segmented backend selector buttons (WebGPU, WebGL2, Three.js)", () => {
@@ -60,8 +60,9 @@ describe("Toolbar Component (Requirement R2)", () => {
 
   it("renders playback transport controls: Rewind (t=0), Play/Pause, and digital counter", () => {
     const html = renderToStaticMarkup(<Toolbar />)
-    expect(html).toContain("Rewind to start (t=0)")
-    expect(html).toContain("Pause (Space)")
+    expect(html).toContain("aria-label=\"Rewind to start\"")
+    expect(html).toContain("aria-label=\"Pause\"")
+    expect(html).toContain("Space")
     expect(html).toContain("data-testid=\"playback-time-counter\"")
     expect(html).toContain("00:05.32")
     expect(html).toContain("/ 05:00.00")
@@ -87,25 +88,16 @@ describe("Toolbar Component (Requirement R2)", () => {
     expect(html).toContain("FPS")
   })
 
-  it("renders auto-compile switch, quick actions, and theme toggle", () => {
+  it("renders quick actions (Templates, Copilot, Export), inspector and theme toggles", () => {
     const onOpenExport = vi.fn()
-    const onOpenTemplates = vi.fn()
-    const onToggleCopilot = vi.fn()
 
-    const html = renderToStaticMarkup(
-      <Toolbar
-        onOpenExport={onOpenExport}
-        onOpenTemplates={onOpenTemplates}
-        onToggleCopilot={onToggleCopilot}
-        isCopilotOpen={true}
-      />
-    )
+    const html = renderToStaticMarkup(<Toolbar onOpenExport={onOpenExport} />)
 
-    expect(html).toContain("Auto-compile")
-    expect(html).toContain("Templates")
-    expect(html).toContain("Export")
-    expect(html).toContain("AI Copilot")
-    expect(html).toContain("Toggle theme")
+    expect(html).toContain("aria-label=\"Templates\"")
+    expect(html).toContain("aria-label=\"Export\"")
+    expect(html).toContain("aria-label=\"Copilot\"")
+    expect(html).toContain("Hide inspector")
+    expect(html).toMatch(/aria-label="Switch to (light|dark) theme"/)
   })
 
   it("switches active backend in projectStore", () => {

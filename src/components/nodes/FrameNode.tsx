@@ -7,10 +7,10 @@ import { LayoutGrid } from "lucide-react"
 
 const THEMES: Record<string, { border: string; bg: string; headerBg: string; text: string }> = {
   default: {
-    border: "border-border/80",
-    bg: "bg-muted/10",
-    headerBg: "bg-muted/40",
-    text: "text-foreground",
+    border: "border-line-strong",
+    bg: "bg-raised",
+    headerBg: "bg-raised",
+    text: "text-fg",
   },
   cyan: {
     border: "border-cyan-500/50",
@@ -95,7 +95,7 @@ function FrameNodeComponent({ id, data, selected }: FlowNodeProps<FrameNodeData>
         minHeight={100}
         isVisible={selected}
         lineClassName="border-primary"
-        handleClassName="h-3 w-3 bg-primary border-2 border-background rounded-xs"
+        handleClassName="h-3 w-3 bg-brand border-2 border-background rounded-xs"
       />
 
       {/* Frame Header Bar */}
@@ -134,9 +134,10 @@ function FrameNodeComponent({ id, data, selected }: FlowNodeProps<FrameNodeData>
                 c === "emerald" ? "bg-emerald-400 border-emerald-500" :
                 c === "amber" ? "bg-amber-400 border-amber-500" :
                 "bg-rose-400 border-rose-500",
-                color === c ? "scale-125 ring-1 ring-foreground" : "hover:scale-110"
+                color === c ? "scale-125 ring-1 ring-fg" : "hover:scale-110"
               )}
               title={c}
+              aria-label={`Set colour: ${c}`}
             />
           ))}
         </div>

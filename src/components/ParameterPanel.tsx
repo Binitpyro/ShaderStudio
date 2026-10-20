@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react"
 import { useProjectStore } from "@/stores/projectStore"
-import { Sliders, Sun, Activity, Cpu, Sparkles, ChevronsUpDown } from "lucide-react"
+import { ChevronsUpDown } from "lucide-react"
+import { IconButton } from "@/components/ui/icon-button"
 import {
   AccordionSection,
   UniformsSection,
+  RenderSection,
   EnvironmentSection,
   AudioDynamicsSection,
   ComputeSimulationSection,
@@ -11,167 +13,102 @@ import {
   NodePreviewViewport,
 } from "@/components/inspector"
 
-export type AccordionSectionKey =
-  | "uniforms"
-  | "environment"
-  | "audio"
-  | "compute"
-  | "variations"
+export type AccordionSectionKey = "uniforms" | "render" | "environment" | "audio" | "compute" | "variations"
+
+const ALL_KEYS: AccordionSectionKey[] = ["uniforms", "render", "environment", "audio", "compute", "variations"]
+const DEFAULT_OPEN: AccordionSectionKey[] = ["uniforms", "render"]
+export const INSPECTOR_SECTIONS_KEY = "shaderstudio.inspector.sections"
+
+function loadOpen(): Set<AccordionSectionKey> {
+  try {
+    const raw = localStorage.getItem(INSPECTOR_SECTIONS_KEY)
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw)
+      if (Array.isArray(parsed)) return new Set(parsed.filter((k): k is AccordionSectionKey => ALL_KEYS.includes(k as AccordionSectionKey)))
+    }
+  } catch {
+    /* storage unavailable or corrupt: fall back to defaults */
+  }
+  return new Set(DEFAULT_OPEN)
+}
 
 export function ParameterPanel() {
-  const parsedUniforms = useProjectStore((state) => state.parsedUniforms)
-  const graphUniforms = useProjectStore((state) => state.graphUniforms)
-  const isAudioPlaying = useProjectStore((state) => state.isAudioPlaying)
-  const audioBindings = useProjectStore((state) => state.audioBindings)
-  const variations = useProjectStore((state) => state.variations)
-  const renderQueue = useProjectStore((state) => state.renderQueue)
-  const selectedNodeId = useProjectStore((state) => state.selectedNodeId)
-  const setSelectedNodeId = useProjectStore((state) => state.setSelectedNodeId)
-  const selectedNode = useProjectStore((state) => state._graphNodes.find((n) => n.id === state.selectedNodeId))
+  const uniformCount = useProjectStore((s) => (s.parsedUniforms.length > 0 ? s.parsedUniforms.length : 1) + s.graphUniforms.length)
+  const isAudioPlaying = useProjectStore((s) => s.isAudioPlaying)
+  const activeBindingCount = useProjectStore((s) => Object.keys(s.audioBindings).length)
+  const variationCount = useProjectStore((s) => s.variations.length)
+  const showCompute = useProjectStore((s) => s.activeBackend === "webgpu" && !!s.renderQueue?.some((step) => step.type === "compute"))
+  const selectedNodeId = useProjectStore((s) => s.selectedNodeId)
+  const setSelectedNodeId = useProjectStore((s) => s.setSelectedNodeId)
+  const selectedNode = useProjectStore((s) => s._graphNodes.find((n) => n.id === s.selectedNodeId))
 
-  const hasCompute = renderQueue?.some((step) => step.type === "compute")
-  const activeBindingCount = Object.keys(audioBindings).length
-  const totalUniformCount =
-    parsedUniforms.length > 0
-      ? parsedUniforms.length + graphUniforms.length
-      : 1 + graphUniforms.length
+  const [open, setOpen] = useState<Set<AccordionSectionKey>>(loadOpen)
 
-  const [openSections, setOpenSections] = useState<Set<AccordionSectionKey>>(
-    () => new Set<AccordionSectionKey>(["uniforms", "environment"])
-  )
+  useEffect(() => {
+    try {
+      localStorage.setItem(INSPECTOR_SECTIONS_KEY, JSON.stringify([...open]))
+    } catch {
+      /* ignore */
+    }
+  }, [open])
 
   useEffect(() => {
     if (!selectedNodeId) return
-    if (selectedNodeId.startsWith("audio")) {
-      setOpenSections((prev) => new Set([...prev, "audio"]))
-    } else if (selectedNodeId.startsWith("mat") || selectedNodeId.startsWith("mesh")) {
-      setOpenSections((prev) => new Set([...prev, "uniforms"]))
-    } else if (selectedNodeId.startsWith("comp")) {
-      setOpenSections((prev) => new Set([...prev, "compute"]))
-    }
+    const reveal = selectedNodeId.startsWith("audio") ? "audio" : selectedNodeId.startsWith("mat") || selectedNodeId.startsWith("mesh") ? "uniforms" : selectedNodeId.startsWith("comp") ? "compute" : null
+    if (reveal) setOpen((prev) => (prev.has(reveal) ? prev : new Set([...prev, reveal])))
   }, [selectedNodeId])
 
-  const toggleSection = (key: AccordionSectionKey) => {
-    setOpenSections((prev) => {
+  const toggle = (key: AccordionSectionKey) =>
+    setOpen((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-      } else {
-        next.add(key)
-      }
+      if (!next.delete(key)) next.add(key)
       return next
     })
-  }
 
-  const toggleAll = () => {
-    if (openSections.size > 0) {
-      setOpenSections(new Set())
-    } else {
-      setOpenSections(
-        new Set<AccordionSectionKey>([
-          "uniforms",
-          "environment",
-          "audio",
-          "compute",
-          "variations",
-        ])
-      )
-    }
-  }
+  const visible = ALL_KEYS.filter((k) => k !== "compute" || showCompute)
+  const anyOpen = visible.some((k) => open.has(k))
+  const toggleAll = () => setOpen(anyOpen ? new Set() : new Set(visible))
+
+  const sectionProps = (key: AccordionSectionKey) => ({ id: key, isOpen: open.has(key), onToggle: () => toggle(key) })
 
   return (
-    <div
-      data-testid="parameter-panel"
-      className="flex h-full flex-col overflow-hidden bg-card text-card-foreground select-none"
-    >
-      {/* Quick Actions Header */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-border/50 bg-muted/10 px-3 text-[11px] font-mono text-muted-foreground">
-        <span>5 Inspector Sections</span>
-        <button
-          type="button"
-          onClick={toggleAll}
-          className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer"
-          title={openSections.size > 0 ? "Collapse all sections" : "Expand all sections"}
-        >
-          <ChevronsUpDown className="h-3 w-3" />
-          <span>{openSections.size > 0 ? "Collapse All" : "Expand All"}</span>
-        </button>
+    <div data-testid="parameter-panel" className="flex h-full flex-col overflow-hidden bg-panel text-fg select-none">
+      <div className="flex h-8 shrink-0 items-center justify-end border-b border-line px-2">
+        <IconButton label={anyOpen ? "Collapse all sections" : "Expand all sections"} onClick={toggleAll} className="size-7">
+          <ChevronsUpDown className="size-3.5" />
+        </IconButton>
       </div>
 
-      {/* Selected Node Live Preview (R1d) */}
-      {selectedNode && (
-        <div className="mx-3 mt-2 shrink-0">
-          <NodePreviewViewport
-            node={selectedNode}
-            onClose={() => setSelectedNodeId(null)}
-          />
+      {selectedNode ? (
+        <div className="mx-3 mt-3 shrink-0">
+          <NodePreviewViewport node={selectedNode} onClose={() => setSelectedNodeId(null)} />
         </div>
-      )}
+      ) : null}
 
-      {/* Accordion List Container */}
-      <div className="flex-1 overflow-y-auto">
-        {/* Section 1: Shader Uniforms */}
-        <AccordionSection
-          id="uniforms"
-          title="Shader Uniforms"
-          icon={<Sliders className="h-3.5 w-3.5" />}
-          badge={totalUniformCount}
-          isOpen={openSections.has("uniforms")}
-          onToggle={() => toggleSection("uniforms")}
-        >
+      <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <AccordionSection {...sectionProps("uniforms")} title="Parameters" badge={uniformCount}>
           <UniformsSection />
         </AccordionSection>
 
-        {/* Section 2: Studio Environment & Lighting */}
-        <AccordionSection
-          id="environment"
-          title="Studio Environment & Lighting"
-          icon={<Sun className="h-3.5 w-3.5 text-amber-400" />}
-          isOpen={openSections.has("environment")}
-          onToggle={() => toggleSection("environment")}
-        >
+        <AccordionSection {...sectionProps("render")} title="Render">
+          <RenderSection />
+        </AccordionSection>
+
+        <AccordionSection {...sectionProps("environment")} title="Environment & lighting">
           <EnvironmentSection />
         </AccordionSection>
 
-        {/* Section 3: Audio Dynamics */}
-        <AccordionSection
-          id="audio"
-          title="Audio Dynamics"
-          icon={<Activity className="h-3.5 w-3.5 text-emerald-400" />}
-          badge={
-            isAudioPlaying
-              ? "LIVE"
-              : activeBindingCount > 0
-              ? `${activeBindingCount} bound`
-              : undefined
-          }
-          isOpen={openSections.has("audio")}
-          onToggle={() => toggleSection("audio")}
-        >
+        <AccordionSection {...sectionProps("audio")} title="Audio" badge={isAudioPlaying ? "Live" : activeBindingCount > 0 ? `${activeBindingCount} bound` : undefined}>
           <AudioDynamicsSection />
         </AccordionSection>
 
-        {/* Section 4: Compute Simulation */}
-        <AccordionSection
-          id="compute"
-          title="Compute Simulation"
-          icon={<Cpu className="h-3.5 w-3.5 text-cyan-400" />}
-          badge={hasCompute ? "COMPUTE" : undefined}
-          isOpen={openSections.has("compute")}
-          onToggle={() => toggleSection("compute")}
-        >
-          <ComputeSimulationSection />
-        </AccordionSection>
+        {showCompute ? (
+          <AccordionSection {...sectionProps("compute")} title="Compute">
+            <ComputeSimulationSection />
+          </AccordionSection>
+        ) : null}
 
-        {/* Section 5: Variations & Presets */}
-        <AccordionSection
-          id="variations"
-          title="Variations & Presets"
-          icon={<Sparkles className="h-3.5 w-3.5 text-purple-400" />}
-          badge={variations.length > 0 ? variations.length : undefined}
-          isOpen={openSections.has("variations")}
-          onToggle={() => toggleSection("variations")}
-        >
+        <AccordionSection {...sectionProps("variations")} title="Variations" badge={variationCount > 0 ? variationCount : undefined}>
           <VariationsSection />
         </AccordionSection>
       </div>

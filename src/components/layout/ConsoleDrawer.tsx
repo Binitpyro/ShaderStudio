@@ -1,7 +1,7 @@
 import { useProjectStore, type EditorTab } from "@/stores/projectStore"
 import { useLayoutStore } from "@/stores/layoutStore"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
-import { Button } from "@/components/ui/button"
+import { Badge, Button, IconButton } from "@/components/ui"
 import { Terminal, Trash2, X, AlertCircle, AlertTriangle, ArrowUpRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -54,82 +54,39 @@ export function ConsoleDrawer() {
   }
 
   return (
-    <div
-      data-testid="console-drawer"
-      className="flex h-full w-full flex-col overflow-hidden bg-card border-t border-border select-none"
-    >
-      {/* Header */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-3">
+    <div data-testid="console-drawer" className="flex h-full w-full select-none flex-col overflow-hidden border-t border-line bg-panel">
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-3.5 w-3.5 text-primary" />
-          <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
-            Console & Diagnostics
-          </span>
-
-          {/* Red Error count badge */}
-          <span
-            data-testid="console-error-badge"
-            className={cn(
-              "rounded-full px-2 py-0.5 text-[10px] font-mono font-semibold",
-              errorCount > 0
-                ? "bg-destructive/15 text-destructive"
-                : "bg-emerald-500/15 text-emerald-500 font-medium"
-            )}
-          >
+          <Terminal className="size-3.5 text-fg-subtle" />
+          <span className="text-sm font-medium text-fg">Console & Diagnostics</span>
+          <Badge data-testid="console-error-badge" tone={errorCount > 0 ? "danger" : "success"} className="num">
             {errorCount} {errorCount === 1 ? "Error" : "Errors"}
-          </span>
-
-          {/* Amber Warning count badge */}
-          <span
-            data-testid="console-warning-badge"
-            className={cn(
-              "rounded-full px-2 py-0.5 text-[10px] font-mono",
-              warningCount > 0
-                ? "bg-amber-500/20 text-amber-500 font-semibold"
-                : "bg-muted/60 text-muted-foreground font-medium"
-            )}
-          >
+          </Badge>
+          <Badge data-testid="console-warning-badge" tone={warningCount > 0 ? "warning" : "neutral"} className="num">
             {warningCount} {warningCount === 1 ? "Warning" : "Warnings"}
-          </span>
+          </Badge>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           {lastCompileError && (
-            <Button
-              variant="ghost"
-              size="sm"
-              data-testid="clear-diagnostics-btn"
-              onClick={() => setLastCompileError(null)}
-              title="Clear Diagnostics"
-              aria-label="Clear Diagnostics"
-              className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
-            >
-              <Trash2 className="h-3 w-3" />
+            <Button variant="ghost" size="sm" data-testid="clear-diagnostics-btn" onClick={() => setLastCompileError(null)} aria-label="Clear Diagnostics">
+              <Trash2 />
               <span>Clear Diagnostics</span>
             </Button>
           )}
-
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setConsoleOpen(false)}
-            title="Close Console"
-            aria-label="Close Console"
-            className="h-6 w-6 text-muted-foreground hover:text-foreground cursor-pointer"
-          >
-            <X className="h-3.5 w-3.5" />
-          </Button>
+          <IconButton label="Close Console" onClick={() => setConsoleOpen(false)}>
+            <X />
+          </IconButton>
         </div>
       </div>
 
-      {/* Diagnostics List */}
       <div className="flex-1 overflow-y-auto p-3">
         {diagnostics.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-xs text-muted-foreground/60">
+          <div className="flex h-full items-center justify-center text-sm text-fg-subtle">
             No compilation errors or diagnostics.
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1.5">
             {diagnostics.map((diag, index) => {
               const isWarning = isDiagWarning(diag, index)
               const targetTab = detectTabFromError(lastCompileError || diag.message, activeEditorTab, activeBackend)
@@ -141,36 +98,27 @@ export function ConsoleDrawer() {
                   data-testid={`diagnostic-card-${index}`}
                   onClick={() => hasValidLine && handleJump(diag)}
                   className={cn(
-                    "group flex items-start justify-between rounded border p-2.5 text-xs transition-colors",
-                    hasValidLine && "cursor-pointer",
-                    isWarning
-                      ? "border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15"
-                      : "border-destructive/30 bg-destructive/10 hover:bg-destructive/15"
+                    "group flex items-start justify-between rounded-md border border-line p-2.5 text-xs transition-colors",
+                    isWarning ? "bg-warning-soft" : "bg-danger-soft",
+                    hasValidLine && "cursor-pointer hover:border-line-strong"
                   )}
                 >
-                  <div className="flex items-start gap-2 min-w-0">
+                  <div className="flex min-w-0 items-start gap-2">
                     {isWarning ? (
-                      <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
                     ) : (
-                      <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+                      <AlertCircle className="mt-0.5 size-4 shrink-0 text-danger" />
                     )}
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                        <span className="font-mono text-[10px] uppercase font-semibold px-1.5 py-0.2 rounded bg-muted/70 text-foreground">
-                          {targetTab}
-                        </span>
+                      <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
+                        <Badge className="capitalize">{targetTab}</Badge>
                         {hasValidLine && (
-                          <span
-                            className={cn(
-                              "font-mono font-semibold",
-                              isWarning ? "text-amber-500" : "text-destructive"
-                            )}
-                          >
+                          <span className={cn("num font-medium", isWarning ? "text-warning" : "text-danger")}>
                             [Line {diag.line}{diag.column ? `:${diag.column}` : ""}]
                           </span>
                         )}
                       </div>
-                      <span className="font-mono text-foreground break-all">{diag.message}</span>
+                      <span className="break-all font-mono text-fg">{diag.message}</span>
                     </div>
                   </div>
 
@@ -178,16 +126,13 @@ export function ConsoleDrawer() {
                     <button
                       type="button"
                       data-testid="jump-to-line-btn"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleJump(diag)
-                      }}
+                      onClick={(e) => { e.stopPropagation(); handleJump(diag) }}
                       title={`Jump to line ${diag.line}`}
                       aria-label={`Jump to line ${diag.line}`}
-                      className="flex items-center gap-1 text-[11px] text-muted-foreground group-hover:text-primary shrink-0 ml-2 cursor-pointer font-medium"
+                      className="ml-2 flex shrink-0 items-center gap-1 rounded-sm px-1 text-xs font-medium text-fg-muted hover:text-brand-text"
                     >
                       <span>Jump</span>
-                      <ArrowUpRight className="h-3 w-3" />
+                      <ArrowUpRight className="size-3" />
                     </button>
                   )}
                 </div>

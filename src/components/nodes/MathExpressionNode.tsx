@@ -1,5 +1,6 @@
 import { memo, useState, useCallback, useMemo } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Badge } from "@/components/ui"
+import { NodeShell, Port, Position, nodeSelectClass } from "./NodeShell"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { MathExpressionNodeData } from "@/core/graphCompiler"
@@ -66,142 +67,104 @@ function MathExpressionNodeComponent({ id, data, selected }: FlowNodeProps<MathE
   )
 
   return (
-    <div
-      className={cn(
-        "bg-card border rounded-lg p-3 shadow-md select-none text-foreground transition-all duration-150 min-w-[260px] max-w-[340px]",
-        selected ? "ring-2 ring-primary/40 shadow-xl" : "hover:border-border/80",
-        validation.isValid ? "border-emerald-500/60" : "border-destructive/80 ring-1 ring-destructive/30"
-      )}
+    <NodeShell
+      title="Math Expression"
+      icon={Calculator}
+      size="lg"
+      selected={selected}
+      className={cn(!validation.isValid && "border-danger")}
+      meta={
+        validation.isValid ? (
+          <Badge tone="success"><CheckCircle2 className="size-3" />VALID</Badge>
+        ) : (
+          <Badge tone="danger"><AlertCircle className="size-3" />SYNTAX</Badge>
+        )
+      }
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-border/60">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Calculator className="h-3.5 w-3.5 text-primary shrink-0" />
-          <span className="text-xs font-bold text-foreground truncate">Math Expression</span>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          {validation.isValid ? (
-            <span className="flex items-center gap-1 text-[9px] font-mono text-emerald-400 font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20">
-              <CheckCircle2 className="h-2.5 w-2.5" />
-              <span>VALID</span>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-[9px] font-mono text-destructive font-bold px-1.5 py-0.5 rounded bg-destructive/10 border border-destructive/20">
-              <AlertCircle className="h-2.5 w-2.5" />
-              <span>SYNTAX</span>
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Formula Input */}
-      <div className="mb-2">
-        <label className="text-[10px] text-muted-foreground font-mono block mb-1">
-          f({inputNames.join(", ")}) =
-        </label>
+      <div>
+        <label className="num mb-1 block text-2xs text-fg-muted">f({inputNames.join(", ")}) =</label>
         <input
           type="text"
+          aria-label="Expression"
           value={expression}
           onChange={handleExpressionChange}
           placeholder="e.g. sin(uv.x * 10.0) * 0.5 + 0.5"
-          className={cn(
-            "w-full bg-background font-mono text-xs border rounded px-2.5 py-1.5 text-foreground placeholder:text-muted-foreground focus:outline-none nodrag transition-colors",
-            validation.isValid
-              ? "border-border focus:border-emerald-500"
-              : "border-destructive focus:border-destructive bg-destructive/5"
-          )}
+          aria-invalid={!validation.isValid}
+          className={cn(nodeSelectClass, "num h-8 px-2.5", !validation.isValid && "border-danger")}
         />
         {!validation.isValid && validation.error && (
-          <p className="mt-1 text-[10px] text-destructive font-mono leading-tight bg-destructive/10 p-1 rounded border border-destructive/20">
-            {validation.error}
-          </p>
+          <p className="num mt-1 rounded-md bg-danger-soft p-1.5 text-2xs leading-tight text-danger">{validation.error}</p>
         )}
       </div>
 
-      {/* Ports and Handles Area */}
-      <div className="flex justify-between gap-4 text-[10px] font-mono pt-2 border-t border-border/40">
-        {/* Input Handles List */}
-        <div className="flex flex-col gap-1.5 relative flex-1">
-          <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-wider mb-0.5">
-            Inputs
-          </span>
+      <div className="flex justify-between gap-4 border-t border-line pt-2 text-xs">
+        <div className="relative flex flex-1 flex-col gap-1.5">
+          <span className="mb-0.5 text-2xs text-fg-subtle">Inputs</span>
           {inputNames.map((name) => (
-            <div key={name} className="relative flex items-center justify-between gap-1 h-5 group">
+            <div key={name} className="group relative flex h-5 items-center justify-between gap-1">
               <div className="flex items-center gap-1.5">
-                <Handle
-                  type="target"
-                  position={Position.Left}
-                  id={name}
-                  className="!w-2.5 !h-2.5 !bg-primary !border-2 !border-background"
-                  style={{ left: "-18px" }}
-                />
-                <span className="text-foreground/90 font-medium">{name}</span>
+                <Port type="target" position={Position.Left} id={name} portType="value" style={{ left: "-18px" }} />
+                <span className="num font-medium">{name}</span>
               </div>
               {name !== "uv" && (
                 <button
                   type="button"
                   onClick={() => handleRemoveInput(name)}
-                  className="text-muted-foreground hover:text-destructive p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity nodrag"
+                  className="rounded-sm p-0.5 text-fg-subtle opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 nodrag"
                   title={`Remove input '${name}'`}
+                  aria-label={`Remove input ${name}`}
                 >
-                  <X className="h-2.5 w-2.5" />
+                  <X className="size-3" />
                 </button>
               )}
             </div>
           ))}
 
-          {/* Add input field */}
-          <div className="flex items-center gap-1 mt-1 nodrag">
+          <div className="mt-1 flex items-center gap-1 nodrag">
             <input
               type="text"
+              aria-label="New input name"
               value={newPortName}
               onChange={(e) => setNewPortName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleAddInput()}
               placeholder="+ input"
-              className="w-16 bg-background text-[10px] border border-border rounded px-1.5 py-0.5 font-mono"
+              className={cn(nodeSelectClass, "num w-20")}
             />
             <button
               type="button"
               onClick={handleAddInput}
-              className="p-1 rounded bg-muted hover:bg-muted/80 text-foreground"
+              className="grid size-7 place-items-center rounded-md bg-raised text-fg hover:bg-hover"
               title="Add input port"
+              aria-label="Add input port"
             >
-              <Plus className="h-2.5 w-2.5" />
+              <Plus className="size-3" />
             </button>
           </div>
         </div>
 
-        {/* Output Handle */}
-        <div className="flex flex-col items-end gap-1.5 relative shrink-0">
-          <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-wider mb-0.5">
-            Output
-          </span>
-          <div className="relative flex items-center gap-1.5 h-5">
+        <div className="relative flex shrink-0 flex-col items-end gap-1.5">
+          <span className="mb-0.5 text-2xs text-fg-subtle">Output</span>
+          <div className="relative flex h-5 items-center gap-1.5">
             <select
+              aria-label="Output type"
               value={outputType}
               onChange={(e) => {
                 const t = e.target.value as typeof outputType
                 setOutputType(t)
                 data.outputType = t
               }}
-              className="bg-background text-[9px] font-mono border border-border rounded px-1 py-0.5 nodrag"
+              className={cn(nodeSelectClass, "num h-6 w-auto px-1 text-2xs")}
             >
               <option value="float">float</option>
               <option value="vec2">vec2</option>
               <option value="vec3">vec3</option>
               <option value="vec4">vec4</option>
             </select>
-            <Handle
-              type="source"
-              position={Position.Right}
-              id="output"
-              className="!w-2.5 !h-2.5 !bg-emerald-400 !border-2 !border-background"
-              style={{ right: "-18px" }}
-            />
+            <Port type="source" position={Position.Right} id="output" portType="value" style={{ right: "-18px" }} />
           </div>
         </div>
       </div>
-    </div>
+    </NodeShell>
   )
 }
 

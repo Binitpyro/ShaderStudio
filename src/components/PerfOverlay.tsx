@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils"
 import { viewportCapture } from "@/utils/frameCapture"
 import { performanceTelemetry, type DetailedGpuMetrics } from "@/core/performanceTelemetry"
 import { useProjectStore } from "@/stores/projectStore"
+import { useTransportStore } from "@/stores/transportStore"
 import { Activity, AlertTriangle, ChevronDown, ChevronUp, Cpu, HardDrive } from "lucide-react"
 
 /** UI refresh cadence for the profiler (4Hz). */
@@ -15,6 +16,7 @@ export function PerfOverlay({ className }: { className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const memoryBudget = useProjectStore((s) => s.memoryBudget)
+  const isPlaying = useTransportStore((s) => s.isPlaying)
   const vramMB = Number((metrics.estimatedVramBytes / (1024 * 1024)).toFixed(1))
   const isVramOverBudget = vramMB > (memoryBudget.totalVramBudgetMB * memoryBudget.warnThresholdRatio)
 
@@ -54,7 +56,7 @@ export function PerfOverlay({ className }: { className?: string }) {
     const startOffset = Math.max(0, 60 - timeline.length)
 
     // Background gradient grid
-    ctx.fillStyle = "rgba(15, 23, 42, 0.4)"
+    ctx.fillStyle = "rgba(127, 127, 127, 0.08)"
     ctx.fillRect(0, 0, width, height)
 
     // Target 16.6ms (60 FPS) guideline
@@ -98,148 +100,108 @@ export function PerfOverlay({ className }: { className?: string }) {
   if (!visible) {
     return (
       <button
+        type="button"
         onClick={() => setVisible(true)}
-        className={cn("absolute top-2 right-2 bg-card/90 backdrop-blur px-2.5 py-1 rounded text-xs border border-border shadow flex items-center gap-1.5", className)}
+        className={cn("absolute top-2 right-2 z-30 flex h-7 items-center gap-1.5 rounded-md bg-panel/90 px-2 text-xs text-fg-muted shadow-sm ring-1 ring-line backdrop-blur hover:text-fg", className)}
       >
-        <Activity className="w-3.5 h-3.5 text-primary" />
-        <span>Show Profiler</span>
-        {isVramOverBudget && (
-          <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-        )}
+        <Activity className="size-3.5" />
+        <span>Show profiler</span>
+        {isVramOverBudget && <span className="size-1.5 rounded-full bg-danger-solid animate-pulse" />}
       </button>
     )
   }
 
   const passTimings = metrics.passTimings || {}
+  const fpsTone = metrics.fps >= 55 ? "text-success" : metrics.fps >= 30 ? "text-warning" : "text-danger"
 
   return (
     <div
       className={cn(
-        "absolute top-2 right-2 bg-card/95 backdrop-blur-md rounded-lg p-2.5 border border-border shadow-lg transition-all duration-200 select-none z-30",
-        expanded ? "w-[240px]" : "w-[210px]",
+        "absolute top-2 right-2 z-30 rounded-lg bg-panel/90 p-2 text-xs shadow-md ring-1 ring-line backdrop-blur-md select-none",
+        expanded ? "w-60" : "w-52",
         className
       )}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between pb-1.5 border-b border-border/50 mb-2">
-        <div className="flex items-center gap-1.5">
-          <Activity className="w-3.5 h-3.5 text-primary" />
-          <span className="text-xs font-semibold text-foreground tracking-tight">GPU Profiler</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setExpanded(!expanded)}
-            className="text-[11px] text-muted-foreground hover:text-foreground p-0.5 rounded transition-colors"
-            title={expanded ? "Collapse details" : "Expand details"}
-          >
-            {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="flex items-center gap-1.5 font-medium text-fg">
+          <Activity className="size-3.5 text-fg-muted" />
+          GPU Profiler
+        </span>
+        <div className="flex items-center">
+          <button type="button" aria-label={expanded ? "Collapse details" : "Expand details"} aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="rounded-sm p-1 text-fg-muted hover:bg-hover hover:text-fg">
+            {expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
           </button>
-          <button
-            type="button"
-            onClick={() => setVisible(false)}
-            className="text-[11px] text-muted-foreground hover:text-foreground px-1 py-0.5 rounded transition-colors"
-          >
+          <button type="button" onClick={() => setVisible(false)} className="rounded-sm px-1.5 py-1 text-fg-muted hover:bg-hover hover:text-fg">
             Hide
           </button>
         </div>
       </div>
 
-      {/* Memory Budget Alert Badge (R5b) */}
       {isVramOverBudget && (
-        <div className="flex items-center gap-1.5 px-2 py-1 mb-2 rounded bg-destructive/15 border border-destructive/40 text-destructive text-[10px] font-medium animate-pulse">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+        <div role="alert" className="mb-2 flex items-center gap-1.5 rounded-md bg-danger-soft px-2 py-1 text-2xs font-medium text-danger animate-pulse">
+          <AlertTriangle className="size-3.5 shrink-0" />
           <span>VRAM Alert: &gt;{(memoryBudget.warnThresholdRatio * 100).toFixed(0)}% Budget</span>
         </div>
       )}
 
-      {/* Primary Metrics (FPS & Frame Time) */}
-      <div className="grid grid-cols-2 gap-2 mb-2">
-        <div className="bg-muted/40 border border-border/50 rounded p-1.5 flex flex-col">
-          <span className="text-[10px] text-muted-foreground uppercase font-mono">FPS</span>
-          <span className={cn(
-            "text-base font-mono font-bold leading-tight",
-            metrics.fps >= 55 ? "text-emerald-500" : metrics.fps >= 30 ? "text-yellow-500" : "text-red-500"
-          )}>
-            {metrics.fps}
-          </span>
-        </div>
-        <div className="bg-muted/40 border border-border/50 rounded p-1.5 flex flex-col">
-          <span className="text-[10px] text-muted-foreground uppercase font-mono">Frame</span>
-          <span className="text-base font-mono font-bold leading-tight text-foreground">
-            {metrics.frameTime.toFixed(1)}<span className="text-[10px] text-muted-foreground font-normal">ms</span>
-          </span>
-        </div>
+      <div className="mb-2 flex items-baseline gap-4">
+        {isPlaying ? (
+          <>
+            <span className="flex items-baseline gap-1">
+              <span className={cn("num text-lg font-medium leading-none", fpsTone)}>{metrics.fps}</span>
+              <span className="text-fg-subtle">FPS</span>
+            </span>
+            <span className="flex items-baseline gap-1">
+              <span className="num text-lg font-medium leading-none text-fg">{metrics.frameTime.toFixed(1)}</span>
+              <span className="text-fg-subtle">ms Frame</span>
+            </span>
+          </>
+        ) : (
+          <span className="text-sm text-fg-muted">Paused</span>
+        )}
       </div>
 
-      {/* Frame Timeline 60-frame Graph (R5a) */}
       <div className="mb-2">
-        <div className="flex items-center justify-between text-[9px] text-muted-foreground font-mono mb-1">
-          <span>60-FRAME TIMELINE</span>
-          <span className="text-emerald-400">16.6ms target</span>
+        <div className="mb-1 flex items-center justify-between text-2xs text-fg-subtle">
+          <span>60-frame timeline</span>
+          <span className="num">16.6ms target</span>
         </div>
-        <div className="rounded border border-border/60 overflow-hidden bg-background/50">
-          <canvas
-            ref={canvasRef}
-            width={expanded ? 218 : 188}
-            height={44}
-            className="w-full h-[44px] block"
-          />
-        </div>
+        <canvas ref={canvasRef} width={expanded ? 224 : 200} height={40} className="block h-10 w-full rounded-md bg-canvas" />
       </div>
 
-      {/* Secondary Metrics Summary */}
-      <div className="flex flex-col gap-1 text-[10px] font-mono pt-1 border-t border-border/40">
-        <div className="flex justify-between items-center text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Cpu className="w-3 h-3 text-primary/80" />
-            <span>Draw Calls / Tris</span>
-          </span>
-          <span className="text-foreground font-medium">
+      <dl className="flex flex-col gap-1 text-2xs text-fg-muted">
+        <div className="flex items-center justify-between">
+          <dt className="flex items-center gap-1">
+            <Cpu className="size-3" />
+            Draw Calls / Tris
+          </dt>
+          <dd className="num text-fg">
             {metrics.drawCalls} / {metrics.triangles.toLocaleString()}
-          </span>
+          </dd>
         </div>
-        <div className="flex justify-between items-center text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <HardDrive className="w-3 h-3 text-primary/80" />
-            <span>VRAM</span>
-          </span>
-          <span className={cn("font-medium", isVramOverBudget ? "text-red-400 font-bold" : "text-foreground")}>
+        <div className="flex items-center justify-between">
+          <dt className="flex items-center gap-1">
+            <HardDrive className="size-3" />
+            VRAM
+          </dt>
+          <dd className={cn("num", isVramOverBudget ? "text-danger font-medium" : "text-fg")}>
             {vramMB} MB / {memoryBudget.totalVramBudgetMB} MB
-          </span>
+          </dd>
         </div>
-      </div>
+      </dl>
 
-      {/* Expanded Per-Pass Timings Breakdown (R5a) */}
       {expanded && (
-        <div className="mt-2 pt-2 border-t border-border/50 flex flex-col gap-1.5">
-          <span className="text-[10px] font-semibold text-foreground tracking-tight">Pass Timings</span>
-          <div className="flex flex-col gap-1 text-[10px] font-mono bg-muted/30 p-1.5 rounded border border-border/40">
-            <div className="flex justify-between text-muted-foreground">
-              <span>GBuffer</span>
-              <span className="text-foreground">{(passTimings.gbuffer ?? 0).toFixed(1)}ms</span>
+        <div className="mt-2 flex flex-col gap-1 border-t border-line pt-2 text-2xs">
+          <span className="font-medium text-fg">Pass timings</span>
+          {([["GBuffer", "gbuffer"], ["Shadow", "shadow"], ["Lighting", "lighting"], ["SSR", "ssr"], ["Postprocess", "postprocess"]] as const).map(([label, key]) => (
+            <div key={key} className="flex justify-between text-fg-muted">
+              <span>{label}</span>
+              <span className="num text-fg">{(passTimings[key] ?? 0).toFixed(1)}ms</span>
             </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>Shadow</span>
-              <span className="text-foreground">{(passTimings.shadow ?? 0).toFixed(1)}ms</span>
-            </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>Lighting</span>
-              <span className="text-foreground">{(passTimings.lighting ?? 0).toFixed(1)}ms</span>
-            </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>SSR</span>
-              <span className="text-foreground">{(passTimings.ssr ?? 0).toFixed(1)}ms</span>
-            </div>
-            <div className="flex justify-between text-muted-foreground">
-              <span>Postprocess</span>
-              <span className="text-foreground">{(passTimings.postprocess ?? 0).toFixed(1)}ms</span>
-            </div>
-          </div>
-
-          <div className="flex justify-between text-[9px] text-muted-foreground pt-1">
-            <span>Budget Ratio</span>
-            <span className="font-mono">{(memoryBudget.warnThresholdRatio * 100).toFixed(0)}% warn threshold</span>
+          ))}
+          <div className="flex justify-between pt-1 text-fg-subtle">
+            <span>Budget ratio</span>
+            <span className="num">{(memoryBudget.warnThresholdRatio * 100).toFixed(0)}% warn threshold</span>
           </div>
         </div>
       )}
@@ -265,7 +227,7 @@ export function ScreenshotButton({ canvasRef, className }: { canvasRef: React.Re
   }, [canvasRef])
 
   return (
-    <button onClick={handleScreenshot} className={cn("text-xs bg-card/80 backdrop-blur px-2 py-1 rounded hover:bg-accent transition-colors", className)}>
+    <button onClick={handleScreenshot} className={cn("h-7 rounded-md bg-panel/90 px-2 text-xs text-fg-muted ring-1 ring-line backdrop-blur hover:text-fg", className)}>
       Screenshot
     </button>
   )

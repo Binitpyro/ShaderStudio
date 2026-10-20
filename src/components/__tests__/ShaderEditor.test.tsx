@@ -216,9 +216,9 @@ describe("ShaderEditor Component (Requirement R4)", () => {
       expect(html).toContain("data-testid=\"recompile-btn\"")
       expect(html).toContain("Recompile (Ctrl+Enter)")
       expect(html).toContain("data-testid=\"format-code-btn\"")
-      expect(html).toContain("Format Code")
+      expect(html).toContain("Format code")
       expect(html).toContain("data-testid=\"toggle-minimap-btn\"")
-      expect(html).toContain("Toggle Minimap")
+      expect(html).toContain("Show minimap")
     })
 
     it("toggling minimap updates layoutStore and passes enabled option to Monaco", () => {

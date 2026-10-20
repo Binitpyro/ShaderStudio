@@ -96,28 +96,25 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
       <div
         role="alert"
         className={cn(
-          "flex h-full w-full flex-col items-center justify-center p-6 text-center select-none overflow-auto bg-card/90 text-foreground border border-border/60 rounded-md",
+          "flex h-full w-full flex-col items-center justify-center overflow-auto bg-panel p-6 text-center text-fg",
           className
         )}
       >
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-destructive/10 text-destructive mb-3 ring-1 ring-destructive/20">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-danger-soft text-danger mb-3">
           <AlertTriangle className="h-5 w-5" />
         </div>
 
-        <h3 className="text-sm font-semibold tracking-tight text-foreground">
+        <h3 className="text-sm font-medium text-fg">
           {fallbackTitle}
         </h3>
 
-        <p className="mt-1 max-w-sm text-xs text-muted-foreground break-words">
+        <p className="mt-1 max-w-sm text-xs text-fg-muted break-words">
           {errorMessage}
         </p>
 
         <div className="mt-4 flex items-center gap-2">
           <Button
-            variant="outline"
-            size="sm"
-            onClick={this.resetErrorBoundary}
-            className="h-8 gap-1.5 px-3 text-xs cursor-pointer border-border hover:bg-accent hover:text-accent-foreground"
+            variant="secondary" size="sm" onClick={this.resetErrorBoundary}
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>Try Again</span>
@@ -125,10 +122,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
           {showDetailsToggle && (error?.stack || errorInfo?.componentStack) && (
             <Button
-              variant="ghost"
-              size="sm"
-              onClick={this.toggleDetails}
-              className="h-8 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+              variant="ghost" size="sm" onClick={this.toggleDetails}
             >
               {showDetails ? "Hide Details" : "Show Details"}
             </Button>
@@ -137,7 +131,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
         {showDetails && (
           <div className="mt-3 w-full max-w-md text-left">
-            <pre className="max-h-48 overflow-auto rounded bg-destructive/10 border border-destructive/20 p-2.5 font-mono text-[11px] leading-relaxed text-destructive whitespace-pre-wrap break-all shadow-inner">
+            <pre className="max-h-48 overflow-auto rounded-md bg-danger-soft p-2.5 font-mono text-2xs text-danger whitespace-pre-wrap break-all">
               {error?.stack || errorMessage}
               {errorInfo?.componentStack && `\n\nComponent Stack:${errorInfo.componentStack}`}
             </pre>

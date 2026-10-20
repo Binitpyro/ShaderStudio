@@ -203,7 +203,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={handleNewProject}
           title="New Project"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <FilePlus className="h-3 w-3" />
           <span>New</span>
@@ -213,7 +213,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={() => setShowSaveDialog(true)}
           title="Save Project to DB"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <Save className="h-3 w-3" />
           <span>Save</span>
@@ -223,7 +223,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={() => { refreshProjects(); setShowLoadDialog(true) }}
           title="Load Project from DB"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <FolderOpen className="h-3 w-3" />
           <span>Load</span>
@@ -233,7 +233,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={() => fileInputRef.current?.click()}
           title="Import .shaderstudio or .json file"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <Upload className="h-3 w-3" />
           <span>Import</span>
@@ -243,7 +243,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={() => setShowShadertoyDialog(true)}
           title="Import Shadertoy shader"
-          className="text-[11px] h-7 px-1.5 gap-1 text-primary hover:text-primary"
+          className="text-xs h-7 px-1.5 gap-1 text-brand-text hover:text-brand-text"
         >
           <Sparkles className="h-3 w-3" />
           <span>Shadertoy</span>
@@ -253,20 +253,20 @@ export function ProjectPanel() {
           size="sm"
           onClick={handleExportBundle}
           title="Export as .shaderstudio bundle"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <Download className="h-3 w-3" />
           <span>Export</span>
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-1 pt-1 border-t border-border/50">
+      <div className="grid grid-cols-2 gap-1 pt-1 border-t border-line">
         <Button
           variant="secondary"
           size="sm"
           onClick={handleNativeSave}
           title="Save to native .shaderstudio file"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <HardDriveDownload className="h-3 w-3" />
           <span>Native Save</span>
@@ -276,7 +276,7 @@ export function ProjectPanel() {
           size="sm"
           onClick={handleNativeLoad}
           title="Load from native .shaderstudio file"
-          className="text-[11px] h-7 px-1.5 gap-1"
+          className="text-xs h-7 px-1.5 gap-1"
         >
           <HardDriveUpload className="h-3 w-3" />
           <span>Native Open</span>
@@ -284,19 +284,19 @@ export function ProjectPanel() {
       </div>
 
       {importError && (
-        <div className="text-[10px] text-destructive bg-destructive/10 p-1.5 rounded border border-destructive/20">
+        <div className="text-2xs text-danger bg-danger-soft p-1.5 rounded border border-destructive/20">
           {importError}
         </div>
       )}
 
       {showSaveDialog && (
-        <div className="flex flex-col gap-2 p-2 bg-background rounded border border-border">
+        <div className="flex flex-col gap-2 p-2 bg-canvas rounded border border-line">
           <input
             type="text"
             placeholder="Project name"
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
-            className="text-xs border border-border rounded px-2 py-1 bg-background"
+            className="text-xs border border-line rounded px-2 py-1 bg-canvas"
           />
           <div className="flex gap-1">
             <Button variant="secondary" size="sm" onClick={handleSave} className="flex-1 text-xs">Save</Button>
@@ -306,19 +306,19 @@ export function ProjectPanel() {
       )}
 
       {showLoadDialog && (
-        <div className="flex flex-col gap-2 p-2 bg-background rounded border border-border max-h-48 overflow-auto">
-          {projects.length === 0 && <span className="text-xs text-muted-foreground">No saved projects</span>}
+        <div className="flex flex-col gap-2 p-2 bg-canvas rounded border border-line max-h-48 overflow-auto">
+          {projects.length === 0 && <span className="text-xs text-fg-muted">No saved projects</span>}
           {projects.map((p) => (
             <div key={p.projectId ?? p.name} className="flex items-center gap-2">
               <button
                 onClick={() => handleLoad(p.projectId ?? p.name)}
-                className="flex-1 text-xs text-left hover:text-primary truncate"
+                className="flex-1 text-xs text-left hover:text-brand-text truncate"
               >
                 {p.name}
               </button>
               <button
                 onClick={() => handleDelete(p.projectId ?? p.name)}
-                className="text-xs text-muted-foreground hover:text-destructive p-1"
+                className="text-xs text-fg-muted hover:text-danger p-1"
                 title="Delete project"
               >
                 <Trash2 className="h-3 w-3" />
@@ -330,30 +330,30 @@ export function ProjectPanel() {
       )}
 
       {showShadertoyDialog && (
-        <div className="flex flex-col gap-2 p-2 bg-background rounded border border-border">
-          <div className="text-xs font-semibold text-foreground flex items-center justify-between">
+        <div className="flex flex-col gap-2 p-2 bg-canvas rounded border border-line">
+          <div className="text-xs font-semibold text-fg flex items-center justify-between">
             <span className="flex items-center gap-1">
-              <Sparkles className="h-3 w-3 text-primary" />
+              <Sparkles className="h-3 w-3 text-brand-text" />
               Import from Shadertoy
             </span>
-            <span className="text-[10px] text-muted-foreground font-mono">mainImage(...)</span>
+            <span className="text-2xs text-fg-muted font-mono">mainImage(...)</span>
           </div>
           <input
             type="text"
             placeholder="Project name"
             value={shadertoyName}
             onChange={(e) => setShadertoyName(e.target.value)}
-            className="text-xs border border-border rounded px-2 py-1 bg-background"
+            className="text-xs border border-line rounded px-2 py-1 bg-canvas"
           />
           <textarea
             placeholder="Paste Shadertoy GLSL code here (void mainImage...)"
             value={shadertoyCode}
             onChange={(e) => setShadertoyCode(e.target.value)}
             rows={5}
-            className="text-xs border border-border rounded px-2 py-1 bg-background font-mono resize-none"
+            className="text-xs border border-line rounded px-2 py-1 bg-canvas font-mono resize-none"
           />
           {shadertoyError && (
-            <div className="text-[10px] text-destructive bg-destructive/10 p-1 rounded">
+            <div className="text-2xs text-danger bg-danger-soft p-1 rounded">
               {shadertoyError}
             </div>
           )}

@@ -459,7 +459,7 @@ describe("R1e: Comment & Frame Annotation Nodes", () => {
       )
 
       expect(html).toContain("Default Frame")
-      expect(html).toContain("bg-muted/10")
+      expect(html).toContain("bg-raised")
     })
   })
 
@@ -550,7 +550,7 @@ describe("WorkspaceLayout with real child components", () => {
     it(`renders the full shell with the '${tab}' sidebar tab open`, () => {
       useLayoutStore.setState({ activeActivityTab: tab })
       const html = renderToStaticMarkup(<WorkspaceLayout />)
-      for (const id of ["workspace-layout", "activity-bar", "status-bar", "center-stage-split", "right-inspector"]) {
+      for (const id of ["workspace-layout", "activity-bar", "status-bar", "center-stage", "right-inspector"]) {
         expect(html).toContain(`data-testid="${id}"`)
       }
     })
@@ -568,6 +568,7 @@ describe("WorkspaceLayout with real child components", () => {
 // w2-c coverage: UniformNode persistence + MaterialNode "Open in Editor" (real components, effects/handlers captured)
 // ============================================================================
 import { UniformNode } from "@/components/nodes/UniformNode"
+import { Input, Select, Button } from "@/components/ui"
 import { MaterialNode } from "@/components/nodes/MaterialNode"
 
 const reactFlowSpy = vi.hoisted(() => ({ updateNodeData: null as null | ((id: string, d: unknown) => void) }))
@@ -658,7 +659,7 @@ describe("w2-c: UniformNode persists name/type via node data and keeps the graph
 
   it("editing the name writes it to node data (so it survives save/load)", () => {
     const { tree } = mountNode(UniformNode, props({ name: "a" }))
-    const input = findElement(tree, (el) => el.type === "input")
+    const input = findElement(tree, (el) => el.type === "input" || el.type === Input)
     input.props.onChange({ target: { value: "renamed" } })
     expect(update).toHaveBeenCalledWith("n1", { name: "renamed" })
   })
@@ -666,7 +667,7 @@ describe("w2-c: UniformNode persists name/type via node data and keeps the graph
   it("changing the type writes type + default to node data and to the graph uniform", () => {
     const m = mountNode(UniformNode, props({ name: "a", uniformType: "float" }))
     m.runEffects()
-    const select = findElement(m.tree, (el) => el.type === "select")
+    const select = findElement(m.tree, (el) => el.type === "select" || el.type === Select)
     select.props.onChange({ target: { value: "vec4" } })
     expect(update).toHaveBeenCalledWith("n1", { uniformType: "vec4", defaultValue: [0.5, 0.5, 0.5, 1] })
     expect(useProjectStore.getState().graphUniforms[0]).toMatchObject({ type: "vec4", defaultValue: [0.5, 0.5, 0.5, 1] })
@@ -680,7 +681,7 @@ describe("w2-c: MaterialNode 'Open in Editor'", () => {
   })
   const open = () => {
     const { tree } = mountNode(MaterialNode, { id: "m", selected: true, data: { type: "material", shaderPath: "a/b.wgsl" } })
-    const btn = findElement(tree, (el) => el.type === "button")
+    const btn = findElement(tree, (el) => el.type === "button" || el.type === Button)
     expect(btn).toBeTruthy()
     btn.props.onClick()
   }

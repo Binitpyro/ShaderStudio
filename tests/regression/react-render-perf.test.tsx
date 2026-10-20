@@ -12,7 +12,7 @@ vi.mock("@/adapters/threejs", () => ({ threejsAdapter: { id: "threejs" } }))
 
 import { AudioNode } from "@/components/nodes/AudioNode"
 import { NodePreviewViewport } from "@/components/inspector/NodePreviewViewport"
-import { TemplatesModal } from "@/components/TemplatesModal"
+import { TemplatesSidebar } from "@/components/sidebars/TemplatesSidebar"
 import { getActiveAdapter, loadAdapter } from "@/adapters/activeAdapter"
 import "@/audio/audioEngine" // lazy chunk in the app; the engine registers itself on load
 import { renderCoordinator } from "@/core/renderCoordinator"
@@ -183,8 +183,8 @@ describe("template apply writes GLSL into the glsl slot", () => {
     try {
       useProjectStore.setState({ activeBackend: "webgpu", wgslSource: "// wgsl", glslSource: "// old" })
       const before = useProjectStore.getState().recompileTrigger
-      const m = mount(TemplatesModal, { isOpen: true, onClose: () => {} })
-      const btn = findAll(m.tree, (el) => typeof el.props.onClick === "function" && textOf(el).includes("Load Shader"))[0] // first card = SHADER_TEMPLATES[0]
+      const m = mount(TemplatesSidebar, {})
+      const btn = findAll(m.tree, (el) => typeof el.props.onClick === "function" && textOf(el).includes("Load shader"))[0] // first card = SHADER_TEMPLATES[0]
       btn.props.onClick()
       const s = useProjectStore.getState()
       expect(s.glslSource).toBe(tpl.shaderSource)

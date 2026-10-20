@@ -1132,11 +1132,11 @@ describe("Adversarial Challenger M4: Monaco Shader Editor & Console Enhancements
       useLayoutStore.setState({ editorMinimap: false })
       const htmlOff = renderToStaticMarkup(<ShaderEditor />)
       expect(htmlOff).toContain("data-testid=\"toggle-minimap-btn\"")
-      expect(htmlOff).not.toContain("bg-accent text-foreground")
+      expect(htmlOff).not.toContain("bg-active text-fg")
 
       useLayoutStore.setState({ editorMinimap: true })
       const htmlOn = renderToStaticMarkup(<ShaderEditor />)
-      expect(htmlOn).toContain("bg-accent text-foreground font-medium")
+      expect(htmlOn).toContain("bg-active text-fg")
     })
   })
 
@@ -1164,7 +1164,7 @@ describe("Adversarial Challenger M4: Monaco Shader Editor & Console Enhancements
       const html = renderToStaticMarkup(<ShaderEditor />)
       expect(html).toContain("data-testid=\"recompile-btn\"")
       expect(html).toContain("Recompile (Ctrl+Enter)")
-      expect(html).toContain("Run")
+      expect(html).toContain("aria-label=\"Recompile (Ctrl+Enter)\"")
     })
 
     it("Read-only mode blocks keystroke editing and provides Detach button", () => {

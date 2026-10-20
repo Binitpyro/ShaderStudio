@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { ErrorBoundary } from "@/components/common/ErrorBoundary"
-import { ErrorBoundary as ReExportedErrorBoundary } from "@/components/ErrorBoundary"
 
 describe("ErrorBoundary Component", () => {
   it("initializes with hasError false and renders children normally", () => {
@@ -117,9 +116,5 @@ describe("ErrorBoundary Component", () => {
     expect(boundary.state.errorInfo).toBeNull()
     expect(boundary.state.showDetails).toBe(false)
     expect(onResetSpy).toHaveBeenCalledTimes(1)
-  })
-
-  it("is properly re-exported from @/components/ErrorBoundary", () => {
-    expect(ReExportedErrorBoundary).toBe(ErrorBoundary)
   })
 })

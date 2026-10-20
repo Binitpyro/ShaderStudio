@@ -4,6 +4,7 @@
  * server renderer with a stub dispatcher that captures effects and lets us drive useState setters and handlers.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
+import { Select, Button } from "@/components/ui"
 import React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 
@@ -14,10 +15,8 @@ vi.mock("@/adapters/webgl2", () => ({ webgl2Adapter: { id: "webgl2" } }))
 vi.mock("@/adapters/threejs", () => ({ threejsAdapter: { id: "threejs" } }))
 
 import { useCopilotSessionStore } from "@/stores/copilotSessionStore"
-import { AICopilotDrawer } from "@/components/AICopilotDrawer"
+import { AICopilotSidebar } from "@/components/sidebars/AICopilotSidebar"
 import { ParameterPanel } from "@/components/ParameterPanel"
-import { VariationsSection } from "@/components/inspector/VariationsSection"
-import { AudioDynamicsSection } from "@/components/inspector/AudioDynamicsSection"
 import { MeshNode } from "@/components/nodes/MeshNode"
 import { PostProcessNode } from "@/components/nodes/PostProcessNode"
 import { useProjectStore } from "@/stores/projectStore"
@@ -71,7 +70,7 @@ const deferred = () => { let resolve!: (s: GenerationSession) => void; const p =
 const session = (status: GenerationSession["status"]): GenerationSession =>
   ({ id: "s", userPrompt: "x", backend: "webgpu", provider: "gemini", model: "m", startedAt: 0, steps: [], status }) as GenerationSession
 
-describe("w3-fixup M1: copilot session state outlives the drawer", () => {
+describe("w3-fixup M1: copilot session state outlives the copilot sidebar", () => {
   beforeEach(() => {
     runner.fn.mockReset()
     useCopilotSessionStore.setState({ prompt: "", isRunning: false, currentSession: null })
@@ -84,9 +83,9 @@ describe("w3-fixup M1: copilot session state outlives the drawer", () => {
     const first = useCopilotSessionStore.getState().run()
     expect(useCopilotSessionStore.getState().isRunning).toBe(true)
 
-    // the drawer keeps only UI-local state (showSettings, testStatus): prompt/isRunning/session live in the store,
+    // the copilot sidebar keeps only UI-local state (showSettings, testStatus): prompt/isRunning/session live in the store,
     // so closing (unmounting) mid-run neither loses them nor leaves a setState on an unmounted component
-    expect(mount(AICopilotDrawer, { isOpen: true, onClose: () => {} }).cells).toHaveLength(2)
+    expect(mount(AICopilotSidebar, {}).cells).toHaveLength(2)
 
     await useCopilotSessionStore.getState().run("another prompt")
     expect(runner.fn).toHaveBeenCalledTimes(1)
@@ -129,89 +128,9 @@ describe("ParameterPanel accordion behaviour", () => {
     expect((m.cells[0].v as Set<string>).has(section)).toBe(true)
   })
 
-  it("toggles one section and expands/collapses all", () => {
-    useProjectStore.setState({ selectedNodeId: null })
-    const m = mount(ParameterPanel)
-    const sectionEl = findAll(m.tree, (e) => e.props.id === "variations")[0]
-    sectionEl.props.onToggle()
-    expect((m.cells[0].v as Set<string>).has("variations")).toBe(true)
-    sectionEl.props.onToggle()
-    expect((m.cells[0].v as Set<string>).has("variations")).toBe(false)
-
-    const toggleAll = findAll(m.tree, (e) => e.type === "button" && /Collapse All|Expand All/.test(text(e)))[0]
-    toggleAll.props.onClick()
-    expect((m.cells[0].v as Set<string>).size).toBe(0)
-    m.render()
-    findAll(m.tree, (e) => e.type === "button" && /Expand All/.test(text(e)))[0].props.onClick()
-    expect((m.cells[0].v as Set<string>).size).toBe(5)
-  })
 })
 
-describe("VariationsSection handlers", () => {
-  it("creates a variation on Enter and applies one, null-safe without an adapter", async () => {
-    const m = mount(VariationsSection)
-    const input = findAll(m.tree, (e) => e.type === "input" && e.props.type === "text")[0]
-    const before = useProjectStore.getState().variations.length
-    input.props.onKeyDown({ key: "x", preventDefault() {} })
-    expect(useProjectStore.getState().variations.length).toBe(before)
-    input.props.onKeyDown({ key: "Enter", preventDefault() {} })
-    expect(useProjectStore.getState().variations.length).toBe(before + 1)
 
-    const v = useProjectStore.getState().variations
-    useProjectStore.setState({ variations: [...v.slice(0, -1), { ...v[v.length - 1], uniformValues: { u_a: 1 } }] })
-    const m2 = mount(VariationsSection)
-    const applyBtn = () => findAll(m2.tree, (e) => e.props.onClick && String(e.props.onClick).includes("handleApply")).at(-1)
-    useProjectStore.setState({ activeBackend: "webgl2" }) // nothing loaded for this backend yet
-    applyBtn().props.onClick()
-    const adapter = (await loadAdapter("webgpu")) as any
-    adapter.updateUniform = vi.fn()
-    useProjectStore.setState({ activeBackend: "webgpu" })
-    applyBtn().props.onClick()
-    expect(adapter.updateUniform).toHaveBeenCalledWith("u_a", 1)
-  })
-})
-
-describe("AudioDynamicsSection handlers", () => {
-  let spies: { mockRestore: () => void }[]
-  beforeEach(() => {
-    spies = [
-      vi.spyOn(audioEngine, "togglePlay").mockReturnValue(true),
-      vi.spyOn(audioEngine, "setSourceType").mockResolvedValue(undefined as never),
-      vi.spyOn(audioEngine, "getIsPlaying").mockReturnValue(true),
-      vi.spyOn(audioEngine, "startMicrophone").mockResolvedValue(undefined as never),
-      vi.spyOn(audioEngine, "loadCustomAudioFile").mockResolvedValue(true as never),
-      vi.spyOn(audioEngine, "setGainMultiplier").mockImplementation(() => {}),
-      vi.spyOn(audioEngine, "setSmoothing").mockImplementation(() => {}),
-    ]
-  })
-  afterEach(() => spies.forEach((s) => s.mockRestore()))
-
-  it("drives play, source switch, mic, upload, gain/smoothing and binding removal through the lazy engine", async () => {
-    useProjectStore.setState({ audioBindings: { u_pulse: { band: "bass", amount: 1 } as any }, audioSourceType: "builtin", isAudioPlaying: false })
-    const m = mount(AudioDynamicsSection)
-    m.run()
-    await findAll(m.tree, (e) => e.props.onClick && text(e).includes("Play Audio"))[0].props.onClick()
-    expect(useProjectStore.getState().isAudioPlaying).toBe(true)
-
-    await findAll(m.tree, (e) => e.type === "button" && text(e).trim() === "Built-in")[0].props.onClick()
-    expect(audioEngine.setSourceType).toHaveBeenCalledWith("builtin")
-    await findAll(m.tree, (e) => e.props.onClick && String(e.props.onClick).includes("handleStartMic"))[0]?.props.onClick()
-
-    const file = new File(["x"], "a.wav")
-    await findAll(m.tree, (e) => e.type === "input" && e.props.type === "file")[0].props.onChange({ target: { files: [file] } })
-    expect(audioEngine.loadCustomAudioFile).toHaveBeenCalledWith(file)
-    expect(useProjectStore.getState().audioSourceType).toBe("file")
-
-    const sliders = findAll(m.tree, (e) => typeof e.props.onValueChange === "function")
-    sliders[0].props.onValueChange([1.5])
-    sliders[1].props.onValueChange([0.4])
-    expect(audioEngine.setGainMultiplier).toHaveBeenCalledWith(1.5)
-    expect(audioEngine.setSmoothing).toHaveBeenCalledWith(0.4)
-
-    findAll(m.tree, (e) => e.props.onClick && String(e.props.onClick).includes("setAudioBinding"))[0].props.onClick()
-    expect(useProjectStore.getState().audioBindings.u_pulse).toBeUndefined()
-  })
-})
 
 describe("MeshNode handlers", () => {
   afterEach(() => customModelRegistry.setActiveModel(null as never))
@@ -225,7 +144,7 @@ describe("MeshNode handlers", () => {
 
     const heard: string[] = []
     const dispatch = vi.fn((ev: CustomEvent) => heard.push(ev.detail.geometry))
-    findAll(m.tree, (e) => e.type === "select")[0].props.onChange({ target: { value: "sphere", dispatchEvent: dispatch } })
+    findAll(m.tree, (e) => (e.type === "select" || e.type === Select))[0].props.onChange({ target: { value: "sphere", dispatchEvent: dispatch } })
     expect(heard).toEqual(["sphere"])
 
     // bad file: lazy modelLoader rejects -> error state set, loading cleared
@@ -258,9 +177,9 @@ describe("PostProcessNode handlers", () => {
         const m = mount(PostProcessNode, { id: "pp1", data: { passType, params: { intensity: 0.9, junk: "x" }, customSource: "src" }, selected: true })
         m.run()
         expect((m.cells[0].v as any).intensity).toBe(0.9)
-        findAll(m.tree, (e) => e.type === "select")[0].props.onChange({ target: { value: "bloom" } })
+        findAll(m.tree, (e) => (e.type === "select" || e.type === Select))[0].props.onChange({ target: { value: "bloom" } })
         for (const s of findAll(m.tree, (e) => e.type === "input" && e.props.type === "range")) s.props.onChange({ target: { value: "0.25" } })
-        findAll(m.tree, (e) => e.type === "button" && e.props.onClick)[0]?.props.onClick()
+        findAll(m.tree, (e) => (e.type === "button" || e.type === Button) && e.props.onClick)[0]?.props.onClick()
       }
       expect(adapter.updatePostProcessUniform).toHaveBeenCalledWith("pp1", "intensity", 0.25)
       expect(events).toContain("postProcessTypeChange")

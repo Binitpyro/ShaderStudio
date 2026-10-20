@@ -1,124 +1,78 @@
+import { useEffect } from "react"
+import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels"
 import { useLayoutStore } from "@/stores/layoutStore"
-import { Group, Panel, Separator } from "react-resizable-panels"
+import { useProjectStore } from "@/stores/projectStore"
 import { Viewport } from "@/components/Viewport"
 import { ShaderEditor } from "@/components/ShaderEditor"
 import { ErrorBoundary } from "@/components/common/ErrorBoundary"
-import { useProjectStore } from "@/stores/projectStore"
-import { Maximize2, Minimize2, Columns, Rows } from "lucide-react"
+import { PanelHeader } from "@/components/ui"
+import { TipIconButton } from "./ShortcutTip"
+import { Maximize2, Minimize2, Columns2, Rows2 } from "lucide-react"
+import { SEPARATOR_H, SEPARATOR_V, usePersistedGroup } from "./usePersistedGroup"
+import { cn } from "@/lib/utils"
 
+/**
+ * Viewport over editor. Both panes are ALWAYS mounted: maximizing collapses the other Panel through the
+ * resizable-panels API (and marks it inert), so Viewport and Monaco are never remounted by any layout change.
+ */
 export function CenterStage() {
   const splitOrientation = useLayoutStore((state) => state.splitOrientation)
   const toggleSplitOrientation = useLayoutStore((state) => state.toggleSplitOrientation)
   const maximizedPanel = useLayoutStore((state) => state.maximizedPanel)
   const toggleMaximizeViewport = useLayoutStore((state) => state.toggleMaximizeViewport)
   const toggleMaximizeEditor = useLayoutStore((state) => state.toggleMaximizeEditor)
+  const group = usePersistedGroup("center-split")
 
-  // 1. Maximize Viewport Mode
-  if (maximizedPanel === "viewport") {
-    return (
-      <div data-testid="center-stage-max-viewport" className="flex h-full w-full flex-col overflow-hidden bg-background">
-        <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card/60 px-3 select-none">
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            3D Viewport (Maximized)
-          </span>
-          <button
-            type="button"
-            onClick={toggleMaximizeViewport}
-            title="Restore Split"
-            aria-label="Restore Split"
-            className="flex items-center gap-1.5 rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
-          >
-            <Minimize2 className="h-3.5 w-3.5" />
-            <span>Restore</span>
-          </button>
-        </div>
-        <div className="flex-1 overflow-hidden">
-          <ErrorBoundary
-            fallbackTitle="Viewport Error"
-            fallbackMessage="Failed to initialize or render 3D graphics viewport."
-            onReset={() => {
-              useProjectStore.getState().setDeviceLost(false)
-              useProjectStore.getState().triggerRecompile()
-            }}
-          >
-            <Viewport className="h-full w-full" />
-          </ErrorBoundary>
-        </div>
-      </div>
-    )
+  const viewportRef = usePanelRef()
+  const editorRef = usePanelRef()
+
+  // Drive collapse from the store (both directions are idempotent).
+  useEffect(() => {
+    const sync = (panel: ReturnType<typeof usePanelRef>["current"], visible: boolean) => {
+      if (!panel) return
+      if (visible && panel.isCollapsed()) panel.expand()
+      else if (!visible && !panel.isCollapsed()) panel.collapse()
+    }
+    sync(viewportRef.current, maximizedPanel !== "editor")
+    sync(editorRef.current, maximizedPanel !== "viewport")
+  }, [maximizedPanel, viewportRef, editorRef])
+
+  // Dragging a pane shut by hand == maximizing the other one.
+  const onPaneResize = (self: "viewport" | "editor") => (size: { inPixels: number }) => {
+    const other = (self === "viewport" ? editorRef : viewportRef).current
+    if (size.inPixels > 0 || !other || other.getSize().inPixels <= 0) return
+    const st = useLayoutStore.getState()
+    const target = self === "viewport" ? "editor" : "viewport"
+    if (st.maximizedPanel !== target) st.setMaximizedPanel(target)
   }
 
-  // 2. Maximize Editor Mode
-  if (maximizedPanel === "editor") {
-    return (
-      <div data-testid="center-stage-max-editor" className="flex h-full w-full flex-col overflow-hidden bg-background">
-        <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card/60 px-3 select-none">
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Shader Editor (Maximized)
-          </span>
-          <button
-            type="button"
-            onClick={toggleMaximizeEditor}
-            title="Restore Split"
-            aria-label="Restore Split"
-            className="flex items-center gap-1.5 rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
-          >
-            <Minimize2 className="h-3.5 w-3.5" />
-            <span>Restore</span>
-          </button>
-        </div>
-        <div className="flex-1 overflow-hidden">
-          <ErrorBoundary
-            fallbackTitle="Shader Editor Error"
-            fallbackMessage="Monaco editor encountered a fatal exception."
-            onReset={() => {
-              useProjectStore.getState().setLastCompileError(null)
-            }}
-          >
-            <ShaderEditor />
-          </ErrorBoundary>
-        </div>
-      </div>
-    )
-  }
-
-  // 3. Dual-Split Mode (Vertical or Horizontal)
   const isVertical = splitOrientation === "vertical"
+  const maximized = maximizedPanel !== "none"
 
   return (
-    <div data-testid="center-stage-split" className="h-full w-full overflow-hidden bg-background">
-      <Group orientation={splitOrientation} className="h-full w-full">
-        {/* Pane 1: 3D Viewport */}
-        <Panel defaultSize="55%" minSize="20%" className="overflow-hidden">
-          <div className="flex h-full flex-col overflow-hidden">
-            <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card/60 px-3 select-none">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                3D Viewport
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={toggleSplitOrientation}
-                  title={isVertical ? "Split Horizontally" : "Split Vertically"}
-                  aria-label="Toggle Split Orientation"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
-                >
-                  {isVertical ? <Columns className="h-3.5 w-3.5" /> : <Rows className="h-3.5 w-3.5" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={toggleMaximizeViewport}
-                  title="Maximize Viewport"
-                  aria-label="Maximize Viewport"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-hidden">
+    <div data-testid="center-stage" data-maximized={maximizedPanel} className="h-full w-full overflow-hidden bg-canvas">
+      <Group {...group} orientation={splitOrientation} className="h-full w-full">
+        <Panel id="stage-viewport" defaultSize="55%" minSize="15%" collapsible collapsedSize={0} panelRef={viewportRef} onResize={onPaneResize("viewport")} className="overflow-hidden">
+          <section aria-label="Viewport" inert={maximizedPanel === "editor"} className="flex h-full flex-col overflow-hidden">
+            <PanelHeader
+              title="Viewport"
+              className="bg-panel"
+              actions={
+                <>
+                  {!maximized && (
+                    <TipIconButton label={isVertical ? "Split horizontally" : "Split vertically"} onClick={toggleSplitOrientation}>
+                      {isVertical ? <Columns2 /> : <Rows2 />}
+                    </TipIconButton>
+                  )}
+                  <TipIconButton label={maximizedPanel === "viewport" ? "Restore layout" : "Maximize viewport"} aria-pressed={maximizedPanel === "viewport"} onClick={toggleMaximizeViewport}>
+                    {maximizedPanel === "viewport" ? <Minimize2 /> : <Maximize2 />}
+                  </TipIconButton>
+                </>
+              }
+            />
+            <div className="min-h-0 flex-1 overflow-hidden">
               <ErrorBoundary
-                fallbackTitle="Viewport Error"
+                fallbackTitle="Viewport error"
                 fallbackMessage="Failed to initialize or render 3D graphics viewport."
                 onReset={() => {
                   useProjectStore.getState().setDeviceLost(false)
@@ -128,40 +82,25 @@ export function CenterStage() {
                 <Viewport className="h-full w-full" />
               </ErrorBoundary>
             </div>
-          </div>
+          </section>
         </Panel>
 
-        {/* Resizable Divider Handle */}
-        <Separator
-          className={
-            isVertical
-              ? "h-1.5 bg-border hover:bg-primary transition-colors duration-150 cursor-row-resize"
-              : "w-1.5 bg-border hover:bg-primary transition-colors duration-150 cursor-col-resize"
-          }
-        />
+        <Separator className={cn(isVertical ? SEPARATOR_V : SEPARATOR_H, maximized && "hidden")} />
 
-        {/* Pane 2: Monaco Shader Editor */}
-        <Panel defaultSize="45%" minSize="20%" className="overflow-hidden">
-          <div className="flex h-full flex-col overflow-hidden">
-            <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card/60 px-3 select-none">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Shader Editor
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={toggleMaximizeEditor}
-                  title="Maximize Editor"
-                  aria-label="Maximize Editor"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-hidden">
+        <Panel id="stage-editor" defaultSize="45%" minSize="15%" collapsible collapsedSize={0} panelRef={editorRef} onResize={onPaneResize("editor")} className="overflow-hidden">
+          <section aria-label="Shader editor" inert={maximizedPanel === "viewport"} className="flex h-full flex-col overflow-hidden">
+            <PanelHeader
+              title="Shader editor"
+              className="bg-panel"
+              actions={
+                <TipIconButton label={maximizedPanel === "editor" ? "Restore layout" : "Maximize editor"} aria-pressed={maximizedPanel === "editor"} onClick={toggleMaximizeEditor}>
+                  {maximizedPanel === "editor" ? <Minimize2 /> : <Maximize2 />}
+                </TipIconButton>
+              }
+            />
+            <div className="min-h-0 flex-1 overflow-hidden">
               <ErrorBoundary
-                fallbackTitle="Shader Editor Error"
+                fallbackTitle="Shader editor error"
                 fallbackMessage="Monaco editor encountered a fatal exception."
                 onReset={() => {
                   useProjectStore.getState().setLastCompileError(null)
@@ -170,7 +109,7 @@ export function CenterStage() {
                 <ShaderEditor />
               </ErrorBoundary>
             </div>
-          </div>
+          </section>
         </Panel>
       </Group>
     </div>

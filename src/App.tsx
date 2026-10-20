@@ -7,9 +7,7 @@ import { Toolbar } from "@/components/Toolbar"
 import { WorkspaceLayout } from "@/components/layout/WorkspaceLayout"
 import { ErrorBoundary } from "@/components/common/ErrorBoundary"
 
-const AICopilotDrawer = lazy(() => import("@/components/AICopilotDrawer").then((m) => ({ default: m.AICopilotDrawer })))
 const ExportModal = lazy(() => import("@/components/ExportModal").then((m) => ({ default: m.ExportModal })))
-const TemplatesModal = lazy(() => import("@/components/TemplatesModal").then((m) => ({ default: m.TemplatesModal })))
 
 /** Re-parse inspector uniforms for the active source. Always applies the result so a shader without uniforms clears the previous shader's. */
 export function syncParsedUniforms(source: string, backend: BackendType) {
@@ -18,9 +16,7 @@ export function syncParsedUniforms(source: string, backend: BackendType) {
 }
 
 function App() {
-  const [isCopilotOpen, setIsCopilotOpen] = useState(false)
   const [isExportOpen, setIsExportOpen] = useState(false)
-  const [isTemplatesOpen, setIsTemplatesOpen] = useState(false)
   const shaderSource = useProjectStore((state) => state.shaderSource)
   const activeBackend = useProjectStore((state) => state.activeBackend)
 
@@ -73,16 +69,11 @@ function App() {
   }, [shaderSource, activeBackend])
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground relative">
-      <Toolbar
-        isCopilotOpen={isCopilotOpen}
-        onToggleCopilot={() => setIsCopilotOpen((prev) => !prev)}
-        onOpenExport={() => setIsExportOpen(true)}
-        onOpenTemplates={() => setIsTemplatesOpen(true)}
-      />
-      <main className="flex-1 overflow-hidden">
+    <div className="relative flex h-screen flex-col overflow-hidden bg-canvas text-fg">
+      <Toolbar onOpenExport={() => setIsExportOpen(true)} />
+      <main className="min-h-0 flex-1 overflow-hidden">
         <ErrorBoundary
-          fallbackTitle="Application Workspace Error"
+          fallbackTitle="Workspace error"
           fallbackMessage="The workspace encountered an unexpected error. You can retry mounting the workspace below."
         >
           <WorkspaceLayout />
@@ -90,9 +81,7 @@ function App() {
       </main>
       {/* Mounted only while open so their chunks load on demand. */}
       <Suspense fallback={null}>
-        {isCopilotOpen && <AICopilotDrawer isOpen onClose={() => setIsCopilotOpen(false)} />}
         {isExportOpen && <ExportModal isOpen onClose={() => setIsExportOpen(false)} />}
-        {isTemplatesOpen && <TemplatesModal isOpen onClose={() => setIsTemplatesOpen(false)} />}
       </Suspense>
     </div>
   )

@@ -133,8 +133,8 @@ describe("layoutStore: activity dock", () => {
     useLayoutStore.setState({ activeActivityTab: "copilot", isLeftSidebarOpen: true })
     let html = renderToStaticMarkup(<ActivityBar />)
     expect(html).toContain('data-testid="activity-bar"')
-    expect(html).toContain('aria-label="AI Copilot" data-active="true"')
-    expect(html).toContain('aria-label="Node Graph" data-active="false"')
+    expect(html).toMatch(/aria-label="Copilot"[^>]*data-active="true"/)
+    expect(html).toMatch(/aria-label="Graph"[^>]*data-active="false"/)
 
     for (const tab of TABS) {
       useLayoutStore.setState({ activeActivityTab: tab, isLeftSidebarOpen: true })
@@ -144,7 +144,7 @@ describe("layoutStore: activity dock", () => {
     useLayoutStore.setState({ activeActivityTab: null, isLeftSidebarOpen: false, isRightInspectorOpen: false })
     html = renderToStaticMarkup(<ActivityBar />)
     expect(html).not.toContain('data-active="true"')
-    expect(html).toContain('aria-label="AI Copilot" data-active="false"')
+    expect(html).toMatch(/aria-label="Copilot"[^>]*data-active="false"/)
   })
 
   it("SidebarDock tolerates an unknown tab id and renders nothing when closed", () => {
@@ -284,7 +284,7 @@ describe("layoutStore: split / maximize", () => {
     st().toggleSplitOrientation()
     st().toggleMaximizeViewport()
     expect(st().splitOrientation).toBe("horizontal")
-    expect(renderToStaticMarkup(<CenterStage />)).toContain("Split Vertically")
+    expect(renderToStaticMarkup(<CenterStage />)).toContain("Split vertically")
   })
 })
 
@@ -296,8 +296,7 @@ describe("layoutStore: jumpToLine", () => {
 
   it("un-maximizes a maximized Viewport so the editor is revealed", () => {
     st().setMaximizedPanel("viewport")
-    expect(renderToStaticMarkup(<CenterStage />)).toContain("3D Viewport (Maximized)")
-    expect(renderToStaticMarkup(<CenterStage />)).not.toContain("Shader Editor")
+    expect(renderToStaticMarkup(<CenterStage />)).toContain('data-maximized="viewport"')
 
     st().jumpToLine(42, 7)
     expect(st().maximizedPanel).toBe("none")
@@ -306,9 +305,9 @@ describe("layoutStore: jumpToLine", () => {
     expect(st().jumpTarget?.timestamp).toBeGreaterThan(0)
 
     const html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain('data-testid="center-stage-split"')
-    expect(html).toContain("3D Viewport")
-    expect(html).toContain("Shader Editor")
+    expect(html).toContain('data-maximized="none"')
+    expect(html).toContain("Mock Viewport")
+    expect(html).toContain("Mock Shader Editor")
   })
 
   it("keeps a maximized Editor maximized and leaves split mode untouched", () => {
@@ -317,7 +316,7 @@ describe("layoutStore: jumpToLine", () => {
     expect(st().maximizedPanel).toBe("editor")
     expect(st().jumpTarget?.line).toBe(108)
     expect(st().jumpTarget?.column).toBe(12)
-    expect(renderToStaticMarkup(<CenterStage />)).toContain("Shader Editor (Maximized)")
+    expect(renderToStaticMarkup(<CenterStage />)).toContain('data-maximized="editor"')
 
     useLayoutStore.setState({ maximizedPanel: "none" })
     st().jumpToLine(15, 3)
@@ -380,83 +379,57 @@ describe("layout components", () => {
 
   it("WorkspaceLayout renders the full shell with the inspector open", () => {
     const html = renderToStaticMarkup(<WorkspaceLayout />)
-    for (const id of ["workspace-layout", "activity-bar", "status-bar", "center-stage-split", "right-inspector"]) {
+    for (const id of ["workspace-layout", "activity-bar", "status-bar", "center-stage", "right-inspector", "console-drawer"]) {
       expect(html).toContain(`data-testid="${id}"`)
     }
   })
 
-  it("WorkspaceLayout with every peripheral panel collapsed keeps only the stage", () => {
-    useLayoutStore.setState({
-      isLeftSidebarOpen: false,
-      activeActivityTab: null,
-      isRightInspectorOpen: false,
-      isConsoleOpen: false,
-    })
+  it("WorkspaceLayout with every peripheral panel closed keeps all panels mounted but inert", () => {
+    useLayoutStore.setState({ isLeftSidebarOpen: false, activeActivityTab: null, isRightInspectorOpen: false, isConsoleOpen: false })
     const html = renderToStaticMarkup(<WorkspaceLayout />)
-    for (const id of ["workspace-layout", "activity-bar", "center-stage-split", "status-bar"]) {
+    for (const id of ["workspace-layout", "activity-bar", "center-stage", "status-bar", "right-inspector", "console-drawer"]) {
       expect(html).toContain(`data-testid="${id}"`)
     }
-    expect(html).not.toContain('data-testid="right-inspector"')
-    expect(html).not.toContain('data-testid="console-drawer"')
-    expect(html).not.toContain('id="left-sidebar"')
-    expect(html).not.toContain('id="right-inspector"')
-    expect(html).not.toContain('id="console-drawer-panel"')
+    expect(html).toMatch(/<aside[^>]*inert=""[^>]*data-testid="right-inspector"|<aside[^>]*data-testid="right-inspector"[^>]*inert=""/)
   })
 
-  it("CenterStage renders max-viewport, max-editor and dual-split modes", () => {
-    useLayoutStore.setState({ maximizedPanel: "viewport" })
-    let html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain('data-testid="center-stage-max-viewport"')
-    expect(html).toContain("3D Viewport (Maximized)")
-    expect(html).not.toContain("Shader Editor")
-
-    useLayoutStore.setState({ maximizedPanel: "editor" })
-    html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain('data-testid="center-stage-max-editor"')
-    expect(html).toContain("Shader Editor (Maximized)")
-    expect(html).not.toContain("3D Viewport")
-
-    useLayoutStore.setState({ maximizedPanel: "none", splitOrientation: "vertical" })
-    html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain('data-testid="center-stage-split"')
-    expect(html).toContain("Split Horizontally")
+  it("CenterStage marks the maximized mode and keeps both panes in the DOM", () => {
+    for (const mode of ["viewport", "editor", "none"] as const) {
+      useLayoutStore.setState({ maximizedPanel: mode })
+      const html = renderToStaticMarkup(<CenterStage />)
+      expect(html).toContain(`data-maximized="${mode}"`)
+      expect(html).toContain("Mock Viewport")
+      expect(html).toContain("Mock Shader Editor")
+    }
   })
 
-  it("CenterStage separator cursor follows the split orientation", () => {
+  it("CenterStage separator is horizontal or vertical with the split orientation", () => {
     useLayoutStore.setState({ splitOrientation: "vertical" })
-    expect(renderToStaticMarkup(<CenterStage />)).toContain("cursor-row-resize")
+    expect(renderToStaticMarkup(<CenterStage />)).toContain('aria-orientation="horizontal"')
     useLayoutStore.setState({ splitOrientation: "horizontal" })
-    expect(renderToStaticMarkup(<CenterStage />)).toContain("cursor-col-resize")
+    expect(renderToStaticMarkup(<CenterStage />)).toContain('aria-orientation="vertical"')
   })
 
-  it("CenterStage falls back to dual-split on a malformed maximizedPanel", () => {
+  it("CenterStage falls back to the split view on a malformed maximizedPanel", () => {
     useLayoutStore.setState({ maximizedPanel: "invalid_panel" as never })
     const html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain('data-testid="center-stage-split"')
-    expect(html).not.toContain('data-testid="center-stage-max-viewport"')
-    expect(html).not.toContain('data-testid="center-stage-max-editor"')
+    expect(html).toContain("Mock Viewport")
+    expect(html).toContain("Mock Shader Editor")
   })
 
-  it("CenterStage action buttons are locked out per mode", () => {
+  it("CenterStage action buttons follow the mode", () => {
     useLayoutStore.setState({ maximizedPanel: "viewport" })
     let html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain("Restore Split")
-    expect(html).not.toContain("Maximize Viewport")
-    expect(html).not.toContain("Maximize Editor")
-    expect(html).not.toContain("Split Horizontally")
-
-    useLayoutStore.setState({ maximizedPanel: "editor" })
-    html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain("Restore Split")
-    expect(html).not.toContain("Maximize Viewport")
-    expect(html).not.toContain("Maximize Editor")
+    expect(html).toContain("Restore layout")
+    expect(html).not.toContain("Maximize viewport")
+    expect(html).not.toContain("Split horizontally")
 
     useLayoutStore.setState({ maximizedPanel: "none", splitOrientation: "vertical" })
     html = renderToStaticMarkup(<CenterStage />)
-    expect(html).toContain("Maximize Viewport")
-    expect(html).toContain("Maximize Editor")
-    expect(html).toContain("Split Horizontally")
-    expect(html).not.toContain("Restore Split")
+    expect(html).toContain("Maximize viewport")
+    expect(html).toContain("Maximize editor")
+    expect(html).toContain("Split horizontally")
+    expect(html).not.toContain("Restore layout")
   })
 
   it("ConsoleDrawer shows per-error cards with line refs, Jump and Clear, and resets when cleared", () => {
@@ -498,12 +471,11 @@ describe("layout components", () => {
     expect(html).not.toContain("Jump")
   })
 
-  it("StatusBar renders backend label, bridge state and default telemetry", () => {
+  it("StatusBar renders language, bridge state and console toggle", () => {
     const html = renderToStaticMarkup(<StatusBar />)
     expect(html).toContain('data-testid="status-bar"')
-    expect(html).toContain("Node Graph")
     expect(html).toContain("WGSL")
-    expect(html).toContain("Bridge: Offline")
-    expect(html).toContain("60 FPS · 16.6ms")
+    expect(html).toContain("Bridge offline")
+    expect(html).toContain("Toggle console")
   })
 })

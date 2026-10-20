@@ -20,6 +20,7 @@ import {
   LayoutGrid,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { IconButton, Kbd } from "@/components/ui"
 import type { GraphNodeData } from "@/core/graphCompiler"
 import { DEFAULT_PRIMITIVE_PARAMS } from "@/core/sdf/sdfPrimitives"
 import { DEFAULT_OPERATOR_PARAMS } from "@/core/sdf/sdfOperators"
@@ -377,6 +378,7 @@ export function NodePaletteModal({ isOpen, onClose, onSelectNode }: NodePaletteM
     return true
   })
 
+  const catOrder = (c: string) => { const i = (CATEGORIES as readonly string[]).indexOf(c); return i < 0 ? 99 : i }
   const filteredItems = uniqueItems.filter((item) => {
     const matchesCategory = activeCategory === "All" || item.category === activeCategory
     const q = search.toLowerCase().trim()
@@ -387,9 +389,13 @@ export function NodePaletteModal({ isOpen, onClose, onSelectNode }: NodePaletteM
       item.description.toLowerCase().includes(q)
     return matchesCategory && matchesSearch
   })
+    .map((item, i) => ({ item, i }))
+    .sort((x, y) => catOrder(x.item.category) - catOrder(y.item.category) || x.i - y.i)
+    .map((x) => x.item)
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
+      e.stopPropagation()
       onClose()
     } else if (e.key === "ArrowDown") {
       e.preventDefault()
@@ -407,52 +413,55 @@ export function NodePaletteModal({ isOpen, onClose, onSelectNode }: NodePaletteM
     }
   }
 
+  // Group headers: show a heading whenever the category changes (items are already sorted by category).
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-[12vh]"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl rounded-xl border border-border bg-card shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add node"
+        className="flex max-h-[70vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-line bg-overlay shadow-lg"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {/* Header Search Bar */}
-        <div className="flex items-center gap-3 border-b border-border px-4 py-3 bg-muted/20">
-          <Search className="h-5 w-5 text-muted-foreground shrink-0" />
+        <div className="flex items-center gap-2 border-b border-line px-3">
+          <Search className="size-4 shrink-0 text-fg-subtle" />
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search nodes (e.g. bloom, torus, audio, compute)..."
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="node-palette-list"
+            aria-activedescendant={filteredItems[selectedIndex] ? `palette-${filteredItems[selectedIndex].id}` : undefined}
+            aria-label="Search nodes"
+            placeholder="Search nodes, e.g. bloom, torus, audio"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value)
               setSelectedIndex(0)
             }}
-            className="flex-1 bg-transparent text-sm font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
+            className="h-11 flex-1 bg-transparent text-base text-fg placeholder:text-fg-subtle focus:outline-none"
           />
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <IconButton label="Close" onClick={onClose}><X /></IconButton>
         </div>
 
-        {/* Categories Bar */}
-        <div className="flex items-center gap-1.5 border-b border-border px-4 py-2 bg-muted/10 overflow-x-auto no-scrollbar shrink-0">
+        <div className="flex items-center gap-1 overflow-x-auto border-b border-line px-3 py-2">
           {CATEGORIES.map((cat) => (
             <button
               key={cat}
+              type="button"
+              aria-pressed={activeCategory === cat}
               onClick={() => {
                 setActiveCategory(cat)
                 setSelectedIndex(0)
+                inputRef.current?.focus()
               }}
               className={cn(
-                "rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors shrink-0",
-                activeCategory === cat
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground"
+                "h-6 shrink-0 rounded-md px-2 text-xs font-medium transition-colors",
+                activeCategory === cat ? "bg-brand-soft text-brand-text" : "text-fg-muted hover:bg-hover hover:text-fg"
               )}
             >
               {cat}
@@ -460,49 +469,39 @@ export function NodePaletteModal({ isOpen, onClose, onSelectNode }: NodePaletteM
           ))}
         </div>
 
-        {/* Nodes Grid */}
-        <div className="flex-1 overflow-y-auto p-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div id="node-palette-list" role="listbox" aria-label="Nodes" className="flex-1 overflow-y-auto p-1.5">
           {filteredItems.length === 0 ? (
-            <div className="col-span-2 text-center py-10 text-xs text-muted-foreground">
-              No matching nodes found for "{search}"
-            </div>
+            <div className="py-10 text-center text-sm text-fg-subtle">No matching nodes for "{search}"</div>
           ) : (
             filteredItems.map((item, idx) => {
               const Icon = item.icon
               const isSelected = idx === selectedIndex
+              const showHeading = idx === 0 || filteredItems[idx - 1].category !== item.category
               return (
-                <div
-                  key={item.id}
-                  onClick={() => {
-                    onSelectNode(item.type, item.defaultData)
-                    onClose()
-                  }}
-                  onMouseEnter={() => setSelectedIndex(idx)}
-                  className={cn(
-                    "group flex items-start gap-3 rounded-lg border p-2.5 text-left transition-all cursor-pointer",
-                    isSelected
-                      ? "border-primary bg-primary/10 shadow-xs"
-                      : "border-border/60 bg-card hover:border-primary/50 hover:bg-muted/30"
-                  )}
-                >
+                <div key={item.id}>
+                  {showHeading && <div className="px-2 pb-1 pt-2 text-2xs font-medium text-fg-subtle">{item.category}</div>}
                   <div
+                    id={`palette-${item.id}`}
+                    role="option"
+                    aria-selected={isSelected}
+                    ref={isSelected ? (el) => el?.scrollIntoView?.({ block: "nearest" }) : undefined}
+                    onClick={() => {
+                      onSelectNode(item.type, item.defaultData)
+                      onClose()
+                    }}
+                    onMouseEnter={() => setSelectedIndex(idx)}
                     className={cn(
-                      "rounded-md p-2 shrink-0 transition-colors",
-                      isSelected ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground group-hover:text-foreground"
+                      "flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 transition-colors",
+                      isSelected ? "bg-active" : "hover:bg-hover"
                     )}
                   >
-                    <Icon className="h-4 w-4" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-1 mb-0.5">
-                      <span className="text-xs font-semibold text-foreground truncate">{item.label}</span>
-                      <span className="text-[10px] font-mono text-muted-foreground shrink-0 uppercase tracking-wider">
-                        {item.category}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-muted-foreground line-clamp-2 leading-relaxed">
-                      {item.description}
-                    </p>
+                    <span className={cn("grid size-7 shrink-0 place-items-center rounded-md", isSelected ? "bg-brand text-brand-fg" : "bg-raised text-fg-muted")}>
+                      <Icon className="size-4" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-fg">{item.label}</span>
+                      <span className="block truncate text-xs text-fg-muted">{item.description}</span>
+                    </span>
                   </div>
                 </div>
               )
@@ -510,14 +509,10 @@ export function NodePaletteModal({ isOpen, onClose, onSelectNode }: NodePaletteM
           )}
         </div>
 
-        {/* Footer Shortcut Guide */}
-        <div className="flex items-center justify-between border-t border-border bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <span>Use <kbd className="rounded border bg-background px-1 py-0.5 font-mono text-[10px]">↑</kbd> <kbd className="rounded border bg-background px-1 py-0.5 font-mono text-[10px]">↓</kbd> to navigate</span>
-            <span>•</span>
-            <span><kbd className="rounded border bg-background px-1 py-0.5 font-mono text-[10px]">Enter</kbd> to insert</span>
-          </div>
-          <span><kbd className="rounded border bg-background px-1 py-0.5 font-mono text-[10px]">Esc</kbd> to close</span>
+        <div className="flex items-center gap-3 border-t border-line px-3 py-2 text-xs text-fg-subtle">
+          <span className="flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd>navigate</span>
+          <span className="flex items-center gap-1"><Kbd>Enter</Kbd>insert</span>
+          <span className="ml-auto flex items-center gap-1"><Kbd>Esc</Kbd>close</span>
         </div>
       </div>
     </div>

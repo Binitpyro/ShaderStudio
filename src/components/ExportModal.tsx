@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
+import { useDialogA11y } from "@/lib/useDialogA11y"
 import { useProjectStore } from "@/stores/projectStore"
-import { Button } from "@/components/ui/button"
+import { Badge, Button, IconButton } from "@/components/ui"
 import {
   X,
   Copy,
@@ -45,6 +46,10 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
   const [engineTarget, setEngineTarget] = useState<"unity" | "godot" | "unreal" | "osl" | "gltf" | "shadertoy">("unity")
   const [r3fFormat, setR3fFormat] = useState<"drei" | "component">("drei")
   const [copied, setCopied] = useState(false)
+  const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(copyTimer.current), [])
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogA11y(dialogRef, isOpen, onClose)
 
   // PBR Baker State
   const [pbrResolution, setPbrResolution] = useState<PbrResolution>(2048)
@@ -314,7 +319,8 @@ export default CustomShaderMesh
   const handleCopy = () => {
     navigator.clipboard.writeText(activeCode)
     setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    clearTimeout(copyTimer.current)
+    copyTimer.current = setTimeout(() => setCopied(false), 2000)
   }
 
   const handleDownload = () => {
@@ -410,29 +416,25 @@ export default CustomShaderMesh
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-      <div className="flex flex-col h-[88vh] w-full max-w-5xl rounded-lg border border-border bg-card shadow-2xl overflow-hidden">
+    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Export" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 outline-none">
+      <div className="flex flex-col h-[88vh] w-full max-w-5xl rounded-xl border border-line bg-overlay shadow-lg overflow-hidden">
         {/* Modal Header */}
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
           <div className="flex items-center gap-2">
-            <Code2 className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-semibold text-foreground">Export Deliverables</h2>
-            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-mono text-primary uppercase">
-              Production Ready
-            </span>
+            <Code2 className="h-4 w-4 text-brand-text" />
+            <h2 className="text-sm font-medium text-fg">Export</h2>
+            <Badge tone="brand">Production ready</Badge>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7 text-muted-foreground hover:text-foreground">
-            <X className="h-4 w-4" />
-          </Button>
+          <IconButton label="Close" onClick={onClose}><X /></IconButton>
         </div>
 
         {/* Tab Switcher & Action Bar */}
-        <div className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-background/50 px-4">
+        <div className="flex h-11 shrink-0 items-center justify-between border-b border-line bg-canvas px-4">
           <div className="flex items-center gap-1.5 overflow-x-auto">
             <button
               onClick={() => setActiveTab("r3f")}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors shrink-0 ${
-                activeTab === "r3f" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                activeTab === "r3f" ? "bg-brand text-brand-fg" : "text-fg-muted hover:text-fg"
               }`}
             >
               <Code2 className="h-3.5 w-3.5" />
@@ -441,7 +443,7 @@ export default CustomShaderMesh
             <button
               onClick={() => setActiveTab("html")}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors shrink-0 ${
-                activeTab === "html" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                activeTab === "html" ? "bg-brand text-brand-fg" : "text-fg-muted hover:text-fg"
               }`}
             >
               <Globe className="h-3.5 w-3.5" />
@@ -450,7 +452,7 @@ export default CustomShaderMesh
             <button
               onClick={() => setActiveTab("engine")}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors shrink-0 ${
-                activeTab === "engine" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                activeTab === "engine" ? "bg-brand text-brand-fg" : "text-fg-muted hover:text-fg"
               }`}
             >
               <Gamepad2 className="h-3.5 w-3.5" />
@@ -459,7 +461,7 @@ export default CustomShaderMesh
             <button
               onClick={() => setActiveTab("raw")}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors shrink-0 ${
-                activeTab === "raw" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                activeTab === "raw" ? "bg-brand text-brand-fg" : "text-fg-muted hover:text-fg"
               }`}
             >
               Raw Shader ({activeBackend.toUpperCase()})
@@ -467,7 +469,7 @@ export default CustomShaderMesh
             <button
               onClick={() => setActiveTab("pbr")}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors shrink-0 ${
-                activeTab === "pbr" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                activeTab === "pbr" ? "bg-brand text-brand-fg" : "text-fg-muted hover:text-fg"
               }`}
             >
               <Layers className="h-3.5 w-3.5" />
@@ -485,14 +487,14 @@ export default CustomShaderMesh
                   disabled={isBaking}
                   className="h-7 gap-1.5 text-xs"
                 >
-                  {isBaking ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> : <Sparkles className="h-3.5 w-3.5 text-primary" />}
+                  {isBaking ? <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-text" /> : <Sparkles className="h-3.5 w-3.5 text-brand-text" />}
                   {bakeResult ? "Re-bake Maps" : "Bake Maps"}
                 </Button>
                 {bakeResult && (
                   <Button
                     size="sm"
                     onClick={handleDownloadPbrZip}
-                    className="h-7 gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                    className="h-7 gap-1.5 text-xs bg-brand hover:bg-brand text-white"
                   >
                     <Archive className="h-3.5 w-3.5" />
                     Download All (.zip)
@@ -506,7 +508,7 @@ export default CustomShaderMesh
                   size="sm"
                   onClick={handleDownloadNpmZip}
                   title="Download publishable npm package with package.json, TypeScript loader, and shaders"
-                  className="h-7 gap-1.5 text-xs text-primary border-primary/30 hover:bg-primary/10"
+                  className="h-7 gap-1.5 text-xs text-brand-text border-brand hover:bg-brand-soft"
                 >
                   <Package className="h-3.5 w-3.5" />
                   npm Package (.zip)
@@ -526,20 +528,20 @@ export default CustomShaderMesh
 
         {/* Content Area */}
         {activeTab === "pbr" ? (
-          <div className="flex-1 flex flex-col overflow-hidden bg-background">
+          <div className="flex-1 flex flex-col overflow-hidden bg-canvas">
             {/* PBR Settings Strip */}
-            <div className="flex flex-wrap items-center gap-4 border-b border-border bg-card/60 px-4 py-2 text-xs">
+            <div className="flex flex-wrap items-center gap-4 border-b border-line bg-overlay px-4 py-2 text-xs">
               <div className="flex items-center gap-1.5">
-                <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-semibold text-foreground">Bake Settings:</span>
+                <SlidersHorizontal className="h-3.5 w-3.5 text-fg-muted" />
+                <span className="font-semibold text-fg">Bake Settings:</span>
               </div>
 
               <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground">Resolution:</span>
+                <span className="text-fg-muted">Resolution:</span>
                 <select
                   value={pbrResolution}
                   onChange={(e) => setPbrResolution(Number(e.target.value) as PbrResolution)}
-                  className="bg-background border border-border rounded px-2 py-0.5 text-xs focus:ring-1 focus:ring-primary"
+                  className="bg-canvas border border-line rounded px-2 py-0.5 text-xs focus:ring-1 focus:ring-brand"
                 >
                   <option value={512}>512 x 512 (Preview)</option>
                   <option value={1024}>1024 x 1024 (1K)</option>
@@ -549,7 +551,7 @@ export default CustomShaderMesh
               </div>
 
               <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground">Normal Strength:</span>
+                <span className="text-fg-muted">Normal Strength:</span>
                 <input
                   type="range"
                   min="0.5"
@@ -559,26 +561,26 @@ export default CustomShaderMesh
                   onChange={(e) => setNormalStrength(Number(e.target.value))}
                   className="w-20 accent-primary"
                 />
-                <span className="font-mono text-[11px] text-foreground w-6">{normalStrength.toFixed(1)}</span>
+                <span className="font-mono text-xs text-fg w-6">{normalStrength.toFixed(1)}</span>
               </div>
 
               <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground">Normal Format:</span>
+                <span className="text-fg-muted">Normal Format:</span>
                 <button
                   type="button"
                   onClick={() => setInvertNormalY(!invertNormalY)}
-                  className="bg-muted hover:bg-muted/80 text-foreground px-2 py-0.5 rounded text-[11px] border border-border cursor-pointer"
+                  className="bg-active hover:bg-hover text-fg px-2 py-0.5 rounded text-xs border border-line cursor-pointer"
                 >
                   {invertNormalY ? "DirectX (Y-)" : "OpenGL (Y+)"}
                 </button>
               </div>
 
               <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground">Metallic Mode:</span>
+                <span className="text-fg-muted">Metallic Mode:</span>
                 <select
                   value={metallicMode}
                   onChange={(e) => setMetallicMode(e.target.value as any)}
-                  className="bg-background border border-border rounded px-2 py-0.5 text-xs focus:ring-1 focus:ring-primary"
+                  className="bg-canvas border border-line rounded px-2 py-0.5 text-xs focus:ring-1 focus:ring-brand"
                 >
                   <option value="auto">Auto (Saturation detect)</option>
                   <option value="metal">Full Metal (1.0)</option>
@@ -587,7 +589,7 @@ export default CustomShaderMesh
               </div>
 
               <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground">AO Strength:</span>
+                <span className="text-fg-muted">AO Strength:</span>
                 <input
                   type="range"
                   min="0.5"
@@ -597,35 +599,35 @@ export default CustomShaderMesh
                   onChange={(e) => setAoStrength(Number(e.target.value))}
                   className="w-16 accent-primary"
                 />
-                <span className="font-mono text-[11px] text-foreground w-6">{aoStrength.toFixed(1)}</span>
+                <span className="font-mono text-xs text-fg w-6">{aoStrength.toFixed(1)}</span>
               </div>
             </div>
 
             {/* PBR Grid / Empty State */}
             <div className="flex-1 overflow-auto p-4">
               {isBaking ? (
-                <div className="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground">
-                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <div className="h-full flex flex-col items-center justify-center gap-3 text-fg-muted">
+                  <Loader2 className="h-8 w-8 animate-spin text-brand-text" />
                   <div className="text-sm font-medium">Baking 6 PBR Texture Maps at {pbrResolution}x{pbrResolution}...</div>
-                  <div className="text-xs text-muted-foreground/70">Computing Sobel normal tangents, height gradients, micro-roughness & AO</div>
+                  <div className="text-xs text-fg-subtle">Computing Sobel normal tangents, height gradients, micro-roughness & AO</div>
                 </div>
               ) : bakeError ? (
-                <div className="h-full flex flex-col items-center justify-center gap-2 text-destructive">
+                <div className="h-full flex flex-col items-center justify-center gap-2 text-danger">
                   <div className="text-sm font-medium">Baking Error: {bakeError}</div>
                   <Button size="sm" variant="outline" onClick={handleBakePbr}>Retry Bake</Button>
                 </div>
               ) : bakeResult ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {Object.values(bakeResult.maps).map((map) => (
-                    <div key={map.id} className="flex flex-col rounded-lg border border-border bg-card p-3 shadow-xs">
+                    <div key={map.id} className="flex flex-col rounded-lg border border-line bg-overlay p-3 shadow-xs">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-foreground truncate">{map.title}</span>
-                        <span className="text-[10px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                        <span className="text-xs font-semibold text-fg truncate">{map.title}</span>
+                        <span className="text-2xs font-mono text-fg-muted bg-active px-1.5 py-0.5 rounded">
                           {map.width}x{map.height}
                         </span>
                       </div>
 
-                      <div className="relative aspect-square w-full rounded border border-border/70 overflow-hidden bg-black/40 mb-2.5 group">
+                      <div className="relative aspect-square w-full rounded border border-line overflow-hidden bg-black/40 mb-2.5 group">
                         <img
                           src={map.dataUrl}
                           alt={map.title}
@@ -633,7 +635,7 @@ export default CustomShaderMesh
                         />
                       </div>
 
-                      <p className="text-[11px] text-muted-foreground leading-snug mb-3 line-clamp-2">
+                      <p className="text-xs text-fg-muted leading-snug mb-3 line-clamp-2">
                         {map.description}
                       </p>
 
@@ -650,13 +652,13 @@ export default CustomShaderMesh
                   ))}
                 </div>
               ) : (
-                <div className="h-full flex flex-col items-center justify-center gap-4 text-center max-w-md mx-auto text-muted-foreground">
-                  <div className="p-4 rounded-full bg-primary/10 text-primary">
+                <div className="h-full flex flex-col items-center justify-center gap-4 text-center max-w-md mx-auto text-fg-muted">
+                  <div className="p-4 rounded-full bg-brand-soft text-brand-text">
                     <Layers className="h-8 w-8" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-foreground mb-1">Procedural PBR Map Extraction</h3>
-                    <p className="text-xs text-muted-foreground leading-relaxed">
+                    <h3 className="text-sm font-semibold text-fg mb-1">Procedural PBR Map Extraction</h3>
+                    <p className="text-xs text-fg-muted leading-relaxed">
                       Transform your procedural shader into game-engine ready PBR maps (Albedo, Tangent Normal, Roughness, Height, Metallic, and Ambient Occlusion) at up to 4K resolution.
                     </p>
                   </div>
@@ -672,15 +674,15 @@ export default CustomShaderMesh
           /* Code View Area with Game Engine Sub-bar */
           <div className="flex-1 flex flex-col overflow-hidden bg-black">
             {activeTab === "r3f" && (
-              <div className="flex items-center gap-2 border-b border-border/40 bg-zinc-950 px-4 py-2">
-                <span className="text-[11px] text-muted-foreground font-medium">Export Preset:</span>
+              <div className="flex items-center gap-2 border-b border-line bg-zinc-950 px-4 py-2">
+                <span className="text-xs text-fg-muted font-medium">Export Preset:</span>
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => setR3fFormat("drei")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       r3fFormat === "drei"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     @react-three/drei shaderMaterial & Storybook
@@ -689,8 +691,8 @@ export default CustomShaderMesh
                     onClick={() => setR3fFormat("component")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       r3fFormat === "component"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Standard R3F Component
@@ -699,15 +701,15 @@ export default CustomShaderMesh
               </div>
             )}
             {activeTab === "engine" && (
-              <div className="flex items-center gap-2 border-b border-border/40 bg-zinc-950 px-4 py-2 flex-wrap">
-                <span className="text-[11px] text-muted-foreground font-medium">Target Engine:</span>
+              <div className="flex items-center gap-2 border-b border-line bg-zinc-950 px-4 py-2 flex-wrap">
+                <span className="text-xs text-fg-muted font-medium">Target Engine:</span>
                 <div className="flex items-center gap-1 flex-wrap">
                   <button
                     onClick={() => setEngineTarget("unreal")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "unreal"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Unreal Engine 5 (.hlsl)
@@ -716,8 +718,8 @@ export default CustomShaderMesh
                     onClick={() => setEngineTarget("osl")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "osl"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Blender Cycles (.osl)
@@ -726,8 +728,8 @@ export default CustomShaderMesh
                     onClick={() => setEngineTarget("gltf")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "gltf"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     glTF 2.0 Material (.gltf)
@@ -736,8 +738,8 @@ export default CustomShaderMesh
                     onClick={() => setEngineTarget("unity")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "unity"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Unity URP (.shader)
@@ -746,8 +748,8 @@ export default CustomShaderMesh
                     onClick={() => setEngineTarget("godot")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "godot"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Godot 4 Spatial (.gdshader)
@@ -756,8 +758,8 @@ export default CustomShaderMesh
                     onClick={() => setEngineTarget("shadertoy")}
                     className={`px-2.5 py-0.5 rounded text-xs transition-colors cursor-pointer ${
                       engineTarget === "shadertoy"
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                        ? "bg-brand text-brand-fg font-semibold"
+                        : "bg-raised text-fg-muted hover:text-fg"
                     }`}
                   >
                     Shadertoy GLSL (.glsl)
@@ -765,7 +767,7 @@ export default CustomShaderMesh
                 </div>
               </div>
             )}
-            <div className="flex-1 overflow-auto p-4 font-mono text-xs text-emerald-400">
+            <div className="flex-1 overflow-auto p-4 font-mono text-xs text-success">
               <pre className="whitespace-pre-wrap break-all select-all">{activeCode}</pre>
             </div>
           </div>

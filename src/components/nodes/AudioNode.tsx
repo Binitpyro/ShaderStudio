@@ -1,12 +1,13 @@
 import { memo, useRef, useState, useCallback, useEffect } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Music } from "lucide-react"
+import { Badge, Button, Select } from "@/components/ui"
+import { NodeShell, Port, Position, nodeLabelClass, nodeRangeClass } from "./NodeShell"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import type { AudioNodeData } from "@/core/graphCompiler"
 import type { AudioSourceType } from "@/audio/audioEngine"
 import { getAudioEngine, loadAudioEngine, withAudioEngine } from "@/audio/audioRegistry"
 import { useProjectStore } from "@/stores/projectStore"
-import { Button } from "@/components/ui/button"
 import { useAudioGauges, useThrottledAudioFrame, CANVAS_HZ } from "./useAudioFrame"
 
 const NUM_BARS = 24
@@ -112,201 +113,138 @@ function AudioNodeComponent({ id, data, selected }: FlowNodeProps<AudioNodeData>
     drawSpectrum(canvas, ctx, isAudioPlaying)
   })
 
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation()
+
   return (
-    <div
-      className={cn(
-        "bg-card border rounded-md p-3 shadow-sm select-none text-foreground transition-all duration-150",
-        selected
-          ? "border-primary ring-2 ring-primary/30 min-w-[250px] max-w-[270px] shadow-lg"
-          : "border-border min-w-[210px] max-w-[230px]"
-      )}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
-          <span
-            className={cn(
-              "h-2 w-2 rounded-full",
-              isAudioPlaying ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground"
-            )}
-          />
-          <span className="text-xs font-semibold">Audio Analyzer</span>
-        </div>
-        <span className="text-[10px] text-muted-foreground font-mono">
-          512 FFT
+    <NodeShell
+      title="Audio Analyzer"
+      icon={Music}
+      size="lg"
+      selected={selected}
+      meta={
+        <span className="flex items-center gap-1.5">
+          <span className={cn("size-1.5 rounded-full", isAudioPlaying ? "animate-pulse bg-success" : "bg-fg-disabled")} />
+          <span className="num">512 FFT</span>
         </span>
+      }
+      ports={<Port type="source" position={Position.Right} id="audio" portType="audio" />}
+    >
+      <div className="overflow-hidden rounded-md border border-line">
+        <canvas ref={canvasRef} width={190} height={38} className="block h-[38px] w-full" />
       </div>
 
-      {/* Mini Visualizer Canvas */}
-      <div className="rounded overflow-hidden border border-border/60 mb-2">
-        <canvas
-          ref={canvasRef}
-          width={190}
-          height={38}
-          className="w-full h-[38px] block"
-        />
+      <div>
+        <label htmlFor={`audio-source-${id}`} className={nodeLabelClass}>Input source</label>
+        <Select id={`audio-source-${id}`} value={sourceType} onChange={(e) => handleSourceChange(e.target.value as AudioSourceType)} className="nodrag">
+          <option value="builtin">Built-in Synth Loop</option>
+          <option value="file">Local Audio File</option>
+          <option value="mic">Live Microphone</option>
+        </Select>
       </div>
 
-      <div className="flex flex-col gap-2">
-        {/* Source Dropdown */}
-        <div>
-          <label className="text-[10px] text-muted-foreground block mb-0.5">Input Source</label>
-          <select
-            value={sourceType}
-            onChange={(e) => handleSourceChange(e.target.value as AudioSourceType)}
-            className="w-full bg-background text-xs border border-border rounded px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring nodrag"
-          >
-            <option value="builtin">Built-in Synth Loop</option>
-            <option value="file">Local Audio File</option>
-            <option value="mic">Live Microphone</option>
-          </select>
-        </div>
+      {sourceType === "file" && (
+        <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} className="w-full nodrag">
+          Choose audio file
+        </Button>
+      )}
 
-        {sourceType === "file" && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => fileInputRef.current?.click()}
-            className="w-full text-[11px] h-7 font-mono nodrag"
-          >
-            Choose Audio File
-          </Button>
-        )}
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="audio/*,.mp3,.wav,.ogg,.aac,.flac"
-          onChange={handleFileUpload}
-          className="hidden"
-        />
-
-        {/* Play/Pause & Volume */}
-        <div className="flex items-center gap-2 pt-1 border-t border-border/50">
-          <Button
-            size="sm"
-            variant={isAudioPlaying ? "default" : "secondary"}
-            onClick={handleTogglePlay}
-            className="flex-1 text-[11px] h-7 font-semibold nodrag"
-          >
-            {isAudioPlaying ? "Pause" : "Play"}
-          </Button>
-
-          <div className="flex items-center gap-1 flex-1 nodrag">
-            <span className="text-[10px] text-muted-foreground select-none">Vol</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={volume}
-              onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full h-1 bg-muted rounded appearance-none cursor-pointer accent-primary nodrag nopan"
-            />
-          </div>
-        </div>
-
-        {selected && (
-          <div className="mt-2 pt-2 border-t border-border/60 flex flex-col gap-2 font-mono text-[10px]">
-            <div className="flex items-center justify-between text-muted-foreground">
-              <span className="font-semibold text-foreground text-[11px]">Spectrum Dynamics</span>
-              <span className="text-[9px] text-emerald-400 font-bold px-1 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20">
-                {isAudioPlaying ? "LIVE SIGNAL" : "STANDBY"}
-              </span>
-            </div>
-
-            {/* 4 Mini Band Gauges */}
-            <div className="grid grid-cols-4 gap-1">
-              <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
-                <span className="text-[8px] text-muted-foreground block">BASS</span>
-                <span ref={gauge.text("bass")} className="font-bold text-amber-400">0%</span>
-                <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div ref={gauge.bar("bass")} className="h-full bg-amber-400" style={{ width: "0%" }} />
-                </div>
-              </div>
-              <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
-                <span className="text-[8px] text-muted-foreground block">MID</span>
-                <span ref={gauge.text("mid")} className="font-bold text-cyan-400">0%</span>
-                <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div ref={gauge.bar("mid")} className="h-full bg-cyan-400" style={{ width: "0%" }} />
-                </div>
-              </div>
-              <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
-                <span className="text-[8px] text-muted-foreground block">TREBLE</span>
-                <span ref={gauge.text("treble")} className="font-bold text-pink-400">0%</span>
-                <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div ref={gauge.bar("treble")} className="h-full bg-pink-400" style={{ width: "0%" }} />
-                </div>
-              </div>
-              <div className="bg-background/80 p-1 rounded border border-border/50 text-center">
-                <span className="text-[8px] text-muted-foreground block">BEAT</span>
-                <span ref={gauge.text("beat")} className="font-bold text-purple-400">0%</span>
-                <div className="h-1 w-full bg-muted rounded-full mt-0.5 overflow-hidden">
-                  <div ref={gauge.bar("beat")} className="h-full bg-purple-400" style={{ width: "0%" }} />
-                </div>
-              </div>
-            </div>
-
-            {/* Gain & Smoothing */}
-            <div className="flex flex-col gap-1.5 pt-1 border-t border-border/40">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-muted-foreground">Gain: {audioGain.toFixed(1)}x</span>
-                <span className="text-muted-foreground">Smooth: {audioSmoothing.toFixed(2)}</span>
-              </div>
-              <div className="flex items-center gap-1.5 nodrag">
-                <span className="text-[9px] text-muted-foreground w-8">Gain</span>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="3.0"
-                  step="0.1"
-                  value={audioGain}
-                  onChange={(e) => {
-                    const g = parseFloat(e.target.value)
-                    setAudioGain(g)
-                    withAudioEngine((e) => e.setGainMultiplier(g))
-                  }}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  className="w-full h-1 bg-muted rounded appearance-none cursor-pointer accent-primary nodrag nopan"
-                />
-              </div>
-              <div className="flex items-center gap-1.5 nodrag">
-                <span className="text-[9px] text-muted-foreground w-8">Smooth</span>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="0.95"
-                  step="0.05"
-                  value={audioSmoothing}
-                  onChange={(e) => {
-                    const s = parseFloat(e.target.value)
-                    setAudioSmoothing(s)
-                    withAudioEngine((e) => e.setSmoothing(s))
-                  }}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  className="w-full h-1 bg-muted rounded appearance-none cursor-pointer accent-primary nodrag nopan"
-                />
-              </div>
-            </div>
-
-            <div className="text-[9px] text-muted-foreground text-center pt-0.5 border-t border-border/30">
-              512 bins • 44.1 kHz • Hann window
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Output Audio Handle */}
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="audio"
-        className="!w-2.5 !h-2.5 !bg-emerald-400 !border-2 !border-background"
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.ogg,.aac,.flac"
+        onChange={handleFileUpload}
+        className="hidden"
       />
-    </div>
+
+      <div className="flex items-center gap-2 border-t border-line pt-2">
+        <Button size="sm" variant={isAudioPlaying ? "primary" : "secondary"} onClick={handleTogglePlay} className="flex-1 nodrag">
+          {isAudioPlaying ? "Pause" : "Play"}
+        </Button>
+        <div className="flex flex-1 items-center gap-1.5 nodrag">
+          <span className="select-none text-2xs text-fg-muted">Vol</span>
+          <input
+            type="range"
+            aria-label="Volume"
+            min="0"
+            max="1"
+            step="0.05"
+            value={volume}
+            onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+            onPointerDown={stop}
+            onMouseDown={stop}
+            className={nodeRangeClass}
+          />
+        </div>
+      </div>
+
+      {selected && (
+        <div className="flex flex-col gap-2 border-t border-line pt-2 text-2xs">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg">Spectrum dynamics</span>
+            <Badge tone={isAudioPlaying ? "success" : "neutral"}>{isAudioPlaying ? "Live" : "Standby"}</Badge>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1">
+            {([["bass", "Bass", "bg-warning"], ["mid", "Mid", "bg-info"], ["treble", "Treble", "bg-danger"], ["beat", "Beat", "bg-brand"]] as const).map(([k, label, bar]) => (
+              <div key={k} className="rounded-md bg-raised p-1 text-center">
+                <span className="block text-fg-muted">{label}</span>
+                <span ref={gauge.text(k)} className="num text-fg">0%</span>
+                <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-active">
+                  <div ref={gauge.bar(k)} className={cn("h-full", bar)} style={{ width: "0%" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-1.5 nodrag">
+            <div className="flex items-center justify-between text-fg-muted">
+              <span>Gain <span className="num text-fg">{audioGain.toFixed(1)}x</span></span>
+              <span>Smooth <span className="num text-fg">{audioSmoothing.toFixed(2)}</span></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-10 text-fg-muted">Gain</span>
+              <input
+                type="range"
+                aria-label="Gain"
+                min="0.1"
+                max="3.0"
+                step="0.1"
+                value={audioGain}
+                onChange={(e) => {
+                  const g = parseFloat(e.target.value)
+                  setAudioGain(g)
+                  withAudioEngine((en) => en.setGainMultiplier(g))
+                }}
+                onPointerDown={stop}
+                onMouseDown={stop}
+                className={nodeRangeClass}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-10 text-fg-muted">Smooth</span>
+              <input
+                type="range"
+                aria-label="Smoothing"
+                min="0.1"
+                max="0.95"
+                step="0.05"
+                value={audioSmoothing}
+                onChange={(e) => {
+                  const s = parseFloat(e.target.value)
+                  setAudioSmoothing(s)
+                  withAudioEngine((en) => en.setSmoothing(s))
+                }}
+                onPointerDown={stop}
+                onMouseDown={stop}
+                className={nodeRangeClass}
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-line pt-1.5 text-center text-fg-subtle">512 bins, 44.1 kHz, Hann window</div>
+        </div>
+      )}
+    </NodeShell>
   )
 }
 

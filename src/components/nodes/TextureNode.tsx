@@ -1,9 +1,10 @@
 import { memo, useState, useRef } from "react"
-import { Handle, Position } from "@xyflow/react"
+import { Image as ImageIcon } from "lucide-react"
 import type { FlowNodeProps } from "./types"
 import { cn } from "@/lib/utils"
 import { useProjectStore } from "@/stores/projectStore"
 import type { TextureNodeData } from "@/core/graphCompiler"
+import { NodeShell, Port, Position } from "./NodeShell"
 
 function TextureNodeComponent({ data, selected, id }: FlowNodeProps<TextureNodeData>) {
   const [isDragging, setIsDragging] = useState(false)
@@ -29,15 +30,19 @@ function TextureNodeComponent({ data, selected, id }: FlowNodeProps<TextureNodeD
   }
 
   return (
-    <div className={cn("bg-card border rounded-md p-3 min-w-[100px] shadow-sm", selected ? "border-primary" : "border-border")} onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}>
-      <div className="text-xs font-semibold text-foreground mb-2">Texture</div>
-      <div className={cn("w-full h-16 border border-dashed rounded flex items-center justify-center cursor-pointer transition-colors", isDragging ? "border-primary bg-primary/10" : "border-border bg-background", preview && "border-solid")} onClick={() => fileInputRef.current?.click()}>
-        {preview ? <img src={preview} alt="Texture preview" className="w-full h-full object-cover rounded" /> : <span className="text-xs text-muted-foreground">Drop image</span>}
+    <NodeShell title="Texture" icon={ImageIcon} size="sm" selected={selected} ports={<Port type="source" position={Position.Right} portType="texture" />}>
+      <div
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
+        onClick={() => fileInputRef.current?.click()}
+        className={cn("flex h-16 w-full cursor-pointer items-center justify-center rounded-md border border-dashed transition-colors", isDragging ? "border-brand bg-brand-soft" : "border-line-strong bg-raised", preview && "border-solid")}
+      >
+        {preview ? <img src={preview} alt="Texture preview" className="h-full w-full rounded-md object-cover" /> : <span className="text-xs text-fg-subtle">Drop image</span>}
       </div>
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileSelect} />
-      {data.textureId && <div className="text-[10px] text-muted-foreground mt-1 truncate">{data.name || "texture"}</div>}
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-orange-500 border-2 border-background" />
-    </div>
+      {data.textureId && <div className="truncate text-2xs text-fg-muted">{data.name || "texture"}</div>}
+    </NodeShell>
   )
 }
 export const TextureNode = memo(TextureNodeComponent)
