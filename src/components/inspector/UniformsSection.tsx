@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { IconButton } from "@/components/ui/icon-button"
 import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
 import { NumericField } from "@/components/ui/numeric-field"
 import { ColorField } from "@/components/ui/color-field"
 import { Search, X, RotateCcw, Activity, ImagePlus } from "lucide-react"
@@ -308,6 +309,17 @@ function TextureControl({ uniform, value, onChange }: RowProps) {
   )
 }
 
+/** Written by the adapters every frame, so the stored value is meaningless (always 0). */
+const AUTO_UNIFORMS = new Set(["time", "u_time", "resolution", "u_resolution"])
+
+function AutoRow({ uniform }: { uniform: ParsedUniform }) {
+  return (
+    <Row uniform={uniform} actions={<Badge title="Set every frame by the renderer">auto</Badge>}>
+      <span className="text-xs text-fg-subtle">Provided by the renderer each frame</span>
+    </Row>
+  )
+}
+
 function UniformRow({ uniform, graphUniforms }: { uniform: ParsedUniform; graphUniforms: GraphUniform[] }) {
   const value = useProjectStore((s) => s.uniformValues[uniform.name])
   const setUniformValue = useProjectStore((s) => s.setUniformValue)
@@ -318,6 +330,7 @@ function UniformRow({ uniform, graphUniforms }: { uniform: ParsedUniform; graphU
     getActiveAdapter()?.updateUniform(uniform.name, def)
   }
   const p = { uniform, value, onChange, onReset }
+  if (AUTO_UNIFORMS.has(uniform.name)) return <AutoRow uniform={uniform} />
   if (uniform.kind === "texture") return <TextureControl {...p} />
   if (uniform.kind === "matrix" || uniform.type.startsWith("mat")) return <MatrixControl {...p} />
   if (uniform.kind === "color") return <ColorControl {...p} />
@@ -350,6 +363,7 @@ export function UniformsSection() {
 
   const resetAll = () => {
     for (const u of combined) {
+      if (AUTO_UNIFORMS.has(u.name)) continue
       const def = getDefaultValueFor(u, graphUniforms)
       setUniformValue(u.name, def)
       getActiveAdapter()?.updateUniform(u.name, def)

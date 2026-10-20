@@ -18,6 +18,7 @@ import type {
   ShadowFilterMode,
   DetailedGpuMetrics,
 } from "./types"
+import { TEXTURE_LOADING } from "./types"
 import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue, EnvironmentSettings } from "@/stores/projectStore"
 import { generateEnvironmentRGBA, ENVIRONMENT_PRESETS } from "@/core/environmentGenerator"
@@ -353,6 +354,11 @@ export class WebGL2Adapter implements RenderAdapter {
   private uniformsDirty = true
   private lastStoreValues: Record<string, UniformValue> | null = null
   private loadedTextures = new Map<string, WebGLTexture>()
+  /** Textures uploaded for node previews only (keyed by id, invalidated by version); `loadedTextures` is reused first. */
+  private previewTexs = new Map<string, { version: string; tex: WebGLTexture }>()
+  private previewTexLoading = new Set<string>()
+  /** id -> version whose fetch/upload failed; retried only when the version changes (no refetch + console.error per retry). */
+  private previewTexFailed = new Map<string, string>()
   private textureBindings: Record<string, string> = {}
   private queueTextures: Array<{ id: string; binding: number; name: string }> = []
   private boundTextureList: Array<{ name: string; texId: string; isAudio: boolean }> = []
@@ -501,6 +507,8 @@ export class WebGL2Adapter implements RenderAdapter {
     this.postProcessFramebuffers = []
     for (const tex of this.loadedTextures.values()) if (gl) gl.deleteTexture(tex)
     this.loadedTextures.clear()
+    for (const p of this.previewTexs.values()) if (gl) gl.deleteTexture(p.tex)
+    this.previewTexs.clear(); this.previewTexLoading.clear(); this.previewTexFailed.clear()
     for (const k of ["defaultTexture", "envTexture", "audioTexture", "shadowCubeMapTex"] as const) {
       del(this[k], (o) => gl!.deleteTexture(o)); this[k] = null
     }
@@ -2388,9 +2396,50 @@ export class WebGL2Adapter implements RenderAdapter {
   // ---------------------------------------------------------------------------------------------
   renderToTarget(request: RenderToTargetRequest): Promise<ImageBitmap | ImageData | null> {
     const run = this.rttQueue.then(() => this.runRenderToTarget(request)) // strictly one at a time
-    const safe = run.catch((e) => { if (!this.rttWarned) { this.rttWarned = true; console.warn("WebGL2 renderToTarget failed:", e) } return null })
+    const loading = (e: unknown) => e instanceof Error && e.message === TEXTURE_LOADING
+    const safe = run.catch((e) => { if (!loading(e) && !this.rttWarned) { this.rttWarned = true; console.warn("WebGL2 renderToTarget failed:", e) } return null })
     this.rttQueue = safe
-    return safe
+    // A still-loading texture is not a failure: surface it so the caller can show "Loading texture…" and retry.
+    return run.catch((e) => { if (loading(e)) throw e; return safe })
+  }
+
+  /** The GL texture for a preview request, or null while it is still being fetched/uploaded (started here, once per id+version). */
+  private previewTexture(id: string, version: string): WebGLTexture | null {
+    const shared = this.loadedTextures.get(id)
+    if (shared) return shared
+    const hit = this.previewTexs.get(id)
+    if (hit && hit.version === version) return hit.tex
+    if (this.previewTexFailed.get(id) === version) throw new Error(`Preview texture "${id}" failed to load`)
+    const resource = useProjectStore.getState().textureResources.find((t) => t.id === id)
+    if (!this.gl || !resource || this.previewTexLoading.has(id)) return null
+    const gen = this.ctxGen
+    this.previewTexLoading.add(id)
+    void (async () => {
+      try {
+        const bitmap = await createImageBitmap(await (await fetch(resource.src)).blob())
+        const gl = this.gl
+        if (!gl || !this.initialized || gen !== this.ctxGen) { try { bitmap.close() } catch {} ; return } // disposed / context lost mid-load: store nothing
+        const tex = gl.createTexture()
+        if (tex) {
+          const prevTex = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null
+          gl.bindTexture(gl.TEXTURE_2D, tex)
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+          gl.bindTexture(gl.TEXTURE_2D, prevTex)
+          const old = this.previewTexs.get(id)
+          if (old) gl.deleteTexture(old.tex)
+          this.previewTexs.set(id, { version, tex })
+          this.previewTexFailed.delete(id)
+        }
+        try { bitmap.close() } catch {}
+      } catch (e) {
+        if (this.initialized && gen === this.ctxGen) { this.previewTexFailed.set(id, version); console.error("Failed to load preview texture in WebGL2:", e) }
+      } finally { this.previewTexLoading.delete(id) }
+    })()
+    return null
   }
 
   private rttWarned = false
@@ -2401,6 +2450,17 @@ export class WebGL2Adapter implements RenderAdapter {
     if (!gl || !this.initialized || this.inFrame || !glsl) return null
     if (!Number.isFinite(req.width) || !Number.isFinite(req.height)) return null
     const w = Math.max(1, Math.min(2048, Math.floor(req.width))), h = Math.max(1, Math.min(2048, Math.floor(req.height)))
+
+    const texUnits: Array<{ name: string; tex: WebGLTexture }> = []
+    let texLoading = false
+    for (const t of req.textures ?? []) {
+      const tex = this.previewTexture(t.textureId, t.version ?? "")
+      if (tex) texUnits.push({ name: t.name, tex }); else texLoading = true
+    }
+    if (texLoading) throw new Error(TEXTURE_LOADING)
+    // Preview samplers use units 8+i; never bind past what the context has.
+    const maxUnits = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) as number
+    if (typeof maxUnits === "number" && texUnits.length > maxUnits - 8) throw new Error(`Preview needs ${texUnits.length} textures but only ${Math.max(0, maxUnits - 8)} units are available (MAX_TEXTURE_IMAGE_UNITS=${maxUnits})`)
 
     const key = hashSource(glsl)
     let entry = this.rttPrograms.get(key)
@@ -2463,6 +2523,15 @@ export class WebGL2Adapter implements RenderAdapter {
         }
         if (loc) this.applyUniform(loc, val)
       }
+      // Preview samplers use units 8+ so nothing the main render keeps on the low units is disturbed.
+      texUnits.forEach((u, i) => {
+        let loc = entry!.locs.get(u.name)
+        if (loc === undefined) { loc = gl.getUniformLocation(entry!.program, u.name); entry!.locs.set(u.name, loc) }
+        if (!loc) return
+        gl.activeTexture(gl.TEXTURE0 + 8 + i)
+        gl.bindTexture(gl.TEXTURE_2D, u.tex)
+        gl.uniform1i(loc, 8 + i)
+      })
       gl.bindVertexArray(this.quadVAO)
       gl.drawArrays(gl.TRIANGLES, 0, 6)
       const bytes = new Uint8ClampedArray(w * h * 4)
@@ -2483,8 +2552,8 @@ export class WebGL2Adapter implements RenderAdapter {
       if (prevBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND)
       gl.scissor(prevScissor[0], prevScissor[1], prevScissor[2], prevScissor[3])
       if (prevScissorOn) gl.enable(gl.SCISSOR_TEST); else gl.disable(gl.SCISSOR_TEST)
-      gl.bindTexture(gl.TEXTURE_2D, prevTex) // texture (re)allocation above binds on the active unit
-      gl.activeTexture(prevActive)
+      gl.activeTexture(prevActive) // preview samplers moved the active unit; the allocation above bound on prevActive
+      gl.bindTexture(gl.TEXTURE_2D, prevTex)
     }
   }
 

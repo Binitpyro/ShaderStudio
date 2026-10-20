@@ -13,7 +13,6 @@ import {
   type AgentDiagnosticsMessage,
   type AgentFeedbackMessage,
 } from "./bridgeProtocol"
-import { saveSnapshot } from "@/db"
 import { debounce } from "@/utils/throttle"
 import { viewportCapture } from "@/utils/frameCapture"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
@@ -172,6 +171,9 @@ export function getBridgeHttpUrl(endpoint: string = ""): string {
   return `${base}${cleanEndpoint}`
 }
 
+// db (Dexie) loads on first save, not at startup.
+export const saveSnapshot = (path: string, content: string) =>
+  import("@/db").then((m) => m.saveSnapshot(path, content)).catch((e) => console.warn("[snapshot] save failed", e))
 const debouncedSaveSnapshot = debounce(saveSnapshot, SNAPSHOT_DEBOUNCE)
 
 export function sendAgentFeedback(feedback: AgentFeedbackMessage) {

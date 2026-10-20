@@ -20,6 +20,7 @@ import type {
   RenderToTargetRequest,
   FidelityCapabilities,
 } from "./types"
+import { TEXTURE_LOADING } from "./types"
 import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue, ParsedUniform, EnvironmentSettings } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
@@ -52,6 +53,8 @@ type FxModules = { [K in FxName]?: Awaited<ReturnType<(typeof FX_LOADERS)[K]>> }
 function stripGlslVersion(src: string): string {
   // three binds its own `position` attribute: alias a starter-style layout(location=0) `a_position` to it.
   return src.replace(/^\s*#version[^\r\n]*\r?\n/, "").replace(/layout\s*\(\s*location\s*=\s*0\s*\)\s*in\s+vec3\s+a_position\s*;/, "#define a_position position")
+    // three never feeds a `u_mvp` uniform (the other backends do): without this the starter vertex stage collapses every vertex to 0 and only bloom/sky is left on screen.
+    .replace(/uniform\s+mat4\s+u_mvp\s*;/, "#define u_mvp (projectionMatrix * modelViewMatrix)")
 }
 
 type GeometryKey = "cube" | "sphere" | "plane" | "torus_knot" | "custom"
@@ -169,6 +172,11 @@ export class ThreeJSAdapter implements RenderAdapter {
   private gBufferMaterial: THREE.ShaderMaterial | null = null
   private readonly tmpSun = new THREE.Vector3()
   private previewMaterials = new Map<string, THREE.ShaderMaterial>()
+  /** Textures created for node previews only (keyed by id, invalidated by version); `loadedTextures` is reused first. */
+  private previewTexs = new Map<string, { version: string; tex: THREE.Texture }>()
+  private previewTexLoading = new Set<string>()
+  /** Failed preview fetches, per id+version: logged once, then every retry throws the same message instead of refetching. */
+  private previewTexFailed = new Map<string, { version: string; message: string }>()
   private previewTarget: THREE.WebGLRenderTarget | null = null
 
   private halton(index: number, base: number): number {
@@ -270,7 +278,7 @@ export class ThreeJSAdapter implements RenderAdapter {
         if ("close" in bitmap && typeof (bitmap as any).close === "function") (bitmap as any).close()
         return
       }
-      const tex = new THREE.Texture(bitmap as any)
+      const tex = new THREE.Texture(bitmap)
       tex.needsUpdate = true
       this.loadedTextures.set(textureId, tex)
       this.applyTextureBindings()
@@ -1984,6 +1992,36 @@ export class ThreeJSAdapter implements RenderAdapter {
     return `${src.length}:${h >>> 0}`
   }
 
+  /** The texture for a preview request, or null while it is still being fetched (started here, once per id+version). */
+  private previewTexture(id: string, version: string): THREE.Texture | null {
+    const shared = this.loadedTextures.get(id)
+    if (shared) return shared
+    const hit = this.previewTexs.get(id)
+    if (hit && hit.version === version) return hit.tex
+    const failed = this.previewTexFailed.get(id)
+    if (failed && failed.version === version) throw new Error(failed.message)
+    const resource = useProjectStore.getState().textureResources.find((t) => t.id === id)
+    if (!resource || this.previewTexLoading.has(id)) return null
+    const session = this.session
+    this.previewTexLoading.add(id)
+    void (async () => {
+      try {
+        const bitmap = await createImageBitmap(await (await fetch(resource.src)).blob())
+        if (!this.initialized || session !== this.session) { try { bitmap.close() } catch {} ; return }
+        const tex = new THREE.Texture(bitmap)
+        tex.needsUpdate = true
+        this.previewTexs.get(id)?.tex.dispose()
+        this.previewTexs.set(id, { version, tex })
+      } catch (e) {
+        if (this.initialized && session === this.session) {
+          this.previewTexFailed.set(id, { version, message: `Texture failed to load: ${e instanceof Error ? e.message : String(e)}` })
+          console.error("Failed to load preview texture in Three.js:", e)
+        }
+      } finally { this.previewTexLoading.delete(id) }
+    })()
+    return null
+  }
+
   private getPreviewMaterial(glsl: string): THREE.ShaderMaterial | null {
     const vertexShader = useProjectStore.getState().vertexShaderSource || this.defaultVertexShader
     const key = ThreeJSAdapter.hashSource(vertexShader + "\u0000" + glsl)
@@ -2022,8 +2060,16 @@ export class ThreeJSAdapter implements RenderAdapter {
     if (!r || !this.initialized || !this.mesh || !glsl) return null
     const w = Math.max(1, Math.floor(request.width))
     const h = Math.max(1, Math.floor(request.height))
+    const texs: Array<{ name: string; tex: THREE.Texture }> = []
+    let texLoading = false
+    for (const t of request.textures ?? []) {
+      const tex = this.previewTexture(t.textureId, t.version ?? "")
+      if (tex) texs.push({ name: t.name, tex }); else texLoading = true
+    }
+    if (texLoading) throw new Error(TEXTURE_LOADING)
     const mat = this.getPreviewMaterial(glsl)
     if (!mat) return null
+    for (const t of texs) if (mat.uniforms[t.name]) mat.uniforms[t.name].value = t.tex
     if (!this.previewTarget || this.previewTarget.width !== w || this.previewTarget.height !== h) {
       this.previewTarget?.dispose()
       this.previewTarget = new THREE.WebGLRenderTarget(w, h)
@@ -2135,6 +2181,8 @@ export class ThreeJSAdapter implements RenderAdapter {
     this.releaseGBuffer()
     for (const m of this.previewMaterials.values()) m.dispose()
     this.previewMaterials.clear()
+    for (const p of this.previewTexs.values()) p.tex.dispose()
+    this.previewTexs.clear(); this.previewTexLoading.clear(); this.previewTexFailed.clear()
     this.previewTarget?.dispose()
     this.previewTarget = null
     this.previewScene = null; this.previewMesh = null; this.previewCamera = null

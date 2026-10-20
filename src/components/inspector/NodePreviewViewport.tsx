@@ -5,6 +5,7 @@ import type { NodePreviewResult, PreviewUniform, compileNodePreview as CompileNo
 import { useProjectStore, type UniformValue } from "@/stores/projectStore"
 import { getActiveAdapter } from "@/adapters/activeAdapter"
 import type { RenderToTargetRequest } from "@/adapters/types"
+import { TEXTURE_LOADING } from "@/adapters/types"
 import { renderCoordinator } from "@/core/renderCoordinator"
 import { cn } from "@/lib/utils"
 import { Play, Pause, Eye, X } from "lucide-react"
@@ -18,8 +19,10 @@ export const PREVIEW_MAX_HZ = 14
 const MIN_INTERVAL_MS = 1000 / PREVIEW_MAX_HZ
 const RETRY_MS = 400
 const MAX_RETRIES = 10
+const TEXTURE_RETRY_MS = 250
+const MAX_TEXTURE_RETRIES = 60 // ~15 s of "Loading texture…" before giving up
 
-type Status = "idle" | "ok" | "none" | "error" | "unavailable"
+type Status = "idle" | "ok" | "none" | "error" | "unavailable" | "loading"
 
 interface NodePreviewViewportProps {
   node: Node<GraphNodeData>
@@ -100,6 +103,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
   const lastSig = useRef("")
   const lastImage = useRef<ImageBitmap | ImageData | null>(null)
   const retries = useRef(0)
+  const texRetries = useRef(0)
   const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   // Loaded lazily: the partial-graph compiler (SDF + math codegen) stays out of the entry chunk.
   const compiler = useRef<typeof CompileNodePreview | null>(null)
@@ -109,11 +113,11 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
     if (!compiler.current) return null
     const st = useProjectStore.getState()
     const n = nodeRef.current
-    const deps = [n, st._graphNodes, st._graphEdges, st.wgslSource, st.glslSource]
+    const deps = [n, st._graphNodes, st._graphEdges, st.wgslSource, st.glslSource, st.textureResources]
     const hit = compiled.current
     if (hit && hit.deps.every((d, i) => d === deps[i])) return hit.result
     const nodes = st._graphNodes.some((x) => x.id === n.id) ? st._graphNodes.map((x) => (x.id === n.id ? n : x)) : [...st._graphNodes, n]
-    const result = compiler.current(n.id, nodes, st._graphEdges, { material: { wgsl: st.wgslSource, glsl: st.glslSource } })
+    const result = compiler.current(n.id, nodes, st._graphEdges, { material: { wgsl: st.wgslSource, glsl: st.glslSource }, textureSrc: (id) => st.textureResources.find((r) => r.id === id)?.src })
     compiled.current = { deps, result }
     return result
   }, [])
@@ -148,20 +152,33 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
       ? { glsl: result.source.glslThree || undefined }
       : { wgsl: result.source.wgsl || undefined, glsl: result.source.glsl || undefined }
     const { time: _t, u_time: _ut, ...stable } = uniforms
-    const sig = JSON.stringify([adapter.backendType, source, stable])
+    const textures = result.textures
+    const sig = JSON.stringify([adapter.backendType, source, stable, textures])
     if (reason === "change" && sig === lastSig.current && lastImage.current) return
 
     inFlight.current = true
     const gen = generation.current
-    const request: RenderToTargetRequest = { nodeId: nodeRef.current.id, source, width: size, height: size, uniforms }
+    const request: RenderToTargetRequest = { nodeId: nodeRef.current.id, source, width: size, height: size, uniforms, ...(textures ? { textures } : {}) }
     void (async () => {
       let img: ImageBitmap | ImageData | null = null
       let failure = ""
       try { img = await adapter.renderToTarget!(request) } catch (err) { failure = err instanceof Error ? err.message : String(err) }
       inFlight.current = false
       if (mounted.current && gen === generation.current) {
-        if (img) {
+        if (!img && failure === TEXTURE_LOADING) {
+          // Not an error: the adapter is still fetching/uploading the image. Retry shortly.
+          lastSig.current = ""
+          if (texRetries.current++ < MAX_TEXTURE_RETRIES) {
+            setStatus("loading")
+            clearTimeout(retryTimer.current)
+            retryTimer.current = setTimeout(() => run("change"), TEXTURE_RETRY_MS)
+          } else {
+            setStatus("error")
+            setMessage("The texture failed to load.")
+          }
+        } else if (img) {
           retries.current = 0
+          texRetries.current = 0
           lastSig.current = sig
           lastImage.current = img
           const canvas = canvasRef.current
@@ -204,6 +221,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
     lastSig.current = ""
     lastImage.current = null
     retries.current = 0
+    texRetries.current = 0
     setStatus("idle")
   }, [node.id])
 
@@ -259,7 +277,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
     if (canvas && lastImage.current) drawResult(canvas, lastImage.current, channel)
   }, [channel])
 
-  const overlay = status === "none" ? "No preview" : status === "unavailable" ? "Preview unavailable" : status === "error" ? "Preview failed" : null
+  const overlay = status === "loading" ? "Loading texture…" : status === "none" ? "No preview" : status === "unavailable" ? "Preview unavailable" : status === "error" ? "Preview failed" : null
 
   return (
     <div
@@ -306,7 +324,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
           Annotation node — no isolated shader output.
         </div>
       ) : (
-        <div data-testid="node-preview" data-preview-status={status} className="relative h-40 w-full bg-[#121316] overflow-hidden flex items-center justify-center">
+        <div data-testid="node-preview" data-preview-status={status} className="relative h-40 w-full bg-canvas overflow-hidden flex items-center justify-center">
           <canvas
             ref={canvasRef}
             width={size}
@@ -317,12 +335,12 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
           {overlay && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 px-3 text-center text-xs text-muted-foreground" title={status === "error" ? message : undefined}>
               <span>{overlay}</span>
-              {status === "error" && message ? <span className="max-w-full truncate text-[10px] text-destructive/80">{message}</span> : null}
+              {status === "error" && message ? <span className="max-w-full truncate text-2xs text-destructive/80">{message}</span> : null}
             </div>
           )}
 
           {/* Bottom Channel Selector Overlay */}
-          <div className="absolute bottom-1.5 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-xs px-1.5 py-0.5 rounded border border-white/10 text-[9px] font-mono">
+          <div className="absolute bottom-1.5 left-2 flex items-center gap-1 bg-overlay/80 backdrop-blur-xs px-1.5 py-0.5 rounded border border-line text-2xs font-mono">
             {(["rgba", "rgb", "r", "g", "b", "a"] as PreviewChannel[]).map((ch) => (
               <button
                 key={ch}
@@ -341,7 +359,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
           </div>
 
           {/* Resolution Badge */}
-          <div className="absolute top-1.5 right-2 bg-black/50 px-1 py-0.5 rounded text-[8px] font-mono text-muted-foreground">
+          <div className="absolute top-1.5 right-2 bg-overlay/70 px-1 py-0.5 rounded text-2xs font-mono text-muted-foreground">
             {size}×{size}
           </div>
         </div>

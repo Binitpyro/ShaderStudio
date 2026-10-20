@@ -344,3 +344,14 @@ describe("search, fallback, audio bind, textures", () => {
     expect(gpuSpy).toHaveBeenCalledWith("u_albedo", expect.objectContaining({ type: "texture" }))
   })
 })
+
+describe("auto-fed uniforms", () => {
+  it.each(["time", "u_time", "resolution", "u_resolution"])("%s shows an auto badge, no input, no audio bind", (name) => {
+    setUniforms([{ name, type: name.includes("res") ? "vec2f" : "f32", kind: name.includes("res") ? "vector" : "scalar" }])
+    const { container } = render(<UniformsSection />)
+    const row = container.querySelector(`[data-uniform="${name}"]`) as HTMLElement
+    expect(within(row).getByText("auto")).toBeTruthy()
+    expect(within(row).queryByRole("textbox")).toBeNull()
+    expect(within(row).queryByRole("button")).toBeNull()
+  })
+})

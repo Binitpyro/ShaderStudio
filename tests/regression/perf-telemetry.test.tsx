@@ -26,7 +26,7 @@ import { flattenGraph, compileGraph, buildSdfTree, MAX_SUBGRAPH_DEPTH, type Grap
 import { customNodeRegistry, validateCustomNodeManifest, type CustomNodeManifest } from "@/core/customNodeSdk"
 import { validateMathExpression, compileMathExpressionToGlsl, compileMathExpressionToWgsl } from "@/core/mathExpressionValidator"
 import { transpileToUE5, transpileToUnrealHLSL, transpileToBlenderOSL, exportGltf2Material, packOrmTexture, generateNpmPackage, importShadertoy, createProjectFromShadertoy, generateR3FExport } from "@/core/engineTranspiler"
-import { getDefaultProjectPath, saveProjectNative, loadProjectNative, startMcpBridge, getMcpBridgeStatus, getMcpBridgePort, stopMcpBridge, minimizeWindow, maximizeWindow, closeWindow, setupTray, isTrayActive, validateBinarySizeConfig, resetDesktopFallbackState } from "@/desktop/tauriBridge"
+import { getDefaultProjectPath, saveProjectNative, loadProjectNative, minimizeWindow, maximizeWindow, closeWindow, setupTray, isTrayActive, validateBinarySizeConfig, resetDesktopFallbackState } from "@/desktop/tauriBridge"
 vi.mock("three", async (importOriginal) => {
   const actual = await importOriginal<typeof import("three")>()
   const { MockThreeRenderer } = await import("../e2e/mocks/mockThreeJS")

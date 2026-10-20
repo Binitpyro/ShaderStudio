@@ -18,8 +18,6 @@ declare global {
 
 // In-memory fallback state for browser/test environments
 const inMemoryFs = new Map<string, string>()
-let fallbackBridgeRunning = false
-let fallbackBridgePort = 0
 let trayCreated = false
 let windowState = { minimized: false, maximized: false, closed: false }
 
@@ -135,36 +133,8 @@ export async function loadProjectNative(path?: string): Promise<[string, string]
   return [targetPath, inMemoryFs.get(targetPath)!]
 }
 
-// MCP: the native app no longer hosts an MCP protocol (the Rust stub was removed). Agents connect
-// through the real `scripts/mcp-server.js` (stdio) + `scripts/bridge.js`; the tray item "Connect AI
-// agent (MCP)..." explains how. The four functions below are a deprecated in-memory shim kept only
-// because legacy regression suites import them; they never call into Tauri and start nothing.
-
-/** @deprecated No-op state shim (validates the port, records it in memory). */
-export async function startMcpBridge(port: number): Promise<string> {
-  if (!Number.isInteger(port) || port <= 1024 || port > 65535) {
-    throw new Error(`Invalid port: ${port}. Must be between 1025 and 65535`)
-  }
-  fallbackBridgeRunning = true
-  fallbackBridgePort = port
-  return `MCP Bridge active on port ${port}`
-}
-
-/** @deprecated In-memory shim. */
-export async function getMcpBridgeStatus(): Promise<boolean> {
-  return fallbackBridgeRunning
-}
-
-/** @deprecated In-memory shim. */
-export function stopMcpBridge(): void {
-  fallbackBridgeRunning = false
-  fallbackBridgePort = 0
-}
-
-/** @deprecated In-memory shim; current port or 0. */
-export function getMcpBridgePort(): number {
-  return fallbackBridgePort
-}
+// MCP: the native app does not host an MCP server. Agents connect through `scripts/mcp-server.js` (stdio)
+// + `scripts/bridge.js`; the tray item "Connect AI agent (MCP)..." explains how.
 
 /**
  * Minimizes the desktop window via Tauri window API or local state fallback.
@@ -243,8 +213,6 @@ export function validateBinarySizeConfig(cargoToml: string): { valid: boolean; f
  */
 export function resetDesktopFallbackState(): void {
   inMemoryFs.clear()
-  fallbackBridgeRunning = false
-  fallbackBridgePort = 0
   trayCreated = false
   windowState = { minimized: false, maximized: false, closed: false }
 }
@@ -252,7 +220,4 @@ export function resetDesktopFallbackState(): void {
 // Snake_case aliases matching Tauri command naming convention
 export const save_project_native = saveProjectNative
 export const load_project_native = loadProjectNative
-export const start_mcp_bridge = startMcpBridge
-export const get_mcp_bridge_status = getMcpBridgeStatus
-export const stop_mcp_bridge = stopMcpBridge
 

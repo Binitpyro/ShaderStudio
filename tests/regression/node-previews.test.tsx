@@ -9,7 +9,7 @@ import React from "react"
 import { render, screen, act, fireEvent } from "@testing-library/react"
 import type { Node, Edge } from "@xyflow/react"
 
-type PreviewReq = { width: number; height: number; uniforms: Record<string, unknown> }
+type PreviewReq = { width: number; height: number; uniforms: Record<string, unknown>; textures?: Array<{ name: string; textureId: string; version?: string }> }
 type FakeAdapter = { backendType: string; renderToTarget: Mock<(req: PreviewReq) => Promise<unknown>> }
 const h = vi.hoisted(() => ({ adapter: null as unknown as FakeAdapter }))
 vi.mock("@/adapters/activeAdapter", () => ({ getActiveAdapter: () => h.adapter, loadAdapter: vi.fn() }))
@@ -21,6 +21,7 @@ import { parseWgslUniforms } from "@/parsers/wgslUniforms"
 import { parseGlslUniforms } from "@/parsers/glslUniforms"
 import { NodePreviewViewport, PREVIEW_MAX_HZ } from "@/components/inspector/NodePreviewViewport"
 import { renderCoordinator } from "@/core/renderCoordinator"
+import { TEXTURE_LOADING } from "@/adapters/types"
 import { useProjectStore } from "@/stores/projectStore"
 
 type N = Node<GraphNodeData>
@@ -107,6 +108,38 @@ describe("compileNodePreview (partial-graph compile)", () => {
 
     const rm = compileNodePreview("rm", [prim, node("rm", { type: "raymarch" })], [edge("s1", "rm")])
     expect(rm.status).toBe("ok")
+  })
+
+  it("previews a texture node as its sampled image: WGSL texture+sampler bindings and a GLSL sampler2D", () => {
+    const tex = node("t1", { type: "texture", textureId: "tex-a", name: "albedo" })
+    const r = compileNodePreview("t1", [tex], [])
+    if (r.status !== "ok") throw new Error("expected ok")
+    expect(r.textures).toEqual([{ name: "ptex_tex_a", textureId: "tex-a" }])
+    expect(compileNodePreview("t1", [tex], [], { textureSrc: () => "blob:v1" })).toMatchObject({ status: "ok", textures: [{ name: "ptex_tex_a", textureId: "tex-a", version: "blob:v1" }] })
+    expect(compileNodePreview("t1", [tex], [], { textureSrc: () => undefined })).toMatchObject({ status: "error", error: expect.stringContaining("Texture not found") })
+    expect(r.source.glsl).toContain("uniform sampler2D ptex_tex_a;")
+    expect(r.source.glsl).toContain("vec4 n_t1 = texture(ptex_tex_a, uv);")
+    expect(r.source.glsl).toContain("fragColor = n_t1;")
+    expect(r.source.glslThree).toContain("uniform sampler2D ptex_tex_a;")
+    // sampler at binding 1, textures from binding 2: the layout the adapters bind by variable name
+    expect(r.source.wgsl).toContain("@group(0) @binding(1) var ptex_sampler: sampler;")
+    expect(r.source.wgsl).toContain("@group(0) @binding(2) var ptex_tex_a: texture_2d<f32>;")
+    expect(r.source.wgsl).toContain("textureSampleLevel(ptex_tex_a, ptex_sampler, uv, 0.0)")
+    expect(r.source.wgsl).toContain("return n_t1;")
+    // deterministic, and the texture list is part of the (stable) result
+    expect(compileNodePreview("t1", [{ ...tex }], [])).toEqual(r)
+    // an unassigned texture node has nothing to show
+    expect(compileNodePreview("t0", [node("t0", { type: "texture", textureId: null, name: "x" })], [])).toEqual({ status: "none" })
+  })
+
+  it("previews nodes downstream of a texture (math on a texture sample) with the texture bound", () => {
+    const tex = node("t1", { type: "texture", textureId: "tex-a", name: "albedo" })
+    const m = node("m3", { type: "math_expression", expression: "c * 0.5", outputType: "vec4", inputNames: ["c"] })
+    const r = compileNodePreview("m3", [tex, m], [edge("t1", "m3", "c")])
+    if (r.status !== "ok") throw new Error("expected ok")
+    expect(r.textures).toEqual([{ name: "ptex_tex_a", textureId: "tex-a" }])
+    expect(r.source.glsl).toContain("vec4 c = n_t1;")
+    expect(r.source.wgsl).toContain("let c: vec4f = n_t1;")
   })
 
   it("three-js GLSL drops the declarations the ShaderMaterial prefix owns and reads uv from gl_FragCoord", () => {
@@ -234,6 +267,47 @@ describe("NodePreviewViewport (real GPU preview)", () => {
     const src = h.adapter.renderToTarget.mock.calls[0][0].source
     expect(Object.keys(src)).toEqual(["glsl"])
     expect(src.glsl).toContain("gl_FragColor")
+  })
+
+  it("sends the texture binding (name, id, version = resource src) with the request and caches by it", async () => {
+    const tex = node("t1", { type: "texture", textureId: "tex-a", name: "albedo" })
+    useProjectStore.setState({ textureResources: [{ id: "tex-a", name: "albedo", src: "blob:a-v1" }] })
+    render(<NodePreviewViewport node={tex} />)
+    await flush()
+    expect(h.adapter.renderToTarget).toHaveBeenCalledTimes(1)
+    expect(h.adapter.renderToTarget.mock.calls[0][0].textures).toEqual([{ name: "ptex_tex_a", textureId: "tex-a", version: "blob:a-v1" }])
+    expect(screen.getByTestId("node-preview").getAttribute("data-preview-status")).toBe("ok")
+    // same texture version: a "change" that would render the same image is skipped
+    act(() => { useProjectStore.setState({ glslSource: "// glsl 2" }) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 200)) })
+    expect(h.adapter.renderToTarget).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows 'Loading texture…' (not an error) while the adapter is still uploading, then the image", async () => {
+    vi.useFakeTimers()
+    const tex = node("t1", { type: "texture", textureId: "tex-a", name: "albedo" })
+    useProjectStore.setState({ textureResources: [{ id: "tex-a", name: "albedo", src: "blob:a-v1" }] })
+    let ready = false
+    h.adapter = fakeAdapter(async (req) => {
+      if (!ready) throw new Error(TEXTURE_LOADING)
+      return { width: req.width, height: req.height, data: new Uint8ClampedArray(req.width * req.height * 4).fill(200) }
+    })
+    render(<NodePreviewViewport node={tex} />)
+    await flush()
+    expect(screen.getByText("Loading texture…")).toBeTruthy()
+    expect(screen.getByTestId("node-preview").getAttribute("data-preview-status")).toBe("loading")
+    ready = true
+    await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+    expect(screen.getByTestId("node-preview").getAttribute("data-preview-status")).toBe("ok")
+    expect(screen.queryByText("Loading texture…")).toBeNull()
+  })
+
+  it("reports a texture that is missing from the project as an error without touching the GPU", async () => {
+    useProjectStore.setState({ textureResources: [] })
+    render(<NodePreviewViewport node={node("t1", { type: "texture", textureId: "gone", name: "x" })} />)
+    await flush()
+    expect(screen.getByTestId("node-preview").getAttribute("data-preview-status")).toBe("error")
+    expect(h.adapter.renderToTarget).not.toHaveBeenCalled()
   })
 
   it("shows 'No preview' without a request for nodes that have no visual output", async () => {

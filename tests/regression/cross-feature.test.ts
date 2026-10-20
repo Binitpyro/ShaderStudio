@@ -24,7 +24,7 @@ import {
   packOrmTexture,
 } from "@/core/engineTranspiler"
 import { parseDiagnosticErrors } from "@/utils/diagnosticParser"
-import { saveProjectNative, loadProjectNative, startMcpBridge, stopMcpBridge, getMcpBridgeStatus, resetDesktopFallbackState } from "@/desktop/tauriBridge"
+import { saveProjectNative, loadProjectNative, resetDesktopFallbackState } from "@/desktop/tauriBridge"
 
 vi.mock("three", async (importOriginal) => {
   const actual = await importOriginal<typeof import("three")>()
@@ -596,14 +596,6 @@ ${uniforms.map((u) => `  acc += ${u.name};`).join("\n")}
       ).not.toThrow()
       expect(useProjectStore.getState().currentProjectName).toBe("MalformedProject")
       expect(useProjectStore.getState().environmentSettings.preset).toBe("studio_warm")
-    })
-
-    it("tolerates 20 interleaved bridge start/stop calls and ends clean", async () => {
-      await expect(
-        Promise.all(Array.from({ length: 20 }, async (_, i) => (i % 2 === 0 ? await startMcpBridge(5000 + i) : (stopMcpBridge(), "stopped"))))
-      ).resolves.toBeDefined()
-      stopMcpBridge()
-      expect(await getMcpBridgeStatus()).toBe(false)
     })
   })
 })

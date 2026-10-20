@@ -220,7 +220,8 @@ float calcAO(vec3 pos, vec3 nor) {
 }
 
 void main() {
-  vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / min(u_resolution.x, u_resolution.y);
+  // aspect-correct: pixel offset divided by the shorter side keeps spheres round at any aspect (min(resolution.x, resolution.y), not resolution.x / resolution.y)
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / max(min(u_resolution.x, u_resolution.y), 1.0);
 
   // Orbit camera around scene
   float camDist = 3.8;
@@ -367,7 +368,9 @@ fn calcAO(pos: vec3f, nor: vec3f) -> f32 {
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
-  let uv = (input.uv - 0.5) * 2.0;
+  // aspect-correct: y spans [-1,1], x scales by resolution.x / resolution.y (guard unset 0 resolution)
+  let aspect = uniforms.resolution.x / max(uniforms.resolution.y, 1.0);
+  let uv = (input.uv - 0.5) * 2.0 * vec2f(max(aspect, 0.0001), 1.0);
 
   // Orbit camera around target
   let camDist = 3.8;

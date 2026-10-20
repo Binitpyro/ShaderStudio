@@ -1,9 +1,23 @@
+import { useProjectStore } from "@/stores/projectStore"
+import { compileNodePreview } from "@/core/nodePreviewCompiler"
+import { TEXTURE_LOADING } from "@/adapters/types"
+
+const TEX = { id: "tex1", name: "albedo", src: "blob:tex-1" }
+const texNode = { id: "t1", position: { x: 0, y: 0 }, data: { type: "texture", textureId: "tex1", name: "albedo" } } as any
+const texPreview = () => {
+  const r = compileNodePreview("t1", [texNode], [])
+  if (r.status !== "ok" || !r.textures) throw new Error("expected a textured preview")
+  return r
+}
+const texReq = (r: ReturnType<typeof texPreview>, version = TEX.src) => ({
+  nodeId: "t1", source: { wgsl: r.source.wgsl, glsl: r.source.glsl }, width: 8, height: 8, textures: r.textures!.map((t) => ({ ...t, version })),
+})
+const settle = (cond: () => boolean) => vi.waitFor(() => { if (!cond()) throw new Error("not yet") })
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import * as THREE from "three"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
 import { ThreeJSAdapter, FX_LOADERS } from "@/adapters/threejs"
 import { DEFAULT_RENDER_SETTINGS } from "@/stores/renderSettingsStore"
-import { useProjectStore } from "@/stores/projectStore"
 import type { RenderSettings } from "@/adapters/types"
 
 const h = vi.hoisted(() => ({ loads: [] as string[], targets: [] as Array<[number, number]>, depths: [] as Array<[number, number]> }))
@@ -286,5 +300,56 @@ describe("ThreeJSAdapter fidelity layer (fleet w4)", () => {
 
   it("reports unsupported settings and the effective shadow filter via getFidelityCapabilities", () => {
     expect(adapter.getFidelityCapabilities()).toEqual({ effectiveShadowFilter: "pcf", unsupported: ["ssao.intensity", "dof.bokehShape", "ssr.iblBlend"] })
+  })
+
+  describe("renderToTarget textures", () => {
+    beforeEach(() => useProjectStore.setState({ textureResources: [TEX] }))
+
+    it("rejects with TEXTURE_LOADING until created, then assigns the texture to the sampler uniform and never re-creates it", async () => {
+      const r = texPreview()
+      const req = texReq(r)
+      const glsl = r.source.glslThree
+      a.renderer.readRenderTargetPixels = vi.fn((_t: unknown, _x: number, _y: number, _w: number, _h: number, buf: Uint8Array) => buf.fill(1))
+      const request = { ...req, source: { glsl } }
+      await expect(adapter.renderToTarget(request)).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => (a as any).previewTexs.has("tex1"))
+      const tex = (a as any).previewTexs.get("tex1").tex
+      expect(await adapter.renderToTarget(request)).not.toBeNull()
+      const mat = [...(a as any).previewMaterials.values()].at(-1)
+      expect(mat.uniforms[r.textures![0].name].value).toBe(tex)
+      await adapter.renderToTarget(request)
+      expect((a as any).previewTexs.get("tex1").tex).toBe(tex)
+      expect((a as any).previewTexLoading.size).toBe(0)
+    })
+
+    it("caches a failed fetch per id+version: one fetch and one console.error, then every retry throws the failure", async () => {
+      const r = texPreview()
+      const request = (v: string) => ({ ...texReq(r, v), source: { glsl: r.source.glslThree } })
+      const fetchMock = vi.fn(async () => { throw new Error("404 nope") })
+      vi.stubGlobal("fetch", fetchMock)
+      const err = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await expect(adapter.renderToTarget(request(TEX.src))).rejects.toThrow(TEXTURE_LOADING)
+        await settle(() => (a as any).previewTexFailed.has("tex1"))
+        for (let i = 0; i < 5; i++) await expect(adapter.renderToTarget(request(TEX.src))).rejects.toThrow(/Texture failed to load: 404 nope/)
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(err).toHaveBeenCalledTimes(1)
+        // a new version is a new attempt
+        await expect(adapter.renderToTarget(request("blob:tex-2"))).rejects.toThrow(TEXTURE_LOADING)
+        await settle(() => fetchMock.mock.calls.length === 2)
+      } finally { vi.unstubAllGlobals() }
+    })
+
+    it("a new version of the same texture id is re-created", async () => {
+      const r = texPreview()
+      const request = (v: string) => ({ ...texReq(r, v), source: { glsl: r.source.glslThree } })
+      await expect(adapter.renderToTarget(request(TEX.src))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => (a as any).previewTexs.has("tex1"))
+      const first = (a as any).previewTexs.get("tex1").tex
+      useProjectStore.setState({ textureResources: [{ ...TEX, src: "blob:tex-2" }] })
+      await expect(adapter.renderToTarget(request("blob:tex-2"))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => (a as any).previewTexs.get("tex1").version === "blob:tex-2")
+      expect((a as any).previewTexs.get("tex1").tex).not.toBe(first)
+    })
   })
 })

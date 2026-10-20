@@ -181,3 +181,16 @@
   :root { --ds-dur-fast: 0.01ms; --ds-dur-base: 0.01ms; --ds-dur-slow: 0.01ms; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+
+/* xyflow ships a stock white card for node type "output" (bg, 10px padding, 150px width, border).
+   OutputNode renders its own NodeShell, so neutralise the wrapper or it shows as a white box in dark mode. */
+.react-flow__node.react-flow__node-output {
+  padding: 0;
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: inherit;
+  font-size: inherit;
+}

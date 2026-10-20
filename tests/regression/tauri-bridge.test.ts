@@ -1,14 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import fs from "fs"
 import path from "path"
+import * as bridge from "@/desktop/tauriBridge"
 import {
   isTauri,
   saveProjectNative,
   loadProjectNative,
-  startMcpBridge,
-  getMcpBridgeStatus,
-  stopMcpBridge,
-  getMcpBridgePort,
   minimizeWindow,
   maximizeWindow,
   closeWindow,
@@ -21,9 +18,6 @@ import {
   getDefaultProjectPath,
   save_project_native,
   load_project_native,
-  start_mcp_bridge,
-  get_mcp_bridge_status,
-  stop_mcp_bridge,
 } from "@/desktop/tauriBridge"
 
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
@@ -276,13 +270,11 @@ describe("desktop/tauriBridge", () => {
       expect(JSON.parse(back).nodes[999].id).toBe("n999")
     })
 
-    it("resetDesktopFallbackState clears saved projects, bridge and tray", async () => {
+    it("resetDesktopFallbackState clears saved projects and tray", async () => {
       await saveProjectNative("a.shaderstudio", "{}")
-      await startMcpBridge(4300)
       setupTray()
       resetDesktopFallbackState()
       await expect(loadProjectNative("a.shaderstudio")).rejects.toThrow(/File not found/)
-      expect(await getMcpBridgeStatus()).toBe(false)
       expect(isTrayActive()).toBe(false)
     })
   })
@@ -338,7 +330,7 @@ describe("desktop/tauriBridge", () => {
       expect(invoke).not.toHaveBeenCalled()
     })
 
-    it("dispatches load through __TAURI_INTERNALS__ with the right args; the MCP shim never calls native", async () => {
+    it("dispatches load through __TAURI_INTERNALS__ with the right args", async () => {
       const invoke = vi.fn(async (cmd: string, args: any) => {
         if (cmd === "load_project_native") return [args.path, '{"mocked":true}']
         return null
@@ -346,11 +338,6 @@ describe("desktop/tauriBridge", () => {
       withTauri(invoke)
       expect(await loadProjectNative("C:/test/mock.shaderstudio")).toEqual(["C:/test/mock.shaderstudio", '{"mocked":true}'])
       expect(invoke).toHaveBeenCalledWith("load_project_native", { path: "C:/test/mock.shaderstudio" })
-      invoke.mockClear()
-      expect(await startMcpBridge(8080)).toBe("MCP Bridge active on port 8080")
-      expect(await getMcpBridgeStatus()).toBe(true)
-      stopMcpBridge()
-      expect(invoke).not.toHaveBeenCalled()
     })
 
     it("calls parameterless commands with exactly one argument and args commands with exactly two", async () => {
@@ -438,35 +425,10 @@ describe("desktop/tauriBridge", () => {
     })
   })
 
-  describe("MCP bridge lifecycle", () => {
-    it("starts, reports, restarts on a new port, and stops", async () => {
-      expect(await getMcpBridgeStatus()).toBe(false)
-      expect(getMcpBridgePort()).toBe(0)
-      expect(await startMcpBridge(4200)).toBe("MCP Bridge active on port 4200")
-      expect(await getMcpBridgeStatus()).toBe(true)
-      expect(getMcpBridgePort()).toBe(4200)
-      await startMcpBridge(4201)
-      expect(getMcpBridgePort()).toBe(4201)
-      stopMcpBridge()
-      expect(await getMcpBridgeStatus()).toBe(false)
-      expect(getMcpBridgePort()).toBe(0)
-    })
-
-    it("rejects ports outside 1025..65535 (including infinities) and accepts the boundaries", async () => {
-      for (const p of [0, 1, 21, 80, 443, 1024, -1, -80, -65535, 65536, 70000, 999999, Infinity, -Infinity]) {
-        await expect(startMcpBridge(p)).rejects.toThrow(`Invalid port: ${p}. Must be between 1025 and 65535`)
-      }
-      expect(await getMcpBridgeStatus()).toBe(false)
-      expect(getMcpBridgePort()).toBe(0)
-      expect(await startMcpBridge(1025)).toContain("port 1025")
-      stopMcpBridge()
-      expect(await startMcpBridge(65535)).toContain("port 65535")
-      stopMcpBridge()
-    })
-
-    it("rejects NaN and non-integer ports", async () => {
-      await expect(startMcpBridge(NaN)).rejects.toThrow(/Invalid port/)
-      await expect(startMcpBridge(1025.5)).rejects.toThrow(/Invalid port/)
+  describe("deprecated MCP shims are gone", () => {
+    it("exports no fake MCP bridge functions (real server is scripts/mcp-server.js)", () => {
+      const exported = Object.keys(bridge)
+      expect(exported.filter((k) => /mcp/i.test(k))).toEqual([])
     })
   })
 
@@ -510,7 +472,6 @@ describe("desktop/tauriBridge", () => {
         minimizeWindow()
         maximizeWindow()
         closeWindow()
-        stopMcpBridge()
       }).not.toThrow()
       await flush()
     })
@@ -540,17 +501,10 @@ describe("desktop/tauriBridge", () => {
     it("are the same functions as the camelCase exports", async () => {
       expect(save_project_native).toBe(saveProjectNative)
       expect(load_project_native).toBe(loadProjectNative)
-      expect(start_mcp_bridge).toBe(startMcpBridge)
-      expect(get_mcp_bridge_status).toBe(getMcpBridgeStatus)
-      expect(stop_mcp_bridge).toBe(stopMcpBridge)
 
       const p = "C:/test/alias.shaderstudio"
       expect(await save_project_native(p, '{"alias":true}')).toBe(p)
       expect((await load_project_native(p))[1]).toBe('{"alias":true}')
-      expect(await start_mcp_bridge(3950)).toContain("port 3950")
-      expect(await get_mcp_bridge_status()).toBe(true)
-      stop_mcp_bridge()
-      expect(await get_mcp_bridge_status()).toBe(false)
     })
   })
 })
@@ -606,24 +560,10 @@ describe("Tier 5: Comprehensive White-Box Adversarial Coverage & Boundary Harden
       )
     })
 
-    it("4.3 startMcpBridge rejects invalid ports and manages lifecycle", async () => {
-      // Privileged / low ports (<= 1024)
-      await expect(startMcpBridge(80)).rejects.toThrow(/Invalid port: 80\. Must be between 1025 and 65535/)
-      await expect(startMcpBridge(1024)).rejects.toThrow(/Invalid port: 1024\. Must be between 1025 and 65535/)
-
-      // High ports (> 65535)
-      await expect(startMcpBridge(65536)).rejects.toThrow(/Invalid port: 65536\. Must be between 1025 and 65535/)
-      await expect(startMcpBridge(70000)).rejects.toThrow(/Invalid port: 70000\. Must be between 1025 and 65535/)
-
-      // Valid port succeeds
-      const msg = await startMcpBridge(8999)
-      expect(msg).toContain("8999")
-      expect(await getMcpBridgeStatus()).toBe(true)
-      expect(getMcpBridgePort()).toBe(8999)
-
-      stopMcpBridge()
-      expect(await getMcpBridgeStatus()).toBe(false)
-      expect(getMcpBridgePort()).toBe(0)
+    it("4.3 the fake MCP bridge shims are gone", () => {
+      for (const k of ["startMcpBridge", "stopMcpBridge", "getMcpBridgeStatus", "getMcpBridgePort", "start_mcp_bridge", "stop_mcp_bridge", "get_mcp_bridge_status"]) {
+        expect(k in bridge).toBe(false)
+      }
     })
 
     it("4.4 window and tray desktop controls execute gracefully", () => {

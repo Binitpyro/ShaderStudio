@@ -17,6 +17,7 @@ import type {
   FidelityCapabilities,
   FrameStats,
 } from "./types"
+import { TEXTURE_LOADING } from "./types"
 import type { RenderQueue, ComputePreset } from "@/core/graphCompiler"
 import type { UniformValue, EnvironmentSettings } from "@/stores/projectStore"
 import { useProjectStore } from "@/stores/projectStore"
@@ -513,6 +514,11 @@ export class WebGPUAdapter implements RenderAdapter {
   private previewChain: Promise<unknown> = Promise.resolve()
   private previewCache = new Map<string, { pipeline: GPURenderPipeline; mode: "mesh" | "quad" | "tri" } | null>()
   private previewQuad: GPUBuffer | null = null
+  /** Textures uploaded for node previews only (keyed by id, invalidated by version); the render queue's own cache is reused first. */
+  private previewTextures = new Map<string, { version: string; tex: GPUTexture }>()
+  private previewTexLoading = new Set<string>()
+  /** id -> version whose fetch/upload failed; retried only when the version changes (no refetch + console.error per retry). */
+  private previewTexFailed = new Map<string, string>()
 
   private resolveFrameFields(layout: UniformBufferLayout): FrameFields {
     const pick = (...names: string[]) => {
@@ -987,7 +993,7 @@ export class WebGPUAdapter implements RenderAdapter {
     }
   }
 
-  private buildBindGroupEntries(wgslSource?: string, uniformBuffer: GPUBuffer | null = this.uniformBuffer): GPUBindGroupEntry[] {
+  private buildBindGroupEntries(wgslSource?: string, uniformBuffer: GPUBuffer | null = this.uniformBuffer, texByName?: Map<string, GPUTexture>): GPUBindGroupEntry[] {
     const entries: GPUBindGroupEntry[] = []
     if (uniformBuffer) {
       entries.push({ binding: 0, resource: { buffer: uniformBuffer } })
@@ -1014,8 +1020,10 @@ export class WebGPUAdapter implements RenderAdapter {
           const boundTexId = this.textureBindings[name] ||
                              this.textureBindings[name.replace(/^u_/, "")] ||
                              this.textureBindings[`u_${name}`]
-          let targetTexture: GPUTexture | null = null
-          if (boundTexId && this.textureResources.has(boundTexId)) {
+          let targetTexture: GPUTexture | null = texByName?.get(name) ?? null
+          if (targetTexture) {
+            // preview-supplied texture
+          } else if (boundTexId && this.textureResources.has(boundTexId)) {
             targetTexture = this.textureResources.get(boundTexId)!
           } else if (boundTexId === "audioTexture" || name === "audioTexture" || name.toLowerCase().includes("audio")) {
             if (!this.audioTexture) this.createAudioTexture()
@@ -2410,6 +2418,8 @@ export class WebGPUAdapter implements RenderAdapter {
     this.depthCopyPass = null
     this.fxSignature = ""
     this.previewCache.clear()
+    for (const p of this.previewTextures.values()) { try { p.tex.destroy() } catch {} }
+    this.previewTextures.clear(); this.previewTexLoading.clear(); this.previewTexFailed.clear()
     try { this.previewQuad?.destroy() } catch {}
     this.previewQuad = null
     for (const t of this.taaHistory) { try { t?.destroy() } catch {} }
@@ -2964,6 +2974,36 @@ export class WebGPUAdapter implements RenderAdapter {
     return p
   }
 
+  /** The GPU texture for a preview request, or null while it is still being fetched/uploaded (started here, once per id+version). */
+  private previewTexture(id: string, version: string): GPUTexture | null {
+    const shared = this.textureResources.get(id)
+    if (shared) return shared
+    const hit = this.previewTextures.get(id)
+    if (hit && hit.version === version) return hit.tex
+    if (this.previewTexFailed.get(id) === version) throw new Error(`Preview texture "${id}" failed to load`)
+    const device = this.device
+    const resource = useProjectStore.getState().textureResources.find((t) => t.id === id)
+    if (!device || !resource || this.previewTexLoading.has(id)) return null
+    this.previewTexLoading.add(id)
+    void (async () => {
+      try {
+        const bitmap = await createImageBitmap(await (await fetch(resource.src)).blob())
+        try {
+          if (this.device !== device) return
+          const tex = device.createTexture({ size: [bitmap.width, bitmap.height], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT })
+          device.queue.copyExternalImageToTexture({ source: bitmap }, { texture: tex }, [bitmap.width, bitmap.height])
+          const old = this.previewTextures.get(id)
+          if (old) { try { old.tex.destroy() } catch {} }
+          this.previewTextures.set(id, { version, tex })
+          this.previewTexFailed.delete(id)
+        } finally { try { bitmap.close() } catch {} }
+      } catch (e) {
+        if (this.initialized) { this.previewTexFailed.set(id, version); console.error("Failed to load preview texture:", e) }
+      } finally { this.previewTexLoading.delete(id) }
+    })()
+    return null
+  }
+
   private compilePreview(wgsl: string): Promise<{ pipeline: GPURenderPipeline; mode: "mesh" | "quad" | "tri" } | null> {
     const device = this.device
     if (!device) return Promise.resolve(null)
@@ -3008,6 +3048,14 @@ export class WebGPUAdapter implements RenderAdapter {
     }
     if (!entry) return null
 
+    const texByName = new Map<string, GPUTexture>()
+    let loading = false
+    for (const t of req.textures ?? []) {
+      const tex = this.previewTexture(t.textureId, t.version ?? "")
+      if (tex) texByName.set(t.name, tex); else loading = true
+    }
+    if (loading) throw new Error(TEXTURE_LOADING)
+
     const temps: Array<{ destroy(): void }> = []
     try {
       const res = this.buildUniformResources(wgsl)
@@ -3029,7 +3077,7 @@ export class WebGPUAdapter implements RenderAdapter {
       const t = Number((supplied.time ?? supplied.u_time)?.value)
       if (f.time >= 0) new Float32Array(res.cpu, f.time, 1)[0] = Number.isFinite(t) ? t : 0
       device.queue.writeBuffer(res.buffer, 0, res.cpu)
-      const bindGroup = device.createBindGroup({ layout: entry.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgsl, res.buffer) })
+      const bindGroup = device.createBindGroup({ layout: entry.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgsl, res.buffer, texByName) })
 
       const color = device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, label: "NodePreviewTarget" })
       temps.push(color)

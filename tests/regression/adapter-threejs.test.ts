@@ -3,6 +3,8 @@ import * as THREE from "three"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
 import { ThreeJSAdapter } from "@/adapters/threejs"
 import { useProjectStore } from "@/stores/projectStore"
+import { STARTER_VERT_GLSL, STARTER_GLSL } from "@/core/defaultStarterScene"
+import { SDF_VERT_GLSL } from "@/core/sdf/sdfCompiler"
 import { performanceTelemetry } from "@/core/performanceTelemetry"
 
 vi.mock("three", async (importOriginal) => {
@@ -152,6 +154,26 @@ describe("ThreeJSAdapter GLSL3 #version handling (w4-three-version)", () => {
     expect(a.material.glslVersion).toBe(THREE.GLSL3)
     expect(a.material.fragmentShader.startsWith("#version")).toBe(false)
     expect(a.material.fragmentShader).toContain("out vec4 fragColor;")
+  })
+
+  it("starter vertex stage keeps its MVP on three: u_mvp is aliased to projection*modelView, a_position to position", () => {
+    // regression: three never supplies a `u_mvp` uniform, so the starter vertex stage collapsed every vertex to 0 (blurry blob, no mesh)
+    useProjectStore.setState({ vertexShaderSource: STARTER_VERT_GLSL })
+    adapter.recompileShader(STARTER_GLSL)
+    const vs = (a.material as THREE.ShaderMaterial).vertexShader
+    expect(vs).not.toMatch(/uniform\s+mat4\s+u_mvp/)
+    expect(vs).toContain("#define u_mvp (projectionMatrix * modelViewMatrix)")
+    expect(vs).toContain("#define a_position position")
+    expect(vs).not.toContain("#version")
+    expect(vs.indexOf("#define u_mvp")).toBeLessThan(vs.indexOf("gl_Position = u_mvp"))
+  })
+
+  it("SDF fullscreen vertex stage still drives clip space straight from the plane position (no MVP)", () => {
+    useProjectStore.setState({ vertexShaderSource: SDF_VERT_GLSL })
+    adapter.recompileShader(STARTER_GLSL)
+    const vs = (a.material as THREE.ShaderMaterial).vertexShader
+    expect(vs).toContain("#define a_position position")
+    expect(vs).not.toContain("u_mvp")
   })
 
   it("strips #version from the preview material used by renderToTarget", () => {

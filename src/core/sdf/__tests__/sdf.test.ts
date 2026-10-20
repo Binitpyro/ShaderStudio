@@ -162,6 +162,14 @@ describe("Visual Raymarching & SDF Core Math", () => {
       expect(glsl).toContain("fragColor =")
     })
 
+    it("corrects ray direction for aspect ratio on both backends", () => {
+      const wgsl = compileSdfToWgsl(sceneTree)
+      expect(wgsl).toContain("uniforms.resolution.x / max(uniforms.resolution.y")
+      expect(wgsl).toMatch(/let uv = \(input\.uv - 0\.5\) \* 2\.0 \* vec2f\(max\(aspect/)
+      const glsl = compileSdfToGlsl(sceneTree)
+      expect(glsl).toMatch(/gl_FragCoord\.xy - 0\.5 \* u_resolution\.xy\) \/ max\(min\(u_resolution\.x, u_resolution\.y\)/)
+    })
+
     it("compiles SDF scene tree into complete WGSL raymarching shader", () => {
       const wgsl = compileSdfToWgsl(sceneTree)
       expect(wgsl).toContain("fn vertex_main")

@@ -233,7 +233,16 @@ export interface RenderToTargetRequest {
    * defaults; names not declared by the shader are ignored. `time`/`u_time` also drive the time uniform.
    */
   uniforms?: Record<string, UniformValue>
+  /**
+   * Project textures the source samples: `name` is the sampler2D (GLSL) / texture_2d (WGSL) variable. `version` (the
+   * resource's src) keys the adapter's upload cache: same id + version is never re-uploaded. While a texture is still
+   * loading the call rejects with `Error(TEXTURE_LOADING)` so the caller can show "Loading texture…" and retry.
+   */
+  textures?: Array<{ name: string; textureId: string; version?: string }>
 }
+
+/** Message of the error `renderToTarget` rejects with while a requested texture has not finished loading. */
+export const TEXTURE_LOADING = "texture-loading"
 
 // ----------------------------------------------------------------------------
 // Core RenderAdapter Interface

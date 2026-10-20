@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Three.js-r178-black?style=flat-square" alt="Three.js" />
   <img src="https://img.shields.io/badge/MCP_Server-Enabled-purple?style=flat-square" alt="MCP Server" />
   <img src="https://img.shields.io/badge/Local_AI-Ollama_%7C_LM_Studio-emerald?style=flat-square" alt="Local AI" />
-  <img src="https://img.shields.io/badge/Tests-433_Passed-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-2191_Passed-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/TypeScript-5.9-blue?style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License MIT" />
 </p>
@@ -34,7 +34,7 @@ Whether you are designing procedural materials for **Unity**, **Godot**, or **Th
 
 ### 🤖 1. Agentic AI Visual Sandbox & MCP Server
 Shader Studio features a complete closed-loop AI runtime that empowers language models to see, inspect, and iterate on shader code in real time:
-- **Universal Model Context Protocol (MCP) Server (`scripts/mcp-server.js`)**: Connect Cursor, Claude Desktop, or Antigravity directly to your running canvas via stdio JSON-RPC. External agents can call `render_shader`, `get_viewport_snapshot`, `list_templates`, `load_template`, and `transpile_shader`.
+- **Universal Model Context Protocol (MCP) Server (`scripts/mcp-server.js`)**: Connect Cursor, Claude Desktop, or Antigravity directly to your running canvas via stdio JSON-RPC. External agents can call `render_shader`, `get_viewport_snapshot`, `get_bridge_status`, `list_templates`, `load_template`, and `transpile_shader`.
 - **Integrated In-App Copilot Drawer (`src/components/AICopilotDrawer.tsx`)**: Multi-provider AI assistant supporting cloud models (Anthropic Claude, Google Gemini, OpenAI) and local zero-cost models (**Ollama** on `localhost:11434`, **LM Studio** on `localhost:1234`).
 - **Autonomous Vision Loop & Auto-Fix**: The AI compiles shader code, captures high-resolution viewport frames (`POST /api/agent/capture`), inspects GPU error diagnostics, and self-corrects broken shaders automatically.
 
@@ -74,13 +74,16 @@ Export your procedural shaders directly into production-ready game engine format
 - **Built-in Electronic Synthesizer**: Procedural 4-bar drum & bass loop generated in-memory with zero network or audio file dependencies, plus microphone input and audio file import.
 
 ### 🌟 7. Curated Production Shader Templates Library
-Six professionally engineered, high-end visual shaders ready to load with one click:
-1. **Holographic Energy Shield**: Hexagonal forcefield with fresnel rim lighting and animated energy waves.
-2. **Boiling Solar Plasma Orb**: Raymarched solar corona, sunspots, and turbulent coronal mass ejections.
-3. **Cyberpunk Synthwave Grid**: Retro 80s neon highway with perspective horizon glow and moving terrain.
-4. **Liquid Chrome & Thin-Film Iridescence**: Fluid metallic reflections with rainbow oil-slick interference.
-5. **Ocean Caustics & Sun Shafts**: Procedural underwater light rays and shimmering caustic refraction.
-6. **Cosmic Volumetric Nebula**: Deep-space interstellar gas cloud with multi-octave raymarched absorption.
+Seven shader templates ready to load with one click. Every template runs on WebGPU, WebGL2, and Three.js:
+1. **Iridescent Torus Knot Hero**: Thin-film iridescent chrome torus knot with Fresnel rim glow, audio pulsation, and Blinn-Phong highlights.
+2. **Holographic Energy Shield**: Hexagonal energy barrier with animated scanlines, edge Fresnel emission, and chromatic aberration.
+3. **Boiling Solar Plasma Orb**: Turbulent multi-octave FBM convective plasma cells with coronal flares and high-temperature radiation.
+4. **Cyberpunk Synthwave Grid**: Retro 80s endless perspective neon grid with glowing horizon sun and atmospheric fog.
+5. **Liquid Chrome & Thin-Film Iridescence**: Specular liquid mercury with angle-dependent chromatic thin-film wave interference.
+6. **Tropical Ocean & Voronoi Caustics**: Deep oceanic sunlight transmission with animated Voronoi water refraction ripples.
+7. **Cosmic Nebula & Twinkling Stars**: Deep space volumetric gas clouds with parallax star dust and stellar nurseries.
+
+The three SDF templates (Organic Metaball Fusion, Morphing Twisted Torus, Infinite Procedural Columns) are node graphs and are listed in section 9.
 
 ### ☀️ 8. Studio Lighting & Image-Based Lighting (IBL / HDRI)
 - **100% In-Memory Procedural HDR Synthesis**: 5 mathematical studio environments generated on-the-fly (`studio_warm`, `cyberpunk_neon`, `sunset`, `nebula`, `clean_neutral`) with zero external asset downloads or CORS blocks.
@@ -144,7 +147,7 @@ Six professionally engineered, high-end visual shaders ready to load with one cl
 ## 🚀 Getting Started
 
 ### Prerequisites
-- **Node.js**: v18.0.0 or higher
+- **Node.js**: v22.18.0 or higher (the MCP server relies on Node's built-in TypeScript type stripping)
 - **Browser**: Modern Chromium browser with WebGPU enabled (Chrome 113+, Edge 113+) or modern Firefox / Safari with WebGL2 support.
 
 ### Installation
@@ -170,61 +173,70 @@ Six professionally engineered, high-end visual shaders ready to load with one cl
 
 ### 🔨 Production Build & Standalone Windows Executable (.exe)
 
-ShaderStudio includes turnkey scripts in the `scripts/` directory to build the full web distribution and package standalone Windows binaries:
+ShaderStudio uses npm scripts (defined in `package.json`, implemented in `scripts/`) to build the web distribution and package standalone Windows binaries:
 
 #### 1. Full Production Build (WebAssembly + TypeScript + Vite)
-Compiles the Rust WebAssembly engine (`wasm-pack`), runs typechecking, and generates optimized assets in `dist/`:
-```bat
-# Windows Batch Script (Double-click or run from cmd):
-scripts\build-all.bat
-
-# Or via npm / node:
+Compiles the Rust WebAssembly engine (`wasm-pack` must be on your PATH), runs typechecking, and generates optimized assets in `dist/`:
+```bash
 npm run build:all
-node scripts/build-all.js
+# or: node scripts/build-all.js
+# flags: --skip-wasm (skip the WebAssembly step), --test (also run cargo and vitest tests)
 ```
 
-#### 2. Standalone Windows Executable (.exe)
-Compiles `crates/shaderstudio_desktop` into a **single, portable, zero-dependency `ShaderStudio.exe`** that embeds all HTML, CSS, JavaScript, and WebAssembly assets in-memory:
-```bat
-# Windows Batch Script (Double-click or run from cmd):
-scripts\build-exe.bat
+`npm run build` runs only the TypeScript check and the Vite bundle (`tsc -b && vite build`). It does not rebuild the WebAssembly package.
 
-# Or via npm / node:
+#### 2. Standalone Windows Executable (.exe)
+`npm run build:exe` compiles `crates/shaderstudio_desktop` into a **single, portable, zero-dependency `ShaderStudio.exe`** that embeds all HTML, CSS, JavaScript, and WebAssembly assets in-memory. The executable is written to the repository root as `ShaderStudio.exe`:
+```bash
 npm run build:exe
-node scripts/build-exe.js
+# or: node scripts/build-exe.js
+# flag: --full (rebuild dist/ first; dist/ is built automatically if it is missing)
 ```
 
 **Running `ShaderStudio.exe`:**
 * **Desktop Mode**: Simply double-click `ShaderStudio.exe`. It automatically starts an in-memory HTTP server and launches your default browser.
 * **Command Line Options**:
   ```cmd
-  ShaderStudio.exe                  # Default port: 8642
+  ShaderStudio.exe                  # Default port: 8650 (next free port if busy)
   ShaderStudio.exe --port 9000      # Custom port
   ShaderStudio.exe --headless       # Run server without launching browser window
   ```
+
+#### 3. Tauri Desktop App (`src-tauri/`)
+The Tauri shell runs the same Vite frontend in a native window:
+* `npm run tauri:dev`: runs `npm run dev` (http://localhost:5173) and opens the app window (`tauri dev`).
+* `npm run tauri:build`: runs `tauri build`, which first runs `npm run build` (`beforeBuildCommand`). The bundled frontend is read from `dist/`.
+
+Project save and open go through native file dialogs. Project paths must end in `.shaderstudio` or `.json`, and double extensions such as `evil.exe.json` are rejected. A file is read or written only if it was picked in a dialog during that session, plus the app's default `Documents/ShaderStudio/untitled.shaderstudio` path (`src-tauri/src/commands/fs_dialog.rs`).
 
 ---
 
 ## 🤖 Connecting External AI Agents via MCP
 
-To connect external AI coding tools (**Cursor**, **Claude Desktop**, or **Antigravity**) directly to Shader Studio:
+To connect external AI coding tools (**Cursor**, **Claude Desktop**, or **Antigravity**) directly to Shader Studio, two processes are involved:
+- **Dev bridge** (`scripts/bridge.js`, `npm run bridge`): an HTTP and WebSocket server on port `8642`. The browser app connects to it.
+- **MCP server** (`scripts/mcp-server.js`, `npm run mcp`): a stdio JSON-RPC server. Your AI client launches it and it talks to the bridge.
 
-1. Launch the Shader Studio Dev Bridge & MCP Server:
+`ws` is a devDependency, so `npm run bridge` needs a normal `npm install` (not `--omit=dev`).
+
+1. Start the bridge:
    ```bash
-   node scripts/mcp-server.js
+   npm run bridge
    ```
+   It prints an `Open Studio: http://localhost:5173/?token=...` link. Open that link in your browser so the page receives the token. The bridge also writes the token to `~/.shader-studio/bridge-token`, which the MCP server reads. The file is deleted when the bridge exits. To supply the token yourself, set `SHADER_STUDIO_BRIDGE_TOKEN`. To use a different token file, set `SHADER_STUDIO_TOKEN_FILE`.
 
-2. Add the MCP server to your Claude Desktop configuration (`claude_desktop_config.json`):
+2. Add the MCP server to your AI client's configuration. For example, in Claude Desktop (`claude_desktop_config.json`):
    ```json
    {
      "mcpServers": {
        "shader-studio": {
          "command": "node",
-         "args": ["c:/Users/binit/Desktop/Binit/Projects/ShaderStudio/scripts/mcp-server.js"]
+         "args": ["<path>/scripts/mcp-server.js"]
        }
      }
    }
    ```
+   Replace `<path>` with the absolute path to your clone of this repository.
 
 3. Your external AI can now render shaders, inspect live frame captures, query shader templates, and transpile code into Unity and Godot formats in real time!
 
@@ -239,7 +251,7 @@ To edit shader files directly in VS Code or Cursor with live hot-reloading:
    npm run bridge -- ./src/shaders
    ```
 
-2. Open Shader Studio in your browser. The connection indicator will turn green (**Synced via local bridge**).
+2. Open the `Open Studio` link the bridge prints (it includes the token). The connection indicator will turn green (**Synced via local bridge**).
 3. Any changes saved to `.wgsl`, `.glsl`, `.frag`, or `.vert` files in that folder will instantly push to Shader Studio and recompile in the viewport.
 
 ---
@@ -252,14 +264,19 @@ To edit shader files directly in VS Code or Cursor with live hot-reloading:
 | `npm run build` | Runs TypeScript compilation (`tsc -b`) and builds production assets with Vite. |
 | `npm run preview` | Previews the production build locally. |
 | `npm run typecheck` | Validates TypeScript types across the entire project without emitting code. |
-| `npm run test` | Executes the complete Vitest test suite (**410 tests across 37 test suites**). |
+| `npm run test` | Executes the complete Vitest test suite (**2,191 tests across 94 test files**). |
 | `npm run bridge` | Starts the WebSocket local IDE file synchronizer & agent bridge (`scripts/bridge.js`). |
+| `npm run mcp` | Starts the stdio MCP server (`scripts/mcp-server.js`) for an AI client. |
+| `npm run build:all` | Full production build: WebAssembly (`wasm-pack`), typecheck, and Vite bundle (`scripts/build-all.js`). |
+| `npm run build:exe` | Builds the standalone `ShaderStudio.exe` in the repository root (`scripts/build-exe.js`). |
+| `npm run tauri:dev` | Runs the Tauri desktop app in development mode (`tauri dev`). |
+| `npm run tauri:build` | Builds the Tauri desktop app (`tauri build`). |
 
 ---
 
 ## 🧪 Testing & Quality Assurance
 
-Shader Studio maintains an exhaustive automated test suite with **410 unit, integration, and end-to-end tests** across 37 test suites:
+Shader Studio maintains an exhaustive automated test suite with **2,191 unit, integration, and end-to-end tests** across 94 test files:
 
 - **Tier 1 (Feature Integrations)**: GPU uniform buffer alignment (16-byte WGSL rules), topological graph compiler sorting, multi-pass post-processing chains, texture sampler bindings, real-time FFT audio pipeline, compute simulation pipelines, and closed-loop agent RPC execution.
 - **Tier 2 (Boundary & Corner Cases)**: Context/device loss recovery, empty graph states, malformed uniform declarations, invalid texture paths, network 404 fallbacks, and rapid backend switching.

@@ -21,6 +21,14 @@ export interface PreviewUniform {
   bool?: boolean
 }
 
+/** A texture the preview shader samples: `name` is the sampler2D / texture_2d variable, `textureId` the project texture resource. */
+export interface PreviewTexture {
+  name: string
+  textureId: string
+  /** The resource's src: the adapter's upload-cache key (a new src re-uploads). */
+  version?: string
+}
+
 export interface NodePreviewSource {
   /** WGSL (WebGPU): fullscreen-quad vertex stage + fragment_main. */
   wgsl: string
@@ -31,7 +39,7 @@ export interface NodePreviewSource {
 }
 
 export type NodePreviewResult =
-  | { status: "ok"; source: NodePreviewSource; uniforms: PreviewUniform[] }
+  | { status: "ok"; source: NodePreviewSource; uniforms: PreviewUniform[]; textures?: PreviewTexture[] }
   /** The node has no visual output (mesh, compute, audio, annotation, ...). */
   | { status: "none" }
   | { status: "error"; error: string }
@@ -39,6 +47,8 @@ export type NodePreviewResult =
 export interface NodePreviewOptions {
   /** The project's own shader source; a material node previews exactly this. */
   material?: { wgsl?: string; glsl?: string }
+  /** Resolves a project texture id to its src. When given, a texture id it cannot resolve is a "not found" error. */
+  textureSrc?: (id: string) => string | undefined
 }
 
 class PreviewError extends Error {}
@@ -71,7 +81,9 @@ interface PreviewRef { glsl: string; wgsl: string; type: PreviewValueType }
 interface PreviewCtx {
   nodes: Map<string, Node<GraphNodeData>>
   edges: Edge[]
+  textureSrc?: NodePreviewOptions["textureSrc"]
   uniforms: Map<string, PreviewUniform>
+  textures: Map<string, PreviewTexture>
   glsl: string[]
   wgsl: string[]
   done: Map<string, PreviewRef>
@@ -97,6 +109,18 @@ function emitPreviewValue(ctx: PreviewCtx, id: string): PreviewRef {
   const data = node.data
   if (data.type === "time") {
     out = { glsl: "time", wgsl: "time", type: "float" }
+  } else if (data.type === "texture") {
+    // An unassigned texture node samples nothing: flat opaque black rather than an error.
+    if (data.textureId) {
+      const name = `ptex_${ident(data.textureId)}`
+      const version = ctx.textureSrc?.(data.textureId)
+      if (ctx.textureSrc && version === undefined) throw new PreviewError("Texture not found in the project.")
+      ctx.textures.set(name, { name, textureId: data.textureId, version })
+      const v = `n_${ident(id)}`
+      ctx.glsl.push(`vec4 ${v} = texture(${name}, uv);`)
+      ctx.wgsl.push(`let ${v} = textureSampleLevel(${name}, ptex_sampler, uv, 0.0);`)
+      out = { glsl: v, wgsl: v, type: "vec4" }
+    } else out = { glsl: "vec4(0.0, 0.0, 0.0, 1.0)", wgsl: "vec4f(0.0, 0.0, 0.0, 1.0)", type: "vec4" }
   } else if (data.type === "uniform") {
     const type: PreviewValueType = data.uniformType === "color" ? "vec3" : data.uniformType === "bool" ? "float" : (data.uniformType as PreviewValueType) || "float"
     const name = data.name || "param"
@@ -162,7 +186,8 @@ function raymarchPreview(data: RaymarchNodeData | null, root: SdfTreeNode): { so
  * - uniform / time / math_expression -> the value as colour (float = grey, vec2 = rg, vec3 = rgb, vec4 = rgba)
  * - raymarch / sdf_primitive / sdf_operator -> the raymarched SDF
  * - output -> whatever feeds it
- * - everything else (mesh, compute, audio, texture, post-process, annotations, ...) -> `{ status: "none" }`
+ * - texture -> the sampled image (also usable as a math_expression input)
+ * - everything else (mesh, compute, audio, post-process, annotations, ...) -> `{ status: "none" }`
  */
 export function compileNodePreview(
   nodeId: string,
@@ -204,15 +229,19 @@ export function compileNodePreview(
       case "sdf_operator":
         return { status: "ok", ...raymarchPreview(null, buildSdfTree(node.id, rawNodes, edges)) }
       case "uniform":
+      case "texture":
       case "time":
       case "math_expression": {
-        const ctx: PreviewCtx = { nodes, edges, uniforms: new Map(), glsl: [], wgsl: [], done: new Map(), visiting: new Set() }
+        if (data.type === "texture" && !data.textureId) return { status: "none" } // nothing assigned yet: no image to show
+        const ctx: PreviewCtx = { nodes, edges, uniforms: new Map(), textureSrc: options.textureSrc, textures: new Map(), glsl: [], wgsl: [], done: new Map(), visiting: new Set() }
         const v = emitPreviewValue(ctx, node.id)
         const shown: PreviewRef = data.type === "time" ? { glsl: "fract(time)", wgsl: "fract(time)", type: "float" } : v
         const uniforms = [...ctx.uniforms.values()].sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0))
+        const textures = [...ctx.textures.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
         const glsl = [
           "#version 300 es", "precision highp float;", "in vec2 v_uv;", "out vec4 fragColor;",
           "uniform float u_time;", "uniform vec2 u_resolution;",
+          ...textures.map((t) => `uniform sampler2D ${t.name};`),
           ...uniforms.map((u) => `uniform ${u.type} ${u.field};`),
           "const float PI = 3.14159265359;", "const float TAU = 6.28318530718;", "const float E = 2.71828182846;",
           "void main() {", "  vec2 uv = v_uv;", "  float time = u_time;", "  vec2 resolution = u_resolution;",
@@ -223,6 +252,8 @@ export function compileNodePreview(
           "// ShaderStudio - node preview", "struct Uniforms {", "  mvp: mat4x4f,", "  time: f32,", "  color: vec3f,", "  resolution: vec2f,", "  padding: vec2f,",
           ...uniforms.map((u) => `  ${u.field}: ${WGSL_VEC[u.type]},`),
           "};", "@group(0) @binding(0) var<uniform> uniforms: Uniforms;",
+          // Shared sampler at binding 1, textures from binding 2 (the adapter binds them by variable name).
+          ...(textures.length ? ["@group(0) @binding(1) var ptex_sampler: sampler;", ...textures.map((t, i) => `@group(0) @binding(${i + 2}) var ${t.name}: texture_2d<f32>;`)] : []),
           "struct VertexInput { @location(0) position: vec3f, };",
           "struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f, };",
           "@vertex fn vertex_main(input: VertexInput) -> VertexOutput {",
@@ -233,7 +264,7 @@ export function compileNodePreview(
           ...ctx.wgsl.map((s) => `  ${s}`),
           `  return ${wrapPreviewColor(shown.wgsl, shown.type, "wgsl")};`, "}", "",
         ].join("\n")
-        return { status: "ok", source: { wgsl, glsl, glslThree: toThreeGlsl(glsl) }, uniforms }
+        return { status: "ok", source: { wgsl, glsl, glslThree: toThreeGlsl(glsl) }, uniforms, ...(textures.length ? { textures } : {}) }
       }
       default:
         return { status: "none" }

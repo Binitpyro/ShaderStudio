@@ -1,3 +1,18 @@
+import { compileNodePreview } from "@/core/nodePreviewCompiler"
+import { TEXTURE_LOADING } from "@/adapters/types"
+import { useProjectStore } from "@/stores/projectStore"
+
+const TEX = { id: "tex1", name: "albedo", src: "blob:tex-1" }
+const texNode = { id: "t1", position: { x: 0, y: 0 }, data: { type: "texture", textureId: "tex1", name: "albedo" } } as any
+const texPreview = () => {
+  const r = compileNodePreview("t1", [texNode], [])
+  if (r.status !== "ok" || !r.textures) throw new Error("expected a textured preview")
+  return r
+}
+const texReq = (r: ReturnType<typeof texPreview>, version = TEX.src) => ({
+  nodeId: "t1", source: { wgsl: r.source.wgsl, glsl: r.source.glsl }, width: 8, height: 8, textures: r.textures!.map((t) => ({ ...t, version })),
+})
+const settle = (cond: () => boolean) => vi.waitFor(() => { if (!cond()) throw new Error("not yet") })
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { setupE2ETestEnvironment, teardownE2ETestEnvironment } from "../e2e/mocks"
 import { WebGPUAdapter, FIDELITY_PASS_ORDER, GBUFFER_FORMATS } from "@/adapters/webgpu"
@@ -471,5 +486,80 @@ describe("WebGPU fidelity layer (fleet w4)", () => {
 
   it("reports full fidelity capabilities", () => {
     expect(adapter.getFidelityCapabilities!()).toEqual({ effectiveShadowFilter: "pcf", unsupported: [] })
+  })
+
+  describe("renderToTarget textures", () => {
+    beforeEach(() => useProjectStore.setState({ textureResources: [TEX] }))
+
+    it("rejects with TEXTURE_LOADING until uploaded, then binds texture + sampler and never re-uploads", async () => {
+      const r = texPreview()
+      const req = texReq(r)
+      await expect(adapter.renderToTarget!(req)).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTextures.has("tex1"))
+      const uploaded = a.previewTextures.get("tex1").tex
+      const created = () => device.createdTextures?.length ?? 0
+      const before = created()
+      const groupsBefore = device.createdBindGroups.length
+      expect(await adapter.renderToTarget!(req)).not.toBeNull()
+      const group = device.createdBindGroups.slice(groupsBefore).at(-1)
+      const entries = (group.descriptor?.entries ?? group.entries) as any[]
+      const texEntry = entries.find((e) => e.binding === 2)
+      expect(texEntry.resource.texture ?? texEntry.resource.__texture ?? texEntry.resource).toBeTruthy()
+      expect(entries.some((e) => e.binding === 1)).toBe(true) // sampler
+      const afterFirst = created()
+      await adapter.renderToTarget!(req)
+      // second request with the same version: only the per-request target/readback temporaries, no new image texture
+      expect(a.previewTextures.get("tex1").tex).toBe(uploaded)
+      expect(created() - afterFirst).toBe(afterFirst - before)
+      expect(a.previewTexLoading.size).toBe(0)
+    })
+
+    it("a new version of the same texture id is re-uploaded", async () => {
+      const r = texPreview()
+      await expect(adapter.renderToTarget!(texReq(r))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTextures.has("tex1"))
+      const first = a.previewTextures.get("tex1").tex
+      const destroy = vi.spyOn(first, "destroy")
+      useProjectStore.setState({ textureResources: [{ ...TEX, src: "blob:tex-2" }] })
+      await expect(adapter.renderToTarget!(texReq(r, "blob:tex-2"))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTextures.get("tex1").version === "blob:tex-2")
+      expect(a.previewTextures.get("tex1").tex).not.toBe(first)
+      expect(destroy).toHaveBeenCalledTimes(1) // the replaced GPU texture is released, not leaked
+      expect(first.isDestroyed).toBe(true)
+      expect(a.previewTextures.get("tex1").tex.isDestroyed).toBe(false)
+    })
+
+    it("dispose destroys and clears every preview texture", async () => {
+      const r = texPreview()
+      await expect(adapter.renderToTarget!(texReq(r))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTextures.has("tex1"))
+      const uploaded = a.previewTextures.get("tex1").tex
+      adapter.dispose()
+      expect(uploaded.isDestroyed).toBe(true)
+      expect(a.previewTextures.size).toBe(0)
+    })
+
+    it("caches a failed fetch per id+version: one fetch, one console.error, then a real error (not TEXTURE_LOADING)", async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("net down"))
+      const err = vi.spyOn(console, "error").mockImplementation(() => {})
+      const r = texPreview()
+      await expect(adapter.renderToTarget!(texReq(r))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTexFailed.has("tex1"))
+      for (let i = 0; i < 3; i++) {
+        const e = await adapter.renderToTarget!(texReq(r)).catch((x: Error) => x)
+        expect(e).toBeInstanceOf(Error)
+        expect((e as Error).message).not.toBe(TEXTURE_LOADING)
+        expect((e as Error).message).toContain("failed to load")
+      }
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(err).toHaveBeenCalledTimes(1)
+      // a new version is a fresh attempt
+      fetchSpy.mockRestore()
+      useProjectStore.setState({ textureResources: [{ ...TEX, src: "blob:tex-2" }] })
+      await expect(adapter.renderToTarget!(texReq(r, "blob:tex-2"))).rejects.toThrow(TEXTURE_LOADING)
+      await settle(() => a.previewTextures.get("tex1")?.version === "blob:tex-2")
+      expect(a.previewTexFailed.has("tex1")).toBe(false)
+      err.mockRestore()
+    })
   })
 })

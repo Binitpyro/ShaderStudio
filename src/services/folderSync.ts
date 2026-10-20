@@ -1,6 +1,5 @@
 import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { useProjectStore } from "@/stores/projectStore"
-import { saveSnapshot } from "@/db"
 
 export const FOLDER_POLL_MS = 1000
 const SNAPSHOT_DEBOUNCE = 5000
@@ -13,7 +12,7 @@ let ticking = false
 /** Debounced IndexedDB snapshot of the active file (shared by the importer and the poller). */
 export function scheduleFolderSnapshot(path: string, content: string) {
   if (snapshotTimer) clearTimeout(snapshotTimer)
-  snapshotTimer = setTimeout(() => { snapshotTimer = null; void saveSnapshot(path, content) }, SNAPSHOT_DEBOUNCE)
+  snapshotTimer = setTimeout(() => { snapshotTimer = null; void import("@/db").then((m) => m.saveSnapshot(path, content)).catch((e) => console.warn("[snapshot] save failed", e)) }, SNAPSHOT_DEBOUNCE)
 }
 
 /** One poll pass. Reads the LIVE handle map every call, so reconnects and clears are always honoured. */

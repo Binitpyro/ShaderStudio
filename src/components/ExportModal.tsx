@@ -319,7 +319,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                   <Button
                     size="sm"
                     onClick={handleDownloadPbrZip}
-                    className="h-7 gap-1.5 text-xs bg-brand hover:bg-brand text-white"
+                    className="h-7 gap-1.5 text-xs"
                   >
                     <Archive className="h-3.5 w-3.5" />
                     Download All (.zip)
@@ -497,9 +497,9 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
           </div>
         ) : (
           /* Code View Area with Game Engine Sub-bar */
-          <div className="flex-1 flex flex-col overflow-hidden bg-black">
+          <div className="flex-1 flex flex-col overflow-hidden bg-canvas">
             {activeTab === "r3f" && (
-              <div className="flex items-center gap-2 border-b border-line bg-zinc-950 px-4 py-2">
+              <div className="flex items-center gap-2 border-b border-line bg-raised px-4 py-2">
                 <span className="text-xs text-fg-muted font-medium">Export Preset:</span>
                 <div className="flex items-center gap-1">
                   <button
@@ -526,7 +526,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
               </div>
             )}
             {activeTab === "engine" && (
-              <div className="flex items-center gap-2 border-b border-line bg-zinc-950 px-4 py-2 flex-wrap">
+              <div className="flex items-center gap-2 border-b border-line bg-raised px-4 py-2 flex-wrap">
                 <span className="text-xs text-fg-muted font-medium">Target Engine:</span>
                 <div className="flex items-center gap-1 flex-wrap">
                   <button
