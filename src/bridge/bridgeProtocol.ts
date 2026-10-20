@@ -30,6 +30,32 @@ export interface AgentDiagnosticsMessage {
   id: string
 }
 
+/** First message from the bridge when the client sent ?nonce=: HMAC-SHA256(token, nonce) in hex. */
+export interface BridgeHelloMessage {
+  type: "hello"
+  proof: string
+}
+
+export function isBridgeHelloMessage(msg: unknown): msg is BridgeHelloMessage {
+  return typeof msg === "object" && msg !== null && (msg as { type?: string }).type === "hello" && typeof (msg as { proof?: unknown }).proof === "string"
+}
+
+/** HMAC-SHA256(token, nonce) as hex via WebCrypto. Mirrors computeHandshakeProof in scripts/bridge.js. */
+export async function computeBridgeProof(token: string, nonce: string): Promise<string> {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey("raw", enc.encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(nonce)))
+  return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+export async function verifyBridgeProof(token: string, nonce: string, proof: string): Promise<boolean> {
+  const expected = await computeBridgeProof(token, nonce)
+  if (proof.length !== expected.length) return false
+  let diff = 0
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ proof.charCodeAt(i)
+  return diff === 0
+}
+
 export interface DiagnosticError {
   line: number | null
   column: number | null
@@ -39,7 +65,8 @@ export interface DiagnosticError {
 export interface AgentFeedbackMessage {
   type: "agent:feedback"
   id: string
-  status: "success" | "error"
+  /** "unverified": the adapter never reported a compile result in time, so neither success nor failure is known. */
+  status: "success" | "error" | "unverified"
   backend: string
   errors: DiagnosticError[]
   screenshotBase64?: string | null
@@ -49,6 +76,7 @@ export interface AgentFeedbackMessage {
 }
 
 export type BridgeMessage =
+  | BridgeHelloMessage
   | BridgeFileMessage
   | BridgeListMessage
   | AgentExecuteMessage

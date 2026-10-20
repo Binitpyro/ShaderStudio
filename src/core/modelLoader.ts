@@ -140,6 +140,22 @@ export function parseOBJ(text: string, name = "model.obj"): ParsedGeometry {
 }
 
 /**
+ * OBJ parse with the Rust/WASM fast path (worker); falls back to the Three.js-based `parseOBJ`
+ * when the engine is unavailable, fails, times out, or rejects the file.
+ * The wasm engine is imported lazily so it never joins the entry chunk.
+ */
+export async function parseOBJFast(text: string, name = "model.obj"): Promise<ParsedGeometry> {
+  try {
+    const { wasmEngine } = await import("@/core/wasmEngine")
+    const native = await wasmEngine.normalizeObjNative(text, name)
+    if (native) return native
+  } catch (err) {
+    console.warn("[modelLoader] WASM OBJ parse failed, using TS fallback:", err)
+  }
+  return parseOBJ(text, name)
+}
+
+/**
  * High-level parser that inspects file extension / mime type and extracts 3D geometry.
  */
 export async function loadModelFile(file: File): Promise<ParsedGeometry> {
@@ -152,7 +168,7 @@ export async function loadModelFile(file: File): Promise<ParsedGeometry> {
 
   if (ext === "obj") {
     const text = await file.text()
-    return parseOBJ(text, file.name)
+    return parseOBJFast(text, file.name)
   }
 
   throw new Error(`Unsupported 3D model format ".${ext}". Please use .glb, .gltf, or .obj.`)

@@ -41,7 +41,11 @@ fn test_100k_vertex_obj_stress_and_performance() {
 
     // Performance assertion: 100K+ vertices must process in well under 500ms
     println!("100K+ vertex OBJ processing took: {:?}", elapsed);
-    assert!(elapsed.as_millis() < 500, "100K OBJ processing exceeded 500ms");
+    // Timing is only meaningful with optimizations: the debug profile is ~10-30x slower and
+    // varies with machine load, so the tight 500ms bound is enforced on release builds only.
+    // Debug builds still guard against pathological (quadratic) behaviour with a loose bound.
+    let limit_ms = if cfg!(debug_assertions) { 15_000 } else { 500 };
+    assert!(elapsed.as_millis() < limit_ms, "100K OBJ processing exceeded {limit_ms}ms");
 
     // Centering verification
     let mut min_x = f32::INFINITY;
@@ -100,7 +104,9 @@ fn test_raw_vertex_buffer_100k_stress() {
     assert_eq!(mesh.normals.len(), 150_000 * 3);
     assert_eq!(mesh.uvs.len(), 150_000 * 2);
 
-    assert!(elapsed.as_millis() < 250, "Raw geometry processing exceeded 250ms");
+    // Same rationale as the OBJ test above: tight bound on release, loose sanity bound in debug.
+    let limit_ms = if cfg!(debug_assertions) { 10_000 } else { 250 };
+    assert!(elapsed.as_millis() < limit_ms, "Raw geometry processing exceeded {limit_ms}ms");
 
     // Check unit normals
     for i in (0..mesh.normals.len()).step_by(3) {

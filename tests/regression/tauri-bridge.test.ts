@@ -75,15 +75,14 @@ describe("desktop/tauriBridge", () => {
         'edition = "2021"',
         'tauri = { version = "2.2"',
         'tauri-plugin-dialog = "2.2"',
-        'tauri-plugin-fs = "2.2"',
-        'tauri-plugin-shell = "2.2"',
         "serde",
-        "tokio",
-        "warp",
-        "futures-util",
         "tauri-build",
       ]) {
         expect(cargo).toContain(s)
+      }
+      // the stub MCP server (warp) and unused fs/shell plugins are gone
+      for (const s of ["tauri-plugin-fs", "tauri-plugin-shell", "warp", "futures-util"]) {
+        expect(cargo).not.toContain(s)
       }
       const v = validateBinarySizeConfig(cargo)
       expect(v.valid).toBe(true)
@@ -105,24 +104,42 @@ describe("desktop/tauriBridge", () => {
       )
     })
 
-    it("capabilities/default.json grants the dialog, fs and shell permissions the bridge uses", () => {
+    it("capabilities/default.json grants only window permissions (dialogs run in Rust commands that record the picked path)", () => {
       const cap = JSON.parse(fs.readFileSync(path.join(srcTauri, "capabilities/default.json"), "utf-8"))
       expect(cap.identifier).toBe("default")
-      expect(cap.windows).toContain("main")
-      for (const p of [
-        "core:default",
-        "dialog:default",
-        "dialog:allow-open",
-        "dialog:allow-save",
-        "fs:default",
-        "fs:allow-read-text-file",
-        "fs:allow-write-text-file",
-        "fs:allow-read-file",
-        "fs:allow-write-file",
-        "shell:allow-open",
-      ]) {
-        expect(cap.permissions).toContain(p)
-      }
+      expect(cap.windows).toEqual(["main"])
+      expect([...cap.permissions].sort()).toEqual(
+        [
+          "core:default",
+          "core:window:allow-minimize",
+          "core:window:allow-toggle-maximize",
+          "core:window:allow-close",
+        ].sort()
+      )
+    })
+
+    it("tauri.conf.json ships a real CSP that still allows WASM, workers, textures and the local bridge", () => {
+      const conf = JSON.parse(fs.readFileSync(path.join(srcTauri, "tauri.conf.json"), "utf-8"))
+      const csp: string = conf.app.security.csp
+      expect(typeof csp).toBe("string")
+      const dir = (name: string) => csp.split(";").map((d) => d.trim()).find((d) => d.startsWith(name + " ")) ?? ""
+      expect(dir("default-src")).toContain("'self'")
+      expect(dir("script-src")).toContain("'wasm-unsafe-eval'")
+      expect(dir("script-src")).not.toMatch(/'unsafe-eval'|\*/)
+      expect(dir("worker-src")).toMatch(/'self'.*blob:/)
+      expect(dir("img-src")).toMatch(/blob:.*data:|data:.*blob:/)
+      expect(dir("connect-src")).toContain("ws://localhost:*")
+      expect(dir("connect-src")).toContain("http://localhost:*")
+      expect(dir("object-src")).toContain("'none'")
+    })
+
+    it("package.json wires the Tauri CLI to the scripts and the config matches Vite", () => {
+      const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf-8"))
+      expect(pkg.devDependencies["@tauri-apps/cli"]).toMatch(/^\^?2\./)
+      expect(pkg.scripts).toMatchObject({ tauri: "tauri", "tauri:dev": "tauri dev", "tauri:build": "tauri build" })
+      const conf = JSON.parse(fs.readFileSync(path.join(srcTauri, "tauri.conf.json"), "utf-8"))
+      expect(pkg.scripts[conf.build.beforeDevCommand.replace("npm run ", "")]).toBeDefined()
+      expect(pkg.scripts[conf.build.beforeBuildCommand.replace("npm run ", "")]).toBeDefined()
     })
 
     it("build.rs, icons and Rust command modules exist and are genuine", () => {
@@ -139,13 +156,14 @@ describe("desktop/tauriBridge", () => {
         expect(fs.existsSync(path.join(srcTauri, "src", f)), f).toBe(true)
       }
       const fsDialog = fs.readFileSync(path.join(srcTauri, "src/commands/fs_dialog.rs"), "utf-8")
-      for (const s of ["pub async fn save_project_native", "pub async fn load_project_native", "File extension must be .shaderstudio", "File not found:"]) {
+      for (const s of ["pub async fn save_project_native", "pub async fn load_project_native", "pub async fn pick_open_project_native", "pub async fn pick_save_project_native", "PickedPaths", "File extension must be .shaderstudio or .json", "File not found:", "validate_project_path"]) {
         expect(fsDialog).toContain(s)
       }
-      const mcp = fs.readFileSync(path.join(srcTauri, "src/commands/mcp_bridge.rs"), "utf-8")
-      for (const s of ["pub async fn start_mcp_bridge", "pub async fn get_mcp_bridge_status", "pub async fn stop_mcp_bridge", "Invalid port:"]) {
-        expect(mcp).toContain(s)
-      }
+      // stub MCP protocol removed; tray explains how to connect the real stdio server instead
+      expect(fs.existsSync(path.join(srcTauri, "src/commands/mcp_bridge.rs"))).toBe(false)
+      const tray = fs.readFileSync(path.join(srcTauri, "src/tray.rs"), "utf-8")
+      expect(tray).toContain("mcp-server.js")
+      expect(tray).not.toContain("tray-start-mcp")
     })
   })
 
@@ -320,18 +338,19 @@ describe("desktop/tauriBridge", () => {
       expect(invoke).not.toHaveBeenCalled()
     })
 
-    it("dispatches load / start / status through __TAURI_INTERNALS__ with the right args", async () => {
+    it("dispatches load through __TAURI_INTERNALS__ with the right args; the MCP shim never calls native", async () => {
       const invoke = vi.fn(async (cmd: string, args: any) => {
         if (cmd === "load_project_native") return [args.path, '{"mocked":true}']
-        if (cmd === "start_mcp_bridge") return `Native MCP on ${args.port}`
-        if (cmd === "get_mcp_bridge_status") return true
         return null
       })
       withTauri(invoke)
       expect(await loadProjectNative("C:/test/mock.shaderstudio")).toEqual(["C:/test/mock.shaderstudio", '{"mocked":true}'])
       expect(invoke).toHaveBeenCalledWith("load_project_native", { path: "C:/test/mock.shaderstudio" })
-      expect(await startMcpBridge(8080)).toBe("Native MCP on 8080")
+      invoke.mockClear()
+      expect(await startMcpBridge(8080)).toBe("MCP Bridge active on port 8080")
       expect(await getMcpBridgeStatus()).toBe(true)
+      stopMcpBridge()
+      expect(invoke).not.toHaveBeenCalled()
     })
 
     it("calls parameterless commands with exactly one argument and args commands with exactly two", async () => {
@@ -339,12 +358,10 @@ describe("desktop/tauriBridge", () => {
         const calls: { cmd: string; n: number; args: unknown }[] = []
         const invoke = vi.fn((...a: any[]) => {
           calls.push({ cmd: a[0], n: a.length, args: a[1] })
-          if (a[0] === "get_mcp_bridge_status") return Promise.resolve(true)
           if (a[0] === "save_project_native") return Promise.resolve(a[1].path)
           if (a[0] === "load_project_native") return Promise.resolve([a[1].path, "{}"])
-          if (a[0] === "start_mcp_bridge") return Promise.resolve("ok")
-          if (a[0] === "plugin:dialog|open") return Promise.resolve("/o.shaderstudio")
-          if (a[0] === "plugin:dialog|save") return Promise.resolve("/s.shaderstudio")
+          if (a[0] === "pick_open_project_native") return Promise.resolve("/o.shaderstudio")
+          if (a[0] === "pick_save_project_native") return Promise.resolve("/s.shaderstudio")
           return Promise.resolve(undefined)
         })
         withTauri(invoke, key)
@@ -352,15 +369,11 @@ describe("desktop/tauriBridge", () => {
         minimizeWindow()
         maximizeWindow()
         closeWindow()
-        await getMcpBridgeStatus()
-        stopMcpBridge()
         await flush()
         expect(calls.map((c) => c.cmd)).toEqual([
           "plugin:window|minimize",
           "plugin:window|toggle_maximize",
           "plugin:window|close",
-          "get_mcp_bridge_status",
-          "stop_mcp_bridge",
         ])
         for (const c of calls) {
           expect(c.n).toBe(1)
@@ -368,31 +381,26 @@ describe("desktop/tauriBridge", () => {
         }
 
         calls.length = 0
-        await startMcpBridge(8765)
         await saveProjectNative("foo.shaderstudio", '{"data":123}')
         await loadProjectNative("foo.shaderstudio")
         await pickOpenProjectPath()
         await pickSaveProjectPath("default.shaderstudio")
-        expect(calls.every((c) => c.n === 2 && typeof c.args === "object" && c.args !== null)).toBe(true)
-        expect(calls[0]).toMatchObject({ cmd: "start_mcp_bridge", args: { port: 8765 } })
-        expect(calls[1]).toMatchObject({ cmd: "save_project_native", args: { path: "foo.shaderstudio", projectJson: '{"data":123}' } })
-        expect(calls[2]).toMatchObject({ cmd: "load_project_native", args: { path: "foo.shaderstudio" } })
-        expect(calls[4]).toMatchObject({
-          cmd: "plugin:dialog|save",
-          args: { filters: [{ name: "ShaderStudio Project", extensions: ["shaderstudio"] }], defaultPath: "default.shaderstudio" },
-        })
+        expect(calls.filter((c) => c.cmd !== "pick_open_project_native").every((c) => c.n === 2 && typeof c.args === "object" && c.args !== null)).toBe(true)
+        expect(calls[2]).toMatchObject({ cmd: "pick_open_project_native", n: 1, args: undefined })
+        expect(calls[0]).toMatchObject({ cmd: "save_project_native", args: { path: "foo.shaderstudio", projectJson: '{"data":123}' } })
+        expect(calls[1]).toMatchObject({ cmd: "load_project_native", args: { path: "foo.shaderstudio" } })
+        expect(calls[3]).toMatchObject({ cmd: "pick_save_project_native", args: { defaultPath: "default.shaderstudio" } })
+        // The webview never talks to the dialog plugin directly: only the Rust commands (which record the path) open dialogs.
+        expect(calls.some((c) => c.cmd.startsWith("plugin:dialog"))).toBe(false)
       }
     })
 
-    it("propagates native save/load/start/status errors and never falls back to the in-memory store", async () => {
+    it("propagates native save/load errors and never falls back to the in-memory store", async () => {
       const target = "C:/Projects/important.shaderstudio"
       const invoke = vi.fn().mockRejectedValue(new Error("Disk full (os error 112)"))
       withTauri(invoke)
       await expect(saveProjectNative(target, '{"data":"critical"}')).rejects.toThrow("Disk full (os error 112)")
       await expect(loadProjectNative(target)).rejects.toThrow("Disk full (os error 112)")
-      await expect(startMcpBridge(8080)).rejects.toThrow("Disk full (os error 112)")
-      await expect(getMcpBridgeStatus()).rejects.toThrow("Disk full (os error 112)")
-      expect(getMcpBridgePort()).toBe(0)
 
       delete g.window.__TAURI_INTERNALS__
       await expect(loadProjectNative(target)).rejects.toThrow(`File not found: ${target}`)
@@ -405,34 +413,24 @@ describe("desktop/tauriBridge", () => {
       expect(await pickSaveProjectPath("x.shaderstudio")).toBeNull()
     })
 
-    it("open: sends the .shaderstudio filter, unwraps arrays, and maps cancel/error to null", async () => {
+    it("open: calls the recording Rust command and maps cancel/error to null", async () => {
       const invoke = vi.fn().mockResolvedValue("C:/Chosen/hero.shaderstudio")
       withTauri(invoke)
       expect(await pickOpenProjectPath()).toBe("C:/Chosen/hero.shaderstudio")
-      expect(invoke).toHaveBeenCalledWith("plugin:dialog|open", {
-        filters: [{ name: "ShaderStudio Project", extensions: ["shaderstudio"] }],
-        multiple: false,
-        directory: false,
-      })
+      expect(invoke).toHaveBeenCalledWith("pick_open_project_native")
+      expect(invoke).not.toHaveBeenCalledWith("plugin:dialog|open", expect.anything())
 
-      invoke.mockResolvedValueOnce(["C:/a.shaderstudio", "C:/b.shaderstudio"])
-      expect(await pickOpenProjectPath()).toBe("C:/a.shaderstudio")
-      invoke.mockResolvedValueOnce([])
-      expect(await pickOpenProjectPath()).toBeNull()
       invoke.mockResolvedValueOnce(null)
       expect(await pickOpenProjectPath()).toBeNull()
       invoke.mockRejectedValueOnce(new Error("Dialog plugin crashed"))
       expect(await pickOpenProjectPath()).toBeNull()
     })
 
-    it("save: sends defaultPath + filter and maps cancel/error to null", async () => {
+    it("save: calls the recording Rust command with defaultPath and maps cancel/error to null", async () => {
       const invoke = vi.fn().mockResolvedValue("C:/Saved/my_shader.shaderstudio")
       withTauri(invoke)
       expect(await pickSaveProjectPath("my_shader.shaderstudio")).toBe("C:/Saved/my_shader.shaderstudio")
-      expect(invoke).toHaveBeenCalledWith("plugin:dialog|save", {
-        filters: [{ name: "ShaderStudio Project", extensions: ["shaderstudio"] }],
-        defaultPath: "my_shader.shaderstudio",
-      })
+      expect(invoke).toHaveBeenCalledWith("pick_save_project_native", { defaultPath: "my_shader.shaderstudio" })
       invoke.mockResolvedValueOnce(null)
       expect(await pickSaveProjectPath()).toBeNull()
       invoke.mockRejectedValueOnce(new Error("boom"))
@@ -466,8 +464,7 @@ describe("desktop/tauriBridge", () => {
       stopMcpBridge()
     })
 
-    // fleet: fixed in W6 (startMcpBridge only range-checks with <= / >, so NaN and fractional ports pass validation)
-    it.fails("rejects NaN and non-integer ports", async () => {
+    it("rejects NaN and non-integer ports", async () => {
       await expect(startMcpBridge(NaN)).rejects.toThrow(/Invalid port/)
       await expect(startMcpBridge(1025.5)).rejects.toThrow(/Invalid port/)
     })

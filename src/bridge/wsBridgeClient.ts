@@ -6,6 +6,8 @@ import {
   isAgentExecuteMessage,
   isAgentCaptureMessage,
   isAgentDiagnosticsMessage,
+  isBridgeHelloMessage,
+  verifyBridgeProof,
   type AgentExecuteMessage,
   type AgentCaptureMessage,
   type AgentDiagnosticsMessage,
@@ -21,6 +23,13 @@ const BRIDGE_URL = "ws://localhost:8642"
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30000
 const SNAPSHOT_DEBOUNCE = 5000
+const HANDSHAKE_TIMEOUT_MS = 5000
+const UNTRUSTED_SERVER_CLOSE = 4403
+const COMPILE_TIMEOUT_MS = 3000
+
+function randomNonce(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")
+}
 
 let ws: WebSocket | null = null
 let reconnectAttempts = 0
@@ -171,6 +180,39 @@ export function sendAgentFeedback(feedback: AgentFeedbackMessage) {
   }
 }
 
+export interface CompileOutcome {
+  /** Error reported by the adapter, or null when it reported success (or never reported: see timedOut). */
+  error: string | null
+  /** True when no adapter report arrived in time: the compile is unverified, not clean. */
+  timedOut: boolean
+}
+
+/**
+ * Runs `start` (one compile) and resolves once the adapter makes a real report, i.e. the store's compileSeq moves
+ * (setLastCompileError, null or message). Plain clears such as graph edits do not bump it, so they cannot settle the wait.
+ * If nothing reports within the timeout it resolves { timedOut: true }, never as success.
+ */
+export function compileAndAwait(start: () => void, timeoutMs = COMPILE_TIMEOUT_MS): Promise<CompileOutcome> {
+  return new Promise((resolve) => {
+    const seq = useProjectStore.getState().compileSeq
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (outcome: CompileOutcome) => {
+      unsubscribe()
+      clearTimeout(timer)
+      resolve(outcome)
+    }
+    const unsubscribe = useProjectStore.subscribe((s) => {
+      if (s.compileSeq !== seq) finish({ error: s.lastCompileError, timedOut: false })
+    })
+    timer = setTimeout(() => finish({ error: null, timedOut: true }), timeoutMs)
+    try {
+      start()
+    } catch (err) {
+      useProjectStore.getState().setLastCompileError(err instanceof Error ? err.message : String(err))
+    }
+  })
+}
+
 /**
  * Execute shader execution request, trigger compile & optional frame capture.
  * Can be called either via WebSocket bridge or directly in-app by the Copilot.
@@ -181,10 +223,10 @@ export async function executeShaderLocally(
   const startTime = performance.now()
   const store = useProjectStore.getState()
 
-  // 1. Switch backend if requested
-  if (params.backend && params.backend !== store.activeBackend) {
+  // 1. Switch backend if requested (always compare against fresh state, never a captured snapshot)
+  if (params.backend && params.backend !== useProjectStore.getState().activeBackend) {
     store.setActiveBackend(params.backend)
-    // Small delay to let adapter mount
+    // Small delay to let the Viewport swap adapters
     await new Promise((r) => setTimeout(r, 60))
   }
 
@@ -202,38 +244,13 @@ export async function executeShaderLocally(
     }
   }
 
-  // 3. Reset compile error, update source and recompile active adapter
-  store.setLastCompileError(null)
+  // 3. Update source, then run ONE compile on the live adapter (the Viewport's own instance) and await its real
+  //    result. No triggerRecompile(): the Viewport would compile a second time.
   store.setShaderSource(params.source)
-  store.triggerRecompile()
-
   const adapter = await loadAdapter(useProjectStore.getState().activeBackend)
-
-  try {
-    adapter.recompileShader(params.source)
-  } catch (err) {
-    store.setLastCompileError(err instanceof Error ? err.message : String(err))
-  }
-
-  // 4. Wait for render frames and store updates to settle
-  await new Promise((resolve) => {
-    let resolved = false
-    const done = () => {
-      if (!resolved) {
-        resolved = true
-        resolve(null)
-      }
-    }
-    Promise.resolve().then(done)
-    if (typeof setTimeout === "function") {
-      setTimeout(done, 16)
-    }
-  })
-
-  // 5. Read back compiler errors
-  const currentError = useProjectStore.getState().lastCompileError
-  const errors = parseDiagnosticErrors(currentError)
-  const isSuccess = errors.length === 0
+  const outcome = await compileAndAwait(() => adapter.recompileShader(params.source))
+  const errors = parseDiagnosticErrors(outcome.error)
+  const status: AgentFeedbackMessage["status"] = outcome.timedOut ? "unverified" : errors.length === 0 ? "success" : "error"
 
   // 6. Capture frame if requested
   let screenshotBase64: string | null = null
@@ -248,7 +265,7 @@ export async function executeShaderLocally(
   return {
     type: "agent:feedback",
     id: params.id,
-    status: isSuccess ? "success" : "error",
+    status,
     backend: useProjectStore.getState().activeBackend,
     errors,
     screenshotBase64,
@@ -309,7 +326,21 @@ export function connect(tokenOverride?: string) {
     const baseUrl = env?.SHADER_STUDIO_BRIDGE_WS_URL || BRIDGE_URL
     const wsUrl = token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl
 
-    ws = new WebSocket(wsUrl)
+    // Handshake: the bridge must prove it knows the token (HMAC of our nonce) before we apply anything it pushes.
+    const nonce = token ? randomNonce() : null
+    let settleTrust: (ok: boolean) => void = () => {}
+    const trusted = new Promise<boolean>((r) => { settleTrust = r })
+    const trustTimer = setTimeout(() => settleTrust(false), HANDSHAKE_TIMEOUT_MS)
+
+    const sock = new WebSocket(nonce ? `${wsUrl}&nonce=${nonce}` : wsUrl)
+    ws = sock
+    void trusted.then((ok) => {
+      clearTimeout(trustTimer)
+      if (!ok) {
+        console.warn("[BridgeClient] Server did not prove it knows the bridge token; closing and ignoring its messages")
+        sock.close(UNTRUSTED_SERVER_CLOSE)
+      }
+    })
     ws.onopen = () => {
       isConnecting = false
       reconnectAttempts = 0
@@ -320,6 +351,11 @@ export function connect(tokenOverride?: string) {
     ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data)
+        if (isBridgeHelloMessage(data)) {
+          settleTrust(!!token && !!nonce && (await verifyBridgeProof(token, nonce, data.proof)))
+          return
+        }
+        if (!nonce || !(await trusted)) return // unverified server: drop everything
         if (isBridgeFileMessage(data)) {
           const store = useProjectStore.getState()
           store.setShaderSource(data.content)
@@ -342,7 +378,9 @@ export function connect(tokenOverride?: string) {
     }
     ws.onclose = (event) => {
       isConnecting = false
-      ws = null
+      clearTimeout(trustTimer)
+      settleTrust(false)
+      if (ws === sock) ws = null
       useFileSystemStore.getState().setBridgeConnected(false)
       const currentMode = useFileSystemStore.getState().syncMode
       if (currentMode === "bridge") useFileSystemStore.getState().setSyncMode("local")
@@ -351,6 +389,7 @@ export function connect(tokenOverride?: string) {
         setAuthFailed(true)
         return // no retry loop: the user must supply a token (SyncStatusBanner)
       }
+      if (event && event.code === UNTRUSTED_SERVER_CLOSE) return // impostor / pre-handshake bridge: do not retry-loop against it
       scheduleReconnect()
     }
     ws.onerror = () => {

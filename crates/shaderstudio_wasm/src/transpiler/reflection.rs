@@ -14,10 +14,10 @@ pub struct ReflectedUniform {
 
 fn determine_kind(name: &str, type_name: &str) -> String {
     let lower = name.to_lowercase();
-    if lower.contains("color") || lower.contains("tint") || lower.contains("albedo") {
-        if type_name == "vec4f" || type_name == "vec3f" || type_name == "vec4" || type_name == "vec3" {
-            return "color".to_string();
-        }
+    if (lower.contains("color") || lower.contains("tint") || lower.contains("albedo"))
+        && matches!(type_name, "vec4f" | "vec3f" | "vec4" | "vec3")
+    {
+        return "color".to_string();
     }
     if type_name == "texture" || type_name.starts_with("sampler") || type_name.starts_with("texture") {
         "texture".to_string()
@@ -191,23 +191,21 @@ fn fallback_extract_uniforms(
             let left = trimmed[..colon_pos].trim();
             let right = trimmed[colon_pos + 1..].trim().trim_end_matches([',', ';']).trim();
 
-            if is_valid_ident(left) && is_valid_type(right) {
-                if seen_names.insert(left.to_string()) {
-                    let type_name = canonicalize_type(right);
-                    let size = type_size(&type_name);
-                    let kind = determine_kind(left, &type_name);
-                    results.push(ReflectedUniform {
-                        name: left.to_string(),
-                        type_name,
-                        kind,
-                        offset: current_offset,
-                        size,
-                        array_length: None,
-                        group: 0,
-                        binding: 0,
-                    });
-                    current_offset += size;
-                }
+            if is_valid_ident(left) && is_valid_type(right) && seen_names.insert(left.to_string()) {
+                let type_name = canonicalize_type(right);
+                let size = type_size(&type_name);
+                let kind = determine_kind(left, &type_name);
+                results.push(ReflectedUniform {
+                    name: left.to_string(),
+                    type_name,
+                    kind,
+                    offset: current_offset,
+                    size,
+                    array_length: None,
+                    group: 0,
+                    binding: 0,
+                });
+                current_offset += size;
             }
         }
         // GLSL uniform: `uniform type name;`
@@ -217,23 +215,21 @@ fn fallback_extract_uniforms(
             if parts.len() >= 2 {
                 let ty = parts[0];
                 let name = parts[1];
-                if is_valid_ident(name) {
-                    if seen_names.insert(name.to_string()) {
-                        let type_name = canonicalize_type(ty);
-                        let size = type_size(&type_name);
-                        let kind = determine_kind(name, &type_name);
-                        results.push(ReflectedUniform {
-                            name: name.to_string(),
-                            type_name,
-                            kind,
-                            offset: current_offset,
-                            size,
-                            array_length: None,
-                            group: 0,
-                            binding: 0,
-                        });
-                        current_offset += size;
-                    }
+                if is_valid_ident(name) && seen_names.insert(name.to_string()) {
+                    let type_name = canonicalize_type(ty);
+                    let size = type_size(&type_name);
+                    let kind = determine_kind(name, &type_name);
+                    results.push(ReflectedUniform {
+                        name: name.to_string(),
+                        type_name,
+                        kind,
+                        offset: current_offset,
+                        size,
+                        array_length: None,
+                        group: 0,
+                        binding: 0,
+                    });
+                    current_offset += size;
                 }
             }
         }

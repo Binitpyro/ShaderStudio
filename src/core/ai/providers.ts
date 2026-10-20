@@ -1,4 +1,5 @@
 import type { AIProvider, AISettings, ChatMessage } from "./types"
+import { getBridgeApiHeaders } from "@/bridge/wsBridgeClient"
 
 const BRIDGE_PROXY_URL = "http://localhost:8642/api/ai/proxy"
 
@@ -17,7 +18,7 @@ async function safeFetch(
       try {
         const proxyResp = await fetch(BRIDGE_PROXY_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getBridgeApiHeaders(),
           body: JSON.stringify({
             targetUrl: url,
             headers: options.headers || {},
@@ -89,7 +90,7 @@ async function callGemini(
 ): Promise<string> {
   if (!apiKey) throw new Error("Gemini API key is required. Add it in AI Copilot Settings.")
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
 
   const contents = messages
     .filter((m) => m.role !== "system")
@@ -118,7 +119,7 @@ async function callGemini(
 
   const res = await safeFetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify(body),
   }, false)
 

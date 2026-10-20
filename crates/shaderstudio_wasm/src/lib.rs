@@ -4,16 +4,45 @@ pub mod transpiler;
 
 use wasm_bindgen::prelude::*;
 
+// Binary results are exposed as wasm-bindgen classes with getters so that `Vec<u8>` / `Vec<f32>`
+// reach JS as `Uint8Array` / `Float32Array` (one memcpy). Serializing them through serde would
+// produce a plain JS `Array` of numbers, which is ~8x the memory and far slower for big maps.
+macro_rules! typed_getters {
+    ($ty:ident { $($field:ident : $t:ty),* $(,)? }) => {
+        #[wasm_bindgen]
+        impl $ty {
+            $(
+                #[wasm_bindgen(getter)]
+                pub fn $field(&self) -> $t { self.0.$field.clone() }
+            )*
+        }
+    };
+}
+
+/// PBR bake output: six PNG maps + ZIP archive as `Uint8Array`s.
 #[wasm_bindgen]
-pub fn bake_pbr_wasm(pixels: &[u8], config_val: JsValue) -> Result<JsValue, JsValue> {
+pub struct PbrBakeResult(baker::PbrBakeOutput);
+typed_getters!(PbrBakeResult {
+    albedo_png: Vec<u8>, normal_png: Vec<u8>, roughness_png: Vec<u8>, height_png: Vec<u8>,
+    metallic_png: Vec<u8>, ao_png: Vec<u8>, zip_archive: Vec<u8>, width: u32, height: u32,
+});
+
+/// Normalized mesh: `positions` / `normals` / `uvs` as `Float32Array`s.
+#[wasm_bindgen]
+pub struct MeshResult(mesh::MeshOutput);
+typed_getters!(MeshResult {
+    name: String, positions: Vec<f32>, normals: Vec<f32>, uvs: Vec<f32>,
+    vertex_count: u32, triangle_count: u32,
+});
+
+#[wasm_bindgen]
+pub fn bake_pbr_wasm(pixels: &[u8], config_val: JsValue) -> Result<PbrBakeResult, JsValue> {
     let config: baker::BakeConfig = serde_wasm_bindgen::from_value(config_val)
         .map_err(|e| JsValue::from_str(&format!("Invalid BakeConfig: {}", e)))?;
 
-    let output = baker::bake_pbr_full(pixels, &config)
-        .map_err(|e| JsValue::from_str(&e))?;
-
-    serde_wasm_bindgen::to_value(&output)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    baker::bake_pbr_full(pixels, &config)
+        .map(PbrBakeResult)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
@@ -32,13 +61,19 @@ pub fn transpile_shader_wasm(request_val: JsValue) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// WGSL -> GLSL ES 3.00 / GLSL 3.30 / HLSL via naga. Returns `{ code }` or `{ error, line? }`.
 #[wasm_bindgen]
-pub fn normalize_obj_wasm(obj_text: &str, name: &str) -> Result<JsValue, JsValue> {
-    let output = mesh::obj_parser::parse_and_normalize_obj(obj_text, name)
-        .map_err(|e| JsValue::from_str(&e))?;
-
-    serde_wasm_bindgen::to_value(&output)
+pub fn transpile_wgsl_wasm(source: &str, target: &str, stage: Option<String>) -> Result<JsValue, JsValue> {
+    let result = transpiler::naga_export::transpile_wgsl(source, target, stage.as_deref());
+    serde_wasm_bindgen::to_value(&result)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[wasm_bindgen]
+pub fn normalize_obj_wasm(obj_text: &str, name: &str) -> Result<MeshResult, JsValue> {
+    mesh::obj_parser::parse_and_normalize_obj(obj_text, name)
+        .map(MeshResult)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
@@ -47,12 +82,10 @@ pub fn normalize_geometry_wasm(
     normals: Option<Vec<f32>>,
     uvs: Option<Vec<f32>>,
     name: &str,
-) -> Result<JsValue, JsValue> {
-    let output = mesh::normalize_geometry(positions.to_vec(), normals, uvs, name)
-        .map_err(|e| JsValue::from_str(&e))?;
-
-    serde_wasm_bindgen::to_value(&output)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+) -> Result<MeshResult, JsValue> {
+    mesh::normalize_geometry(positions.to_vec(), normals, uvs, name)
+        .map(MeshResult)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(test)]

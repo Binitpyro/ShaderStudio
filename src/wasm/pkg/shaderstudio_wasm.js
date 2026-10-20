@@ -1,9 +1,188 @@
 /* @ts-self-types="./shaderstudio_wasm.d.ts" */
 
 /**
+ * Normalized mesh: `positions` / `normals` / `uvs` as `Float32Array`s.
+ */
+export class MeshResult {
+    static __wrap(ptr) {
+        const obj = Object.create(MeshResult.prototype);
+        obj.__wbg_ptr = ptr;
+        MeshResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        MeshResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_meshresult_free(ptr, 0);
+    }
+    /**
+     * @returns {string}
+     */
+    get name() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.meshresult_name(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    get normals() {
+        const ret = wasm.meshresult_normals(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    get positions() {
+        const ret = wasm.meshresult_positions(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get triangle_count() {
+        const ret = wasm.meshresult_triangle_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    get uvs() {
+        const ret = wasm.meshresult_uvs(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get vertex_count() {
+        const ret = wasm.meshresult_vertex_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) MeshResult.prototype[Symbol.dispose] = MeshResult.prototype.free;
+
+/**
+ * PBR bake output: six PNG maps + ZIP archive as `Uint8Array`s.
+ */
+export class PbrBakeResult {
+    static __wrap(ptr) {
+        const obj = Object.create(PbrBakeResult.prototype);
+        obj.__wbg_ptr = ptr;
+        PbrBakeResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        PbrBakeResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_pbrbakeresult_free(ptr, 0);
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get albedo_png() {
+        const ret = wasm.pbrbakeresult_albedo_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get ao_png() {
+        const ret = wasm.pbrbakeresult_ao_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.pbrbakeresult_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get height_png() {
+        const ret = wasm.pbrbakeresult_height_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get metallic_png() {
+        const ret = wasm.pbrbakeresult_metallic_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get normal_png() {
+        const ret = wasm.pbrbakeresult_normal_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get roughness_png() {
+        const ret = wasm.pbrbakeresult_roughness_png(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.pbrbakeresult_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get zip_archive() {
+        const ret = wasm.pbrbakeresult_zip_archive(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) PbrBakeResult.prototype[Symbol.dispose] = PbrBakeResult.prototype.free;
+
+/**
  * @param {Uint8Array} pixels
  * @param {any} config_val
- * @returns {any}
+ * @returns {PbrBakeResult}
  */
 export function bake_pbr_wasm(pixels, config_val) {
     const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_malloc);
@@ -12,7 +191,7 @@ export function bake_pbr_wasm(pixels, config_val) {
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
-    return takeFromExternrefTable0(ret[0]);
+    return PbrBakeResult.__wrap(ret[0]);
 }
 
 /**
@@ -20,7 +199,7 @@ export function bake_pbr_wasm(pixels, config_val) {
  * @param {Float32Array | null | undefined} normals
  * @param {Float32Array | null | undefined} uvs
  * @param {string} name
- * @returns {any}
+ * @returns {MeshResult}
  */
 export function normalize_geometry_wasm(positions, normals, uvs, name) {
     const ptr0 = passArrayF32ToWasm0(positions, wasm.__wbindgen_malloc);
@@ -35,13 +214,13 @@ export function normalize_geometry_wasm(positions, normals, uvs, name) {
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
-    return takeFromExternrefTable0(ret[0]);
+    return MeshResult.__wrap(ret[0]);
 }
 
 /**
  * @param {string} obj_text
  * @param {string} name
- * @returns {any}
+ * @returns {MeshResult}
  */
 export function normalize_obj_wasm(obj_text, name) {
     const ptr0 = passStringToWasm0(obj_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -52,7 +231,7 @@ export function normalize_obj_wasm(obj_text, name) {
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
-    return takeFromExternrefTable0(ret[0]);
+    return MeshResult.__wrap(ret[0]);
 }
 
 /**
@@ -93,6 +272,27 @@ export function transpile_shader_wasm(request_val) {
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
+}
+
+/**
+ * WGSL -> GLSL ES 3.00 / GLSL 3.30 / HLSL via naga. Returns `{ code }` or `{ error, line? }`.
+ * @param {string} source
+ * @param {string} target
+ * @param {string | null} [stage]
+ * @returns {any}
+ */
+export function transpile_wgsl_wasm(source, target, stage) {
+    const ptr0 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(target, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    var ptr2 = isLikeNone(stage) ? 0 : passStringToWasm0(stage, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.transpile_wgsl_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -237,6 +437,13 @@ function __wbg_get_imports() {
     };
 }
 
+const MeshResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_meshresult_free(ptr, 1));
+const PbrBakeResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_pbrbakeresult_free(ptr, 1));
+
 function debugString(val) {
     // primitive types
     const type = typeof val;
@@ -300,6 +507,11 @@ function debugString(val) {
     }
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
+}
+
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
 function getArrayU8FromWasm0(ptr, len) {

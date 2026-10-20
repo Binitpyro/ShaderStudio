@@ -213,6 +213,58 @@ async function bufferToImageItem(
   }
 }
 
+const MAP_META: Record<PbrMapItem["id"], [title: string, description: string]> = {
+  albedo: ["Albedo / Base Color", "Diffuse color texture"],
+  normal: ["Tangent Normal Map", "DirectX/OpenGL tangent-space normal vectors"],
+  roughness: ["Roughness Map", "Surface microfacet scattering / smoothness"],
+  height: ["Height / Displacement", "Grayscale geometric displacement elevation"],
+  metallic: ["Metallic Map", "Conductive metal vs dielectric mask"],
+  ao: ["Ambient Occlusion", "Micro-cavity ambient light shadowing"],
+}
+
+function bytesToDataUrl(png: Uint8Array): string {
+  let bin = ""
+  for (let i = 0; i < png.length; i += 0x8000) bin += String.fromCharCode(...png.subarray(i, i + 0x8000))
+  return `data:image/png;base64,${btoa(bin)}`
+}
+
+/**
+ * WASM fast path. Returns null (-> TS fallback) when the engine is unavailable, the worker fails or
+ * times out. Maps are PNG-encoded by Rust; the ZIP comes straight from the Rust packager.
+ * Tolerance vs the TS path: every channel within +-1 (f32 vs f64 rounding), see wasm-engine tests.
+ */
+async function bakeNative(src: ImageData, options: BakeOptions): Promise<PbrBakeResult | null> {
+  try {
+    const { wasmEngine } = await import("@/core/wasmEngine")
+    const out = await wasmEngine.bakePbrNative(src, src.width, src.height, options)
+    if (!out) return null
+    const png: Record<PbrMapItem["id"], Uint8Array> = {
+      albedo: out.albedo_png,
+      normal: out.normal_png,
+      roughness: out.roughness_png,
+      height: out.height_png,
+      metallic: out.metallic_png,
+      ao: out.ao_png,
+    }
+    const maps: Record<string, PbrMapItem> = {}
+    for (const id of Object.keys(png) as PbrMapItem["id"][]) {
+      maps[id] = {
+        id,
+        title: MAP_META[id][0],
+        description: MAP_META[id][1],
+        blob: new Blob([png[id] as BlobPart], { type: "image/png" }),
+        dataUrl: bytesToDataUrl(png[id]),
+        width: out.width,
+        height: out.height,
+      }
+    }
+    return { resolution: src.width, maps, createZip: () => out.zip_archive }
+  } catch (err) {
+    console.warn("[textureBaker] WASM bake failed, using TS fallback:", err)
+    return null
+  }
+}
+
 /**
  * High-level baker: extracts source image from canvas at target resolution,
  * computes all 6 PBR maps, and provides one-click ZIP packaging.
@@ -255,6 +307,10 @@ export async function bakePbrMaps(options: BakeOptions = {}): Promise<PbrBakeRes
     } as unknown as ImageData
   }
 
+  // Fast path: Rust/WASM bake (Sobel maps + PNG + ZIP) in a worker; TS below is the fallback.
+  const native = await bakeNative(sourceData, options)
+  if (native) return native
+
   const pixelBuffers = generatePbrPixelBuffers(sourceData, {
     normalStrength: options.normalStrength,
     invertNormalY: options.invertNormalY,
@@ -263,12 +319,12 @@ export async function bakePbrMaps(options: BakeOptions = {}): Promise<PbrBakeRes
   })
 
   const [albedo, normal, roughness, heightMap, metallic, ao] = await Promise.all([
-    bufferToImageItem(pixelBuffers.albedo, width, height, "albedo", "Albedo / Base Color", "Diffuse color texture"),
-    bufferToImageItem(pixelBuffers.normal, width, height, "normal", "Tangent Normal Map", "DirectX/OpenGL tangent-space normal vectors"),
-    bufferToImageItem(pixelBuffers.roughness, width, height, "roughness", "Roughness Map", "Surface microfacet scattering / smoothness"),
-    bufferToImageItem(pixelBuffers.heightMap, width, height, "height", "Height / Displacement", "Grayscale geometric displacement elevation"),
-    bufferToImageItem(pixelBuffers.metallic, width, height, "metallic", "Metallic Map", "Conductive metal vs dielectric mask"),
-    bufferToImageItem(pixelBuffers.ao, width, height, "ao", "Ambient Occlusion", "Micro-cavity ambient light shadowing"),
+    bufferToImageItem(pixelBuffers.albedo, width, height, "albedo", ...MAP_META.albedo),
+    bufferToImageItem(pixelBuffers.normal, width, height, "normal", ...MAP_META.normal),
+    bufferToImageItem(pixelBuffers.roughness, width, height, "roughness", ...MAP_META.roughness),
+    bufferToImageItem(pixelBuffers.heightMap, width, height, "height", ...MAP_META.height),
+    bufferToImageItem(pixelBuffers.metallic, width, height, "metallic", ...MAP_META.metallic),
+    bufferToImageItem(pixelBuffers.ao, width, height, "ao", ...MAP_META.ao),
   ])
 
   const maps: Record<string, PbrMapItem> = {

@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -12,7 +15,10 @@
     "preview": "vite preview",
     "bridge": "node scripts/bridge.js",
     "mcp": "node scripts/mcp-server.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -37,6 +43,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.8",

@@ -297,7 +297,7 @@ export class WebGL2Adapter implements RenderAdapter {
   private groundBuffer: WebGLBuffer | null = null
   private lastApplied: RenderSettings | null = null
   private rttQueue: Promise<unknown> = Promise.resolve()
-  private rttPrograms = new Map<string, { program: WebGLProgram; res: WebGLUniformLocation | null; time: WebGLUniformLocation | null }>()
+  private rttPrograms = new Map<string, { program: WebGLProgram; res: WebGLUniformLocation | null; time: WebGLUniformLocation | null; locs: Map<string, WebGLUniformLocation | null> }>()
   private rttFBO: WebGLFramebuffer | null = null
   private rttTex: WebGLTexture | null = null
   private rttW = 0
@@ -1781,11 +1781,14 @@ export class WebGL2Adapter implements RenderAdapter {
     if (this.mvpLocation) gl.uniformMatrix4fv(this.mvpLocation, false, this.mvpMatrix)
     const fl = this.frameLocs
     if (fl.time) gl.uniform1f(fl.time, time / 1000)
+    // The viewport size is the adapter's to write (raymarching divides by it), never the stored default.
+    const resLoc = this.findUniformLoc("u_resolution") ?? this.findUniformLoc("resolution")
+    if (resLoc) gl.uniform2f(resLoc, gl.drawingBufferWidth, gl.drawingBufferHeight)
 
     if (this.uniformsDirty) {
       if (this.colorLocation) gl.uniform3fv(this.colorLocation, this.colorBuffer)
       for (const [name, val] of this.authoritativeUniforms.entries()) {
-        if (name === "color" || name === "u_color" || name === "u_mvp" || name === "mvp" || name === "time" || name === "u_time") continue
+        if (name === "color" || name === "u_color" || name === "u_mvp" || name === "mvp" || name === "time" || name === "u_time" || name === "resolution" || name === "u_resolution") continue
         const loc = this.findUniformLoc(name)
         if (loc) this.applyUniform(loc, val)
       }
@@ -2405,7 +2408,7 @@ export class WebGL2Adapter implements RenderAdapter {
     else {
       const program = this.createProgram(RTT_VERT, glsl, false) // a bad preview must not clobber the editor's error
       if (!program) return null
-      entry = { program, res: gl.getUniformLocation(program, "u_resolution"), time: gl.getUniformLocation(program, "u_time") }
+      entry = { program, res: gl.getUniformLocation(program, "u_resolution"), time: gl.getUniformLocation(program, "u_time"), locs: new Map() }
       this.rttPrograms.set(key, entry)
       if (this.rttPrograms.size > RTT_CACHE_MAX) {
         const oldest = this.rttPrograms.keys().next().value as string
@@ -2448,7 +2451,18 @@ export class WebGL2Adapter implements RenderAdapter {
       gl.clear(gl.COLOR_BUFFER_BIT)
       gl.useProgram(entry.program)
       if (entry.res) gl.uniform2f(entry.res, w, h)
-      if (entry.time) gl.uniform1f(entry.time, 0)
+      const supplied = req.uniforms ?? {}
+      const t = Number((supplied.time ?? supplied.u_time)?.value)
+      if (entry.time) gl.uniform1f(entry.time, Number.isFinite(t) ? t : 0)
+      for (const [name, val] of Object.entries(supplied)) {
+        if (!val || name === "time" || name === "u_time" || name === "u_resolution") continue
+        let loc = entry.locs.get(name)
+        if (loc === undefined) {
+          loc = gl.getUniformLocation(entry.program, name) ?? gl.getUniformLocation(entry.program, "u_" + name) ?? (name.startsWith("u_") ? gl.getUniformLocation(entry.program, name.slice(2)) : null)
+          entry.locs.set(name, loc)
+        }
+        if (loc) this.applyUniform(loc, val)
+      }
       gl.bindVertexArray(this.quadVAO)
       gl.drawArrays(gl.TRIANGLES, 0, 6)
       const bytes = new Uint8ClampedArray(w * h * 4)

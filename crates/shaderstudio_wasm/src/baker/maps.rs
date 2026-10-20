@@ -1,4 +1,4 @@
-/// PBR material map generation algorithms (Luminance/Height, Roughness, Metallic, Cavity AO).
+//! PBR material map generation algorithms (Luminance/Height, Roughness, Metallic, Cavity AO).
 
 /// Perceptual luminance formula according to ITU-R BT.601
 #[inline]

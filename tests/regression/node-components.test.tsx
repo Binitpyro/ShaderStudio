@@ -128,7 +128,7 @@ describe("Milestone 1 Challenger Instance 2: Empirical Challenge Suite (R1)", ()
       expect(getContextCalls).not.toContain("webgpu")
     })
 
-    it("canvas dimensions are strictly bounded to 240x180 avoiding unbounded memory allocations", () => {
+    it("canvas dimensions are strictly bounded to 160x160 (CSS px; at most 2x devicePixelRatio) avoiding unbounded memory allocations", () => {
       const node: Node<GraphNodeData> = {
         id: "bounded-preview",
         position: { x: 0, y: 0 },
@@ -136,12 +136,12 @@ describe("Milestone 1 Challenger Instance 2: Empirical Challenge Suite (R1)", ()
       }
 
       const html = renderToStaticMarkup(<NodePreviewViewport node={node} />)
-      expect(html).toContain('width="240"')
-      expect(html).toContain('height="180"')
-      expect(html).toContain("240×180")
+      expect(html).toContain('width="160"')
+      expect(html).toContain('height="160"')
+      expect(html).toContain("160×160")
 
-      const bufferSizeBytes = 240 * 180 * 4
-      expect(bufferSizeBytes).toBe(172800)
+      const maxBufferSizeBytes = 320 * 320 * 4
+      expect(maxBufferSizeBytes).toBe(409600)
     })
 
     it("survives pathological mathematical expressions without exceptions", () => {
@@ -257,7 +257,7 @@ describe("Adversarial Challenger: Milestone 1 (R1 Node Graph Power-ups)", () => 
 
 describe("live preview viewport", () => {
 describe("R1d: Per-Node Live Preview Viewport", () => {
-  it("renders 240x180 mini-viewport canvas for procedural shader node", () => {
+  it("renders 160x160 mini-viewport canvas for procedural shader node", () => {
     const node: Node<GraphNodeData> = {
       id: "math-expr-1",
       position: { x: 0, y: 0 },
@@ -275,9 +275,9 @@ describe("R1d: Per-Node Live Preview Viewport", () => {
     expect(html).toContain("MATH_EXPRESSION")
     expect(html).toContain("math-expr-1")
     expect(html).toContain("<canvas")
-    expect(html).toContain('width="240"')
-    expect(html).toContain('height="180"')
-    expect(html).toContain("240×180")
+    expect(html).toContain('width="160"')
+    expect(html).toContain('height="160"')
+    expect(html).toContain("160×160")
   })
 
   it("renders channel selector pills across RGBA, RGB, R, G, B, A", () => {

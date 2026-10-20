@@ -221,12 +221,15 @@ function pushParamValues(nodes: Node<GraphNodeData>[], edges: Edge[]) {
   }
 }
 
+/** Clear the error slot without counting as an adapter compile report (compileSeq stays put). */
+const clearCompileError = () => useProjectStore.setState({ lastCompileError: null })
+
 /** Compile the graph and publish the result to the store, skipping work whose output is unchanged. */
 export function compileAndPublish(nodes: Node<GraphNodeData>[], edges: Edge[]) {
   const store = useProjectStore.getState()
   if (nodes.length === 0) {
     // Empty graph: nothing to render, and "no output node" is not an error worth surfacing.
-    if (store.lastCompileError !== null) store.setLastCompileError(null)
+    if (store.lastCompileError !== null) clearCompileError()
     if (store.renderQueue !== null) store.setRenderQueue(null)
     sync.queueSignature = null
     sync.raymarchSources = null
@@ -240,7 +243,7 @@ export function compileAndPublish(nodes: Node<GraphNodeData>[], edges: Edge[]) {
     sync.queueSignature = null
     return
   }
-  if (store.lastCompileError !== null) store.setLastCompileError(null)
+  if (store.lastCompileError !== null) clearCompileError()
 
   const raymarch = result.queue.find((step) => step.type === "raymarch")
   if (raymarch && raymarch.type === "raymarch") {

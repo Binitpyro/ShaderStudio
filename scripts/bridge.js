@@ -1,10 +1,19 @@
 #!/usr/bin/env node
 import { createServer } from "http"
 import { WebSocketServer } from "ws"
-import { watch, readdirSync, readFileSync, statSync, realpathSync } from "fs"
-import { join, extname, resolve, normalize, sep } from "path"
-import { randomBytes, timingSafeEqual } from "crypto"
+import { watch, readdirSync, readFileSync, statSync, realpathSync, mkdirSync, writeFileSync, unlinkSync } from "fs"
+import { join, extname, resolve, sep, dirname } from "path"
+import { randomBytes, timingSafeEqual, createHmac } from "crypto"
 import { fileURLToPath } from "url"
+import { homedir } from "os"
+
+/** Where `npm run bridge` publishes its token for the MCP server. Override with SHADER_STUDIO_TOKEN_FILE. */
+export const TOKEN_FILE = process.env.SHADER_STUDIO_TOKEN_FILE || join(homedir(), ".shader-studio", "bridge-token")
+
+/** HMAC-SHA256(token, nonce) as hex. Mirrors computeBridgeProof in src/bridge/bridgeProtocol.ts. */
+export function computeHandshakeProof(token, nonce) {
+  return createHmac("sha256", token).update(nonce).digest("hex")
+}
 
 const SHADER_EXTENSIONS = [".wgsl", ".glsl", ".frag", ".vert"]
 const MAX_BODY_BYTES = 5 * 1024 * 1024 // 5 MB
@@ -212,8 +221,24 @@ export function createBridgeServer(options = {}) {
     const host = req.headers.host || `localhost:${port}`
     const url = new URL(req.url, `http://${host}`)
 
-    // 2. Public Status Endpoint
+    // 2. Unauthenticated liveness probe (reveals nothing) + token-gated status
+    if (url.pathname === "/api/health" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ ok: true }))
+      return
+    }
     if (url.pathname === "/api/status" && req.method === "GET") {
+      const providedToken = extractToken(req, url)
+      if (!providedToken) {
+        res.writeHead(401, { "Content-Type": "application/json" })
+        res.end(JSON.stringify({ error: "Unauthorized: missing authentication token" }))
+        return
+      }
+      if (!isTokenValid(providedToken, token)) {
+        res.writeHead(403, { "Content-Type": "application/json" })
+        res.end(JSON.stringify({ error: "Forbidden: invalid authentication token" }))
+        return
+      }
       res.writeHead(200, { "Content-Type": "application/json" })
       res.end(
         JSON.stringify({
@@ -519,6 +544,10 @@ export function createBridgeServer(options = {}) {
     const url = new URL(req.url, `http://${host}`)
     const isAgent = url.searchParams.get("role") === "agent"
 
+    // Handshake proof: lets the client verify this server really knows the token before trusting pushed shader source.
+    const nonce = url.searchParams.get("nonce")
+    if (nonce) ws.send(JSON.stringify({ type: "hello", proof: computeHandshakeProof(token, nonce) }))
+
     if (isAgent) {
       agentClients.add(ws)
       if (!quiet) console.log(`[Bridge] External AI Agent connected (${agentClients.size} agent(s))`)
@@ -551,7 +580,7 @@ export function createBridgeServer(options = {}) {
         }
 
         // If an external agent sends an execute/capture request over WebSocket
-        if ((data.type === "agent:execute" || data.type === "agent:capture") && isAgent) {
+        if ((data.type === "agent:execute" || data.type === "agent:capture" || data.type === "agent:diagnostics") && isAgent) {
           for (const client of browserClients) {
             client.send(JSON.stringify(data))
           }
@@ -618,18 +647,17 @@ export function createBridgeServer(options = {}) {
         })
       }),
     listen: (targetPort = port) =>
-      new Promise((resolveListen) => {
-        server.on("error", (err) => {
-          console.error(`[bridge] server error: ${err.message}`)
-          process.exit(1)
-        })
+      new Promise((resolveListen, rejectListen) => {
+        // Reject (e.g. EADDRINUSE) instead of exiting: the CLI entry decides what to do.
+        server.once("error", rejectListen)
         server.listen(targetPort, "127.0.0.1", () => {
+          server.off("error", rejectListen)
           const boundPort = server.address().port
           if (!quiet) {
             console.log(`=======================================================`)
             console.log(`🚀 Shader Studio Bridge & Agent Server online on :${boundPort}`)
-            console.log(`🔑 Ephemeral Auth Token: ${token}`)
-            console.log(`📡 WebSocket: ws://localhost:${boundPort}?token=${token}`)
+            console.log(`🔗 Open Studio: http://localhost:5173/?token=${token}`)
+            console.log(`📡 WebSocket: ws://localhost:${boundPort}`)
             console.log(`⚡ Agent REST API: http://localhost:${boundPort}/api/agent/execute`)
             if (directory) {
               console.log(`📂 Watching directory: ${directory}`)
@@ -674,5 +702,22 @@ if (isDirectRun && process.env.NODE_ENV !== "test") {
     directory: directoryArg,
   })
 
-  bridge.listen(parsedPort)
+  bridge
+    .listen(parsedPort)
+    .then(() => {
+      // Token file so the MCP server (scripts/mcp-server.js) can authenticate without manual copy/paste.
+      try {
+        mkdirSync(dirname(TOKEN_FILE), { recursive: true })
+        writeFileSync(TOKEN_FILE, bridge.token, { mode: 0o600 })
+        const cleanup = () => { try { unlinkSync(TOKEN_FILE) } catch { /* already gone */ } }
+        process.on("exit", cleanup)
+        for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => process.exit(0))
+      } catch (e) {
+        console.warn(`[Bridge] Could not write token file ${TOKEN_FILE}: ${e.message}`)
+      }
+    })
+    .catch((err) => {
+      console.error(`[bridge] failed to start: ${err.message}`)
+      process.exit(1)
+    })
 }

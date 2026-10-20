@@ -231,10 +231,14 @@ describe("Tier 1: Visual Raymarching & SDF Procedural Geometry", () => {
     expect(ids).toContain("sdf-infinite-columns")
 
     for (const tmpl of sdfTemplates) {
-      expect(tmpl.shaderSource.length).toBeGreaterThan(100)
-      expect(tmpl.shaderSource).toContain("float map(vec3 p)")
-      expect(tmpl.shaderSource).toContain("calcNormal")
-      expect(tmpl.shaderSource).toContain("fragColor =")
+      // SDF templates are real node graphs; both sources are their compile output
+      expect(tmpl.graph?.nodes.some((n) => n.type === "raymarch")).toBe(true)
+      expect(tmpl.graph?.nodes.some((n) => n.type === "output")).toBe(true)
+      expect(tmpl.glsl).toContain("float map(vec3 p)")
+      expect(tmpl.glsl).toContain("calcNormal")
+      expect(tmpl.glsl).toContain("fragColor =")
+      expect(tmpl.wgsl).toContain("fn map(p: vec3f)")
+      expect(tmpl.wgsl).toContain("@fragment")
       expect(tmpl.geometry).toBe("plane")
     }
   })

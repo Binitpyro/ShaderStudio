@@ -260,28 +260,30 @@ export function ProjectPanel() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-1 pt-1 border-t border-line">
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={handleNativeSave}
-          title="Save to native .shaderstudio file"
-          className="text-xs h-7 px-1.5 gap-1"
-        >
-          <HardDriveDownload className="h-3 w-3" />
-          <span>Native Save</span>
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={handleNativeLoad}
-          title="Load from native .shaderstudio file"
-          className="text-xs h-7 px-1.5 gap-1"
-        >
-          <HardDriveUpload className="h-3 w-3" />
-          <span>Native Open</span>
-        </Button>
-      </div>
+      {isTauri() && (
+        <div className="grid grid-cols-2 gap-1 pt-1 border-t border-line">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleNativeSave}
+            title="Save to native .shaderstudio file"
+            className="text-xs h-7 px-1.5 gap-1"
+          >
+            <HardDriveDownload className="h-3 w-3" />
+            <span>Native Save</span>
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleNativeLoad}
+            title="Load from native .shaderstudio file"
+            className="text-xs h-7 px-1.5 gap-1"
+          >
+            <HardDriveUpload className="h-3 w-3" />
+            <span>Native Open</span>
+          </Button>
+        </div>
+      )}
 
       {importError && (
         <div className="text-2xs text-danger bg-danger-soft p-1.5 rounded border border-destructive/20">

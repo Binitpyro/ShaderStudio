@@ -1,5 +1,5 @@
-/// 3x3 Sobel tangent normal filter computation.
-/// Matches the perceptual gradient calculation and DirectX / OpenGL Y-flip toggle.
+//! 3x3 Sobel tangent normal filter computation.
+//! Matches the perceptual gradient calculation and DirectX / OpenGL Y-flip toggle.
 
 pub fn compute_sobel_normal(
     heights: &[f32],

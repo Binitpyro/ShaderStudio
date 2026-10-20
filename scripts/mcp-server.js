@@ -5,28 +5,78 @@
  * compile, visually inspect, and iterate on WebGPU/WebGL shaders in real-time.
  */
 import { createInterface } from "readline"
+import { register } from "node:module"
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import TEMPLATES_CATALOG from "../src/core/templatesData.json" with { type: "json" }
-import { transpileToUnityHLSL, transpileToGodotShader, transpileToShadertoy } from "../src/core/engineTranspiler.ts"
+
+// Sources are stored as line arrays in `glsl` / `wgsl`; prefer GLSL (the default threejs backend).
+const joinLines = (v) => (Array.isArray(v) ? v.join("\n") : typeof v === "string" ? v : "")
+const templateSource = (t) => joinLines(t.glsl) || joinLines(t.shaderSource) || joinLines(t.wgsl)
+// Graph-only templates (SDF node graphs) have no stored source and the browser bridge has no "load template by id"
+// message, so they cannot be loaded over MCP; they stay listed but are kept out of load_template's enum.
+const LOADABLE_TEMPLATES = TEMPLATES_CATALOG.filter((t) => templateSource(t))
 
 const BRIDGE_BASE_URL = process.env.SHADER_STUDIO_URL || "http://localhost:8642"
 
-async function postJson(endpoint, data) {
-  const res = await fetch(`${BRIDGE_BASE_URL}${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  })
+/**
+ * Bridge token: env SHADER_STUDIO_BRIDGE_TOKEN wins; otherwise the file `npm run bridge` writes
+ * (~/.shader-studio/bridge-token, override with SHADER_STUDIO_TOKEN_FILE). Re-read per call so a bridge restart is picked up.
+ */
+function getBridgeToken() {
+  if (process.env.SHADER_STUDIO_BRIDGE_TOKEN) return process.env.SHADER_STUDIO_BRIDGE_TOKEN
+  try {
+    return readFileSync(process.env.SHADER_STUDIO_TOKEN_FILE || join(homedir(), ".shader-studio", "bridge-token"), "utf8").trim() || null
+  } catch {
+    return null
+  }
+}
+
+function authHeaders() {
+  const token = getBridgeToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+async function bridgeFetch(endpoint, init) {
+  const res = await fetch(`${BRIDGE_BASE_URL}${endpoint}`, init)
   if (!res.ok) {
-    const errText = await res.text()
-    throw new Error(`Bridge returned HTTP ${res.status}: ${errText}`)
+    const hint = res.status === 401 || res.status === 403 ? " (set SHADER_STUDIO_BRIDGE_TOKEN or run `npm run bridge` so the token file exists)" : ""
+    throw new Error(`Bridge returned HTTP ${res.status}: ${await res.text()}${hint}`)
   }
   return res.json()
 }
 
-async function getJson(endpoint) {
-  const res = await fetch(`${BRIDGE_BASE_URL}${endpoint}`)
-  if (!res.ok) throw new Error(`Bridge returned HTTP ${res.status}`)
-  return res.json()
+const postJson = (endpoint, data) =>
+  bridgeFetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify(data) })
+
+const getJson = (endpoint) => bridgeFetch(endpoint, { headers: authHeaders() })
+
+/**
+ * The transpilers live in TypeScript (src/core/engineTranspiler.ts, extensionless/"@/" imports). Node >= 22.18 strips
+ * types natively; this resolve hook (registered here, no user flags) maps the extensionless imports onto .ts files.
+ * Loaded lazily so the server always starts, even if the import fails.
+ */
+let transpilersPromise = null
+function loadTranspilers() {
+  transpilersPromise ??= (async () => {
+    const hooks = `
+let src
+export function initialize(data) { src = data.src }
+const EXT = [".ts", ".tsx", "/index.ts", "/index.tsx"]
+export async function resolve(spec, ctx, next) {
+  try { return await next(spec, ctx) } catch (e) {
+    const target = spec.startsWith("@/") ? src + spec.slice(2) : spec.startsWith(".") ? new URL(spec, ctx.parentURL).href : null
+    if (target) for (const x of EXT) { try { return await next(target + x, ctx) } catch {} }
+    throw e
+  }
+}`
+    const srcUrl = pathToFileURL(join(import.meta.dirname, "..", "src")).href + "/"
+    register("data:text/javascript," + encodeURIComponent(hooks), { parentURL: import.meta.url, data: { src: srcUrl } })
+    return import("../src/core/engineTranspiler.ts")
+  })()
+  return transpilersPromise
 }
 
 const TOOLS = [
@@ -74,7 +124,7 @@ const TOOLS = [
   },
   {
     name: "list_templates",
-    description: "List all built-in curated production shader templates in Shader Studio (Holographic Energy Shield, Boiling Solar Plasma Orb, Cyberpunk Synthwave Grid, Liquid Chrome Iridescence, Tropical Ocean Caustics, Cosmic Nebula).",
+    description: "List all built-in curated production shader templates in Shader Studio (ids, names, categories).",
     inputSchema: {
       type: "object",
       properties: {},
@@ -88,15 +138,8 @@ const TOOLS = [
       properties: {
         templateId: {
           type: "string",
-          enum: [
-            "holographic-shield",
-            "solar-plasma-orb",
-            "synthwave-grid",
-            "liquid-metal-iridescence",
-            "ocean-caustics",
-            "cosmic-nebula",
-          ],
-          description: "ID of the curated shader template to load.",
+          enum: LOADABLE_TEMPLATES.map((t) => t.id),
+          description: "ID of the curated shader template to load (graph-only SDF templates are not loadable over MCP).",
         },
       },
       required: ["templateId"],
@@ -181,6 +224,11 @@ async function handleToolCall(name, args) {
             mimeType: "image/png",
           })
         }
+      } else if (result.status === "unverified") {
+        content.push({
+          type: "text",
+          text: "Compile unverified: the browser adapter did not report a compile result in time. Not treated as success.",
+        })
       } else {
         const errorLines = (result.errors || []).map((e) =>
           e.line ? `Line ${e.line}:${e.column || 0}: ${e.message}` : e.message
@@ -231,7 +279,7 @@ async function handleToolCall(name, args) {
   }
 
   if (name === "list_templates") {
-    const summary = TEMPLATES_CATALOG.map((t) => `- **${t.name}** (\`${t.id}\`): ${t.description} [${t.category}, ${t.geometry}]`).join("\n")
+    const summary = TEMPLATES_CATALOG.map((t) => `- **${t.name}** (\`${t.id}\`): ${t.description} [${t.category}, ${t.geometry}]${templateSource(t) ? "" : " (graph-only: open in the UI, not loadable via load_template)"}`).join("\n")
     return {
       content: [
         {
@@ -251,9 +299,22 @@ async function handleToolCall(name, args) {
       }
     }
 
+    const source = templateSource(tmpl)
+    if (!source) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Template '${tmpl.id}' is graph-based (SDF node graph) and has no stored shader source. Open it in the Shader Studio UI, or use render_shader with your own source.`,
+          },
+        ],
+      }
+    }
+
     try {
       const result = await postJson("/api/agent/execute", {
-        source: tmpl.shaderSource,
+        source,
         backend: tmpl.backend,
         uniforms: tmpl.uniforms,
         captureSnapshot: true,
@@ -288,6 +349,7 @@ async function handleToolCall(name, args) {
 
   if (name === "transpile_shader") {
     try {
+      const { transpileToUnityHLSL, transpileToGodotShader, transpileToShadertoy } = await loadTranspilers()
       let code = ""
       const target = args.target
       const shaderName = args.shaderName || "Custom/GeneratedShader"
@@ -319,7 +381,9 @@ async function handleToolCall(name, args) {
     }
   }
 
-  throw new Error(`Unknown tool: ${name}`)
+  const err = new Error(`Unknown tool: ${name}`)
+  err.rpcCode = -32602
+  throw err
 }
 
 // JSON-RPC 2.0 stdio transport
@@ -327,9 +391,12 @@ const rl = createInterface({ input: process.stdin, terminal: false })
 
 rl.on("line", async (line) => {
   if (!line.trim()) return
+  let id
+  const send = (obj) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...obj }) + "\n")
   try {
     const req = JSON.parse(line)
-    const { id, method, params } = req
+    id = req.id
+    const { method, params } = req
 
     if (method === "initialize") {
       const response = {
@@ -382,5 +449,9 @@ rl.on("line", async (line) => {
     }
   } catch (err) {
     process.stderr.write(`Error processing line: ${err.message}\n`)
+    const parseFailure = err instanceof SyntaxError
+    if (id !== undefined || parseFailure) {
+      send({ id: id ?? null, error: { code: err.rpcCode ?? (parseFailure ? -32700 : -32603), message: err.message } })
+    }
   }
 })

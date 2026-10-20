@@ -240,6 +240,17 @@ describe("WebGL2 fidelity layer (fleet w4)", () => {
       expect(gl.activeProgram).toBe(progBefore)
     })
 
+    it("applies the supplied uniform values and time to the preview program", async () => {
+      const src = "#version 300 es\nprecision highp float;\nuniform float u_time;\nuniform float pu_amount;\nuniform vec3 pu_tint;\nout vec4 o;\nvoid main(){ o = vec4(pu_tint * pu_amount, 1.0); }"
+      await adapter.renderToTarget!({
+        nodeId: "u", source: { glsl: src }, width: 8, height: 8,
+        uniforms: { pu_amount: { type: "float", value: 0.75 }, pu_tint: { type: "vec3", value: [1, 0.5, 0.25] }, time: { type: "float", value: 2.5 } },
+      })
+      expect(gl.uniformValues.get("pu_amount")).toBe(0.75)
+      expect(gl.uniformValues.get("pu_tint")).toEqual([1, 0.5, 0.25])
+      expect(gl.uniformValues.get("u_time")).toBe(2.5)
+    })
+
     it("also restores clear colour, blend, scissor and the active-unit TEXTURE_2D binding", async () => {
       adapter.renderFrame(0, 16)
       const tex = gl.createTexture()

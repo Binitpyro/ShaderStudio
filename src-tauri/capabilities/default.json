@@ -1,18 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for ShaderStudio desktop app",
+  "description": "Capabilities for the ShaderStudio main window: window controls. Native dialogs run inside Rust commands that record the picked path, and file IO goes through the save/load commands (picked paths only), so no dialog, fs or shell plugin permissions are granted to the webview.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "dialog:default",
-    "dialog:allow-open",
-    "dialog:allow-save",
-    "fs:default",
-    "fs:allow-read-text-file",
-    "fs:allow-write-text-file",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
-    "shell:allow-open"
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
   ]
 }

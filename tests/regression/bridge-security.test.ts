@@ -10,7 +10,9 @@ import {
   extractToken,
   isAllowedAiUrl,
   createBridgeServer,
+  computeHandshakeProof,
 } from "../../scripts/bridge.js"
+import { verifyBridgeProof } from "@/bridge/bridgeProtocol"
 import {
   getBridgeToken,
   setBridgeToken,
@@ -200,7 +202,7 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
     })
 
     it("lets originless (CLI/MCP) requests through without CORS headers", async () => {
-      const res = await fetch(`${baseUrl}/api/status`)
+      const res = await fetch(`${baseUrl}/api/status`, { headers: auth })
       expect(res.status).toBe(200)
       expect(res.headers.get("access-control-allow-origin")).toBeNull()
       expect(await res.json()).toMatchObject({ status: "online", browserClients: 0, agentClients: 0 })
@@ -312,6 +314,16 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
       const eph = createBridgeServer({ port: 0, quiet: true })
       expect(eph.token).toMatch(/^[0-9a-f]{48}$/i)
       expect(createBridgeServer({ port: 0, token: "custom-secret", quiet: true }).token).toBe("custom-secret")
+    })
+
+    it("listen() rejects (instead of exiting the process) when the port is taken", async () => {
+      const taken = createBridgeServer({ port: 0, token: SECRET, quiet: true })
+      const port = await taken.listen(0)
+      try {
+        await expect(createBridgeServer({ port, token: SECRET, quiet: true }).listen(port)).rejects.toMatchObject({ code: "EADDRINUSE" })
+      } finally {
+        await taken.close()
+      }
     })
 
     it("isTokenValid accepts only the exact token and never throws on odd input", () => {
@@ -441,11 +453,20 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
         )
       )
       for (const r of results) expect(r.status).toBe(403)
-      expect((await (await fetch(`${baseUrl}/api/status`)).json()).status).toBe("online")
+      expect((await (await fetch(`${baseUrl}/api/status`, { headers: auth })).json()).status).toBe("online")
     })
 
-    it("keeps GET /api/status public and 404s unknown endpoints", async () => {
-      expect((await fetch(`${baseUrl}/api/status`)).status).toBe(200)
+    it("requires the token for /api/status (it leaks the watched path) while /api/health stays minimal and public", async () => {
+      expect((await fetch(`${baseUrl}/api/status`)).status).toBe(401)
+      expect((await fetch(`${baseUrl}/api/status`, { headers: { Authorization: "Bearer nope" } })).status).toBe(403)
+      const ok = await (await fetch(`${baseUrl}/api/status`, { headers: auth })).json()
+      expect(ok.watchedDirectory).toBe(root)
+      const health = await fetch(`${baseUrl}/api/health`)
+      expect(health.status).toBe(200)
+      expect(await health.json()).toEqual({ ok: true })
+    })
+
+    it("404s unknown endpoints", async () => {
       const res = await fetch(`${baseUrl}/api/nope`)
       expect(res.status).toBe(404)
       expect(await res.json()).toEqual({ error: "Endpoint not found" })
@@ -568,6 +589,31 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
       expect(cap.status).toBe(200)
       expect((await cap.json()).screenshotBase64).toContain("data:image/png")
 
+      browser.close()
+      await waitUntil(() => bridge.browserClients.size === 0)
+    })
+
+    it("answers a ?nonce= handshake with an HMAC proof of the token, first", async () => {
+      const ws = new WebSocket(`${wsUrl}?token=${SECRET}&nonce=abc123`)
+      const first = await new Promise<Record<string, unknown>>((done) => ws.once("message", (raw) => done(JSON.parse(raw.toString()))))
+      ws.close()
+      expect(first).toEqual({ type: "hello", proof: computeHandshakeProof(SECRET, "abc123") })
+      expect(await verifyBridgeProof(SECRET, "abc123", first.proof as string)).toBe(true)
+      expect(await verifyBridgeProof("some-other-token", "abc123", first.proof as string)).toBe(false)
+      expect(await verifyBridgeProof(SECRET, "different-nonce", first.proof as string)).toBe(false)
+    })
+
+    it("forwards agent:diagnostics from an agent socket to browser clients", async () => {
+      const browser = new WebSocket(`${wsUrl}?token=${SECRET}`)
+      const received: Record<string, unknown>[] = []
+      browser.on("message", (raw) => received.push(JSON.parse(raw.toString())))
+      await new Promise((r) => browser.once("open", r))
+      const agent = new WebSocket(`${wsUrl}?token=${SECRET}&role=agent`)
+      await new Promise((r) => agent.once("open", r))
+      agent.send(JSON.stringify({ type: "agent:diagnostics", id: "diag_1" }))
+      await waitUntil(() => received.some((m) => m.type === "agent:diagnostics"))
+      expect(received.find((m) => m.type === "agent:diagnostics")).toEqual({ type: "agent:diagnostics", id: "diag_1" })
+      agent.close()
       browser.close()
       await waitUntil(() => bridge.browserClients.size === 0)
     })

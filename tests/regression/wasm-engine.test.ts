@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll, beforeEach } from "vitest"
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest"
+import { inflateSync } from "zlib"
 import { readFileSync } from "fs"
 import { resolve } from "path"
 import { wasmEngine } from "@/core/wasmEngine"
 import { generatePbrPixelBuffers, bakePbrMaps } from "@/core/textureBaker"
-import { parseOBJ, type ParsedGeometry } from "@/core/modelLoader"
+import { parseOBJ, parseOBJFast, loadModelFile, type ParsedGeometry } from "@/core/modelLoader"
 import { customModelRegistry } from "@/core/customModelRegistry"
 import { createZipArchive } from "@/utils/zipBuilder"
 import {
@@ -13,6 +14,7 @@ import {
   transpile_shader_wasm,
   normalize_obj_wasm,
   normalize_geometry_wasm,
+  transpile_wgsl_wasm,
 } from "@/wasm/pkg/shaderstudio_wasm"
 
 const asImage = (data: Uint8ClampedArray, width: number, height: number) => ({ data, width, height, colorSpace: "srgb" }) as unknown as ImageData
@@ -580,6 +582,262 @@ f 2 4 3
       const s = wasmEngine.getStatus()
       expect(s.isInitialized).toBe(false)
       expect(s.usingFallback).toBe(true)
+    })
+  })
+
+  describe("transpileWgsl (naga WGSL -> GLSL/HLSL)", () => {
+    const wgsl = `struct U { tint: vec4f, time: f32 };
+@group(0) @binding(0) var<uniform> u: U;
+@fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f { return u.tint * sin(u.time + uv.x); }`
+
+    it("emits GLSL ES 3.00, desktop 3.30 and HLSL through the engine", async () => {
+      const es = await wasmEngine.transpileWgsl(wgsl, "glsl")
+      expect("code" in es && es.code.startsWith("#version 300 es")).toBe(true)
+      const desk = await wasmEngine.transpileWgsl(wgsl, "glsl330", "fragment")
+      expect("code" in desk && desk.code.startsWith("#version 330 core")).toBe(true)
+      const hlsl = await wasmEngine.transpileWgsl(wgsl, "hlsl")
+      expect("code" in hlsl && hlsl.code.includes("fs_main")).toBe(true)
+    })
+
+    it("reports parse errors with a 1-based line and never throws", async () => {
+      const bad = await wasmEngine.transpileWgsl("@fragment\nfn f() -> @location(0) vec4f {\n  return vec4f(1.0, 2.0;\n}", "glsl")
+      expect("error" in bad && bad.line).toBe(3)
+      expect("error" in (await wasmEngine.transpileWgsl(wgsl, "msl" as never))).toBe(true)
+      expect("error" in (await wasmEngine.transpileWgsl(wgsl, "glsl", "vertex"))).toBe(true)
+      expect(transpile_wgsl_wasm(wgsl, "glsl", null)).toHaveProperty("code")
+    })
+  })
+
+  describe("WASM vs TS parity (documented tolerances)", () => {
+    function decodePng(png: Uint8Array) {
+      const dv = new DataView(png.buffer, png.byteOffset, png.byteLength)
+      const w = dv.getUint32(16)
+      const h = dv.getUint32(20)
+      expect([png[24], png[25]]).toEqual([8, 6]) // 8-bit RGBA
+      const idat: Buffer[] = []
+      for (let o = 8; o < png.length; ) {
+        const len = dv.getUint32(o)
+        const type = String.fromCharCode(...png.subarray(o + 4, o + 8))
+        if (type === "IDAT") idat.push(Buffer.from(png.subarray(o + 8, o + 8 + len)))
+        o += 12 + len
+      }
+      const raw = inflateSync(Buffer.concat(idat))
+      const stride = w * 4
+      const out = new Uint8Array(h * stride)
+      for (let y = 0; y < h; y++) {
+        const ft = raw[y * (stride + 1)]
+        for (let i = 0; i < stride; i++) {
+          const x = raw[y * (stride + 1) + 1 + i]
+          const a = i >= 4 ? out[y * stride + i - 4] : 0
+          const b = y ? out[(y - 1) * stride + i] : 0
+          const c = i >= 4 && y ? out[(y - 1) * stride + i - 4] : 0
+          const p = a + b - c
+          const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c)
+          const pred = [0, a, b, (a + b) >> 1, pa <= pb && pa <= pc ? a : pb <= pc ? b : c][ft]
+          out[y * stride + i] = (x + pred) & 255
+        }
+      }
+      return out
+    }
+
+    it("PBR maps: Rust PNGs match the TS baker within 1 level per channel (f32 vs f64 rounding)", () => {
+      const w = 24, h = 20
+      const px = gradientPixels(w, h, 90)
+      for (let i = 0; i < px.length; i += 4) if (((i / 4) * 7) % 11 === 0) px[i + 1] = 255 - px[i + 1] // add some noise
+      for (const invert of [false, true]) {
+        for (const mode of ["auto", "metal", "dielectric"] as const) {
+          const ts = generatePbrPixelBuffers(asImage(px, w, h), { normalStrength: 2.5, invertNormalY: invert, aoStrength: 1.3, metallicMode: mode })
+          const rs = bake_pbr_wasm(new Uint8Array(px), wasmCfg(w, h, { normal_strength: 2.5, invert_normal_y: invert, ao_strength: 1.3, metallic_mode: mode }))
+          const pairs: Array<[Uint8Array, ArrayLike<number>]> = [
+            [rs.albedo_png, ts.albedo], [rs.normal_png, ts.normal], [rs.roughness_png, ts.roughness],
+            [rs.height_png, ts.heightMap], [rs.metallic_png, ts.metallic], [rs.ao_png, ts.ao],
+          ]
+          for (const [png, want] of pairs) {
+            const got = decodePng(png)
+            expect(got.length).toBe(want.length)
+            let worst = 0, off = 0
+            for (let i = 0; i < got.length; i++) { const d = Math.abs(got[i] - want[i]); worst = Math.max(worst, d); if (d > 1) off++ }
+            // auto-metallic thresholds on f32 vs f64 saturation: allow <2% of pixels to flip, everything else is +-1
+            expect(png === rs.metallic_png && mode === "auto" ? off / got.length : worst, `${mode} invert=${invert}`).toBeLessThanOrEqual(png === rs.metallic_png && mode === "auto" ? 0.02 : 1)
+          }
+        }
+      }
+    })
+
+    it("OBJ: positions/uvs/counts match the TS parser within 1e-4; normals are unit and face the same way", () => {
+      const obj = "v 3 1 2\nv 5 1 2\nv 5 4 2\nv 3 4 2\nv 4 2 6\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\nf 1/1 3/3 4\nf 1 2 5\nf 2 3 5"
+      const ts = parseOBJ(obj, "p.obj")
+      const rs = normalize_obj_wasm(obj, "p.obj")
+      expect([rs.vertex_count, rs.triangle_count]).toEqual([ts.vertexCount, ts.triangleCount])
+      const rp = rs.positions as Float32Array
+      const rn = rs.normals as Float32Array
+      for (let i = 0; i < ts.positions.length; i++) expect(Math.abs(rp[i] - ts.positions[i])).toBeLessThan(1e-4)
+      for (let i = 0; i < ts.uvs.length; i++) if (Number.isFinite(ts.uvs[i])) expect(Math.abs((rs.uvs as Float32Array)[i] - ts.uvs[i])).toBeLessThan(1e-6) // TS yields NaN for faces without vt
+      for (let i = 0; i < rn.length; i += 3) {
+        expect(Math.hypot(rn[i], rn[i + 1], rn[i + 2])).toBeCloseTo(1, 3)
+        expect(rn[i] * ts.normals[i] + rn[i + 1] * ts.normals[i + 1] + rn[i + 2] * ts.normals[i + 2]).toBeGreaterThan(0)
+      }
+    })
+  })
+
+  describe("wasmEngine worker robustness (mock Worker)", () => {
+    type Handler = (self: FakeWorker, msg: any) => void
+    class FakeWorker {
+      static instances: FakeWorker[] = []
+      static handler: Handler = () => {}
+      onmessage: ((e: MessageEvent) => void) | null = null
+      onerror: ((e: unknown) => void) | null = null
+      onmessageerror: ((e: unknown) => void) | null = null
+      terminated = false
+      constructor() {
+        FakeWorker.instances.push(this)
+      }
+      postMessage(msg: any) {
+        queueMicrotask(() => !this.terminated && FakeWorker.handler(this, msg))
+      }
+      reply(id: string, data: unknown, type = "OK") {
+        this.onmessage?.({ data: { id, type, data } } as MessageEvent)
+      }
+      terminate() {
+        this.terminated = true
+      }
+    }
+    const answerInit: Handler = (w, m) => m.type === "INIT" && w.reply(m.id, true, "INIT_OK")
+
+    beforeEach(() => {
+      FakeWorker.instances = []
+      wasmEngine.dispose()
+      wasmEngine.configure({ init: 3000, bake: 15000, parse: 5000 })
+      vi.stubGlobal("Worker", FakeWorker)
+      vi.spyOn(console, "warn").mockImplementation(() => {})
+    })
+    afterEach(() => {
+      wasmEngine.dispose()
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    })
+
+    it("uses the worker when it answers, with transferable results", async () => {
+      FakeWorker.handler = (w, m) => {
+        if (m.type === "INIT") return answerInit(w, m)
+        w.reply(m.id, { name: "m", positions: new Float32Array(9), normals: new Float32Array(9), uvs: new Float32Array(6), vertex_count: 3, triangle_count: 1 })
+      }
+      const g = await wasmEngine.normalizeObjNative("v 0 0 0", "m.obj")
+      expect(g?.vertexCount).toBe(3)
+      expect(wasmEngine.getStatus().isInitialized).toBe(true)
+    })
+
+    it("times out a hung request, falls back to TS, and respawns on the next call", async () => {
+      let hang = true
+      FakeWorker.handler = (w, m) => {
+        if (m.type === "INIT") return answerInit(w, m)
+        if (!hang) w.reply(m.id, { name: "ok", positions: new Float32Array(9), normals: new Float32Array(9), uvs: new Float32Array(6), vertex_count: 3, triangle_count: 1 })
+      }
+      wasmEngine.configure({ parse: 40 })
+      const r = await wasmEngine.normalizeObj("v -5 -5 0\nv 5 -5 0\nv 0 5 0\nf 1 2 3", "t.obj") // TS fallback after timeout
+      expect(r.vertexCount).toBe(3)
+      expect(FakeWorker.instances[0].terminated).toBe(true)
+      expect(wasmEngine.getStatus().isInitialized).toBe(false)
+
+      hang = false
+      const again = await wasmEngine.normalizeObjNative("v 0 0 0", "t.obj")
+      expect(again?.name).toBe("ok")
+      expect(FakeWorker.instances.length).toBe(2)
+    })
+
+    it("a worker crash rejects all pending requests at once", async () => {
+      FakeWorker.handler = (w, m) => m.type === "INIT" && answerInit(w, m)
+      const a = wasmEngine.normalizeObjNative("v 0 0 0")
+      const b = wasmEngine.normalizeObjNative("v 1 1 1")
+      await new Promise((r) => setTimeout(r, 10))
+      FakeWorker.instances[0].onerror?.({})
+      await expect(a).rejects.toThrow(/crashed/)
+      await expect(b).rejects.toThrow(/crashed/)
+    })
+
+    it("abort rejects only that request", async () => {
+      FakeWorker.handler = (w, m) => m.type === "INIT" && answerInit(w, m)
+      const ac = new AbortController()
+      const p = wasmEngine.normalizeObjNative("v 0 0 0", "x", { signal: ac.signal })
+      await new Promise((r) => setTimeout(r, 10))
+      ac.abort()
+      await expect(p).rejects.toThrow(/Aborted/)
+      expect(wasmEngine.getStatus().isInitialized).toBe(true)
+    })
+
+    it("a worker that never answers INIT yields init() === false (TS fallback)", async () => {
+      FakeWorker.handler = () => {}
+      wasmEngine.configure({ init: 30 })
+      expect(await wasmEngine.init()).toBe(false)
+    })
+  })
+})
+
+describe("WASM fast-path branches in modelLoader / textureBaker", () => {
+  const OBJ = "v -5 -5 0\nv 5 -5 0\nv 0 5 0\nf 1 2 3"
+  afterEach(() => vi.restoreAllMocks())
+
+  describe("parseOBJFast", () => {
+    it("uses the native result when the engine delivers one", async () => {
+      const native = { name: "native", positions: new Float32Array(9), normals: new Float32Array(9), uvs: new Float32Array(6), vertexCount: 3, triangleCount: 1 } as unknown as ParsedGeometry
+      const spy = vi.spyOn(wasmEngine, "normalizeObjNative").mockResolvedValue(native)
+      expect(await parseOBJFast(OBJ, "a.obj")).toBe(native)
+      expect(spy).toHaveBeenCalledWith(OBJ, "a.obj")
+    })
+
+    it("falls back to the TS parser when the engine is unavailable (null)", async () => {
+      vi.spyOn(wasmEngine, "normalizeObjNative").mockResolvedValue(null)
+      const g = await parseOBJFast(OBJ, "b.obj")
+      expect([g.name, g.vertexCount, g.triangleCount]).toEqual(["b.obj", 3, 1])
+    })
+
+    it("warns and falls back to the TS parser when the engine rejects", async () => {
+      vi.spyOn(wasmEngine, "normalizeObjNative").mockRejectedValue(new Error("boom"))
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const g = await parseOBJFast(OBJ, "c.obj")
+      expect(g.vertexCount).toBe(3)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("WASM OBJ parse failed"), expect.any(Error))
+    })
+
+    it("loadModelFile routes .obj through the fast path and rejects unknown formats", async () => {
+      vi.spyOn(wasmEngine, "normalizeObjNative").mockResolvedValue(null)
+      const g = await loadModelFile(new File([OBJ], "m.obj"))
+      expect(g.name).toBe("m.obj")
+      await expect(loadModelFile(new File(["x"], "m.stl"))).rejects.toThrow(/Unsupported/)
+    })
+  })
+
+  describe("bakePbrMaps", () => {
+    const px = (n: number) => new Uint8Array(n * n * 4)
+    const nativeOut = (n: number) => ({
+      width: n, height: n,
+      albedo_png: px(1), normal_png: px(1), roughness_png: px(1), height_png: px(1), metallic_png: px(1), ao_png: px(1),
+      zip_archive: new Uint8Array([0x50, 0x4b, 3, 4]),
+    })
+
+    it("builds maps and the zip from the native result", async () => {
+      const spy = vi.spyOn(wasmEngine, "bakePbrNative").mockResolvedValue(nativeOut(4) as never)
+      const r = await bakePbrMaps({ resolution: 4 })
+      expect(spy).toHaveBeenCalled()
+      expect(Object.keys(r.maps).sort()).toEqual(["albedo", "ao", "height", "metallic", "normal", "roughness"])
+      expect(r.maps.albedo.dataUrl.startsWith("data:image/png;base64,")).toBe(true)
+      expect(r.maps.albedo.blob.type).toBe("image/png")
+      expect([...(await r.createZip()) as Uint8Array]).toEqual(PK)
+    })
+
+    it("falls back to the TS baker when the engine returns null", async () => {
+      vi.spyOn(wasmEngine, "bakePbrNative").mockResolvedValue(null)
+      const r = await bakePbrMaps({ resolution: 4 })
+      expect(Object.keys(r.maps)).toHaveLength(6)
+      expect(r.resolution).toBe(4)
+    })
+
+    it("warns and falls back to the TS baker when the engine rejects", async () => {
+      vi.spyOn(wasmEngine, "bakePbrNative").mockRejectedValue(new Error("worker died"))
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const r = await bakePbrMaps({ resolution: 4 })
+      expect(Object.keys(r.maps)).toHaveLength(6)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("WASM bake failed"), expect.any(Error))
     })
   })
 })

@@ -2,12 +2,20 @@ use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+
+const PORT_TRIES: u16 = 20;
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bind `start`, or the next free port up to PORT_TRIES ports later.
+fn bind_from(start: u16) -> Option<(TcpListener, u16)> {
+    (0..PORT_TRIES)
+        .filter_map(|i| start.checked_add(i))
+        .find_map(|p| TcpListener::bind(("127.0.0.1", p)).ok().map(|l| (l, p)))
+}
 
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
@@ -27,6 +35,9 @@ fn open_browser(url: &str) {
 }
 
 fn handle_connection(mut stream: TcpStream) {
+    // Slow/idle clients must not pin a thread forever.
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
@@ -161,23 +172,23 @@ fn main() {
         i += 1;
     }
 
-    // Bind port or try fallback ports
-    let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)) {
-        Ok(l) => l,
-        Err(_) => {
-            // If default port is taken, try dynamic port
-            match TcpListener::bind("127.0.0.1:0") {
-                Ok(l) => {
-                    if let Ok(addr) = l.local_addr() {
-                        port = addr.port();
-                    }
-                    l
-                }
-                Err(e) => {
-                    eprintln!("Failed to bind TCP listener: {}", e);
-                    std::process::exit(1);
-                }
+    // Bind the requested port; if it is in use, try the next ones.
+    let first_port = port;
+    let listener = match bind_from(first_port) {
+        Some((l, p)) => {
+            if p != first_port {
+                eprintln!("Port {} is already in use; using port {} instead.", first_port, p);
             }
+            port = p;
+            l
+        }
+        None => {
+            eprintln!(
+                "Could not bind any port in {}-{} (all in use). Close the other program or pick one with --port <PORT>.",
+                first_port,
+                first_port.saturating_add(PORT_TRIES - 1)
+            );
+            std::process::exit(1);
         }
     };
 
@@ -192,18 +203,8 @@ fn main() {
         });
     }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    let _ = ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!("\nShutting down ShaderStudio...");
-        std::process::exit(0);
-    });
-
+    // Ctrl+C: the OS default handler terminates the process; the server is stateless, so no cleanup is needed.
     for stream in listener.incoming() {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
         match stream {
             Ok(s) => {
                 thread::spawn(move || {
@@ -217,13 +218,15 @@ fn main() {
     }
 }
 
-// Minimal ctrl-c handler implementation without external crate
-mod ctrlc {
-    pub fn set_handler<F>(_f: F) -> Result<(), ()>
-    where
-        F: FnMut() + 'static + Send,
-    {
-        // On Windows and Unix, Rust standard process handles SIGINT cleanly by default
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_from_skips_ports_in_use() {
+        let (held, p) = bind_from(38650).expect("bind");
+        let (_next, p2) = bind_from(p).expect("fallback");
+        assert!(p2 > p, "expected a later port, got {p2} vs {p}");
+        drop(held);
     }
 }

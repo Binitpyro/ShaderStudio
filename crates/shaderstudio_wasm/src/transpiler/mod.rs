@@ -1,4 +1,5 @@
 pub mod godot;
+pub mod naga_export;
 pub mod reflection;
 pub mod shadertoy;
 pub mod unity_hlsl;

@@ -2,197 +2,115 @@ import init, {
   bake_pbr_wasm,
   reflect_uniforms_wasm,
   transpile_shader_wasm,
+  transpile_wgsl_wasm,
   normalize_obj_wasm,
   normalize_geometry_wasm,
 } from "@/wasm/pkg/shaderstudio_wasm"
 
-let initialized = false
-let initPromise: Promise<void> | null = null
+let initPromise: Promise<unknown> | null = null
 
-async function ensureInitialized(): Promise<void> {
-  if (initialized) return
-  if (!initPromise) {
-    initPromise = (async () => {
-      await init()
-      initialized = true
-    })()
-  }
-  return initPromise
+function ensureInitialized(): Promise<unknown> {
+  return (initPromise ??= init())
 }
 
-function postWorkerMessage(message: any, transfer?: Transferable[]): void {
-  if (transfer && transfer.length > 0) {
-    (self as any).postMessage(message, transfer)
-  } else {
-    (self as any).postMessage(message)
-  }
+function post(message: unknown, transfer: Transferable[] = []): void {
+  ;(self as unknown as Worker).postMessage(message, transfer)
 }
+
+/** Reads the typed-array getters off a wasm-bindgen result, frees it, returns plain data. */
+function drain(res: { free(): void }, keys: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const k of keys) out[k] = (res as unknown as Record<string, unknown>)[k]
+  res.free()
+  return out
+}
+
+const BAKE_KEYS = ["albedo_png", "normal_png", "roughness_png", "height_png", "metallic_png", "ao_png", "zip_archive", "width", "height"]
+const MESH_KEYS = ["name", "positions", "normals", "uvs", "vertex_count", "triangle_count"]
+
+const buffersOf = (o: Record<string, unknown>): Transferable[] =>
+  Object.values(o)
+    .filter((v): v is ArrayBufferView => ArrayBuffer.isView(v))
+    .map((v) => v.buffer as ArrayBuffer)
+
+const f32 = (v: unknown): Float32Array | undefined =>
+  v ? (v instanceof Float32Array ? v : new Float32Array(v as ArrayLike<number>)) : undefined
 
 self.onmessage = async (e: MessageEvent) => {
   const msg = e.data
   if (!msg || !msg.type) return
-
   const id: string = msg.id || String(Date.now())
 
   try {
     await ensureInitialized()
+    const p = msg.payload || msg
 
     switch (msg.type) {
-      case "INIT": {
-        postWorkerMessage({ id, type: "INIT_OK", success: true })
+      case "INIT":
+        post({ id, type: "INIT_OK", success: true })
         break
-      }
 
       case "BAKE_PBR": {
-        const payload = msg.payload || msg
-        const width = payload.width || 512
-        const height = payload.height || 512
-        const rawBuffer = payload.pixels || payload.albedo
-        const pixels = rawBuffer instanceof Uint8Array ? rawBuffer : new Uint8Array(rawBuffer)
-        const opts = payload.options || payload.config || {}
-
-        const config = {
-          width,
-          height,
-          normal_strength: opts.normalStrength ?? 2.0,
-          invert_normal_y: opts.invertNormalY ?? false,
-          ao_strength: opts.aoStrength ?? 1.0,
-          metallic_mode: opts.metallicMode ?? "auto",
-        }
-
-        const result = bake_pbr_wasm(pixels, config)
-        const zipBytes = result.zip_archive ? new Uint8Array(result.zip_archive) : new Uint8Array(0)
-        const zipBuffer: ArrayBuffer = zipBytes.buffer.slice(
-          zipBytes.byteOffset,
-          zipBytes.byteOffset + zipBytes.byteLength
+        const raw = p.pixels || p.albedo
+        const opts = p.options || p.config || {}
+        const data = drain(
+          bake_pbr_wasm(raw instanceof Uint8Array ? raw : new Uint8Array(raw), {
+            width: p.width || 512,
+            height: p.height || 512,
+            normal_strength: opts.normalStrength ?? 2.0,
+            invert_normal_y: opts.invertNormalY ?? false,
+            ao_strength: opts.aoStrength ?? 1.0,
+            metallic_mode: opts.metallicMode ?? "auto",
+          }),
+          BAKE_KEYS
         )
-
-        postWorkerMessage(
-          {
-            id,
-            type: "BAKE_PBR_SUCCESS",
-            data: result,
-            zipBuffer,
-          },
-          zipBuffer.byteLength > 0 ? [zipBuffer] : []
-        )
+        post({ id, type: "BAKE_PBR_SUCCESS", data }, buffersOf(data))
         break
       }
 
       case "REFLECT_UNIFORMS": {
-        const payload = msg.payload || msg
-        const source = payload.source || ""
-        const lang = payload.lang || "wgsl"
-        const uniforms = reflect_uniforms_wasm(source, lang)
-        postWorkerMessage({
-          id,
-          type: "REFLECT_SUCCESS",
-          data: uniforms,
-          layout: uniforms,
-        })
+        const uniforms = reflect_uniforms_wasm(p.source || "", p.lang || "wgsl")
+        post({ id, type: "REFLECT_SUCCESS", data: uniforms, layout: uniforms })
         break
       }
 
       case "TRANSPILE_SHADER": {
-        const payload = msg.payload || msg
-        const source = payload.source || payload.shader_source || ""
-        const shaderName = payload.shaderName || payload.shader_name || "ShaderStudio/CustomEffect"
-        const target = payload.target || "unity"
-        const sourceLang = payload.sourceLang || payload.source_lang || "wgsl"
-
-        const req = {
-          shader_source: source,
-          shader_name: shaderName,
-          target,
-          source_lang: sourceLang,
-        }
-
-        const code: string = transpile_shader_wasm(req)
-        postWorkerMessage({
-          id,
-          type: "TRANSPILE_SUCCESS",
-          data: code,
-          code,
+        const code: string = transpile_shader_wasm({
+          shader_source: p.source || p.shader_source || "",
+          shader_name: p.shaderName || p.shader_name || "ShaderStudio/CustomEffect",
+          target: p.target || "unity",
+          source_lang: p.sourceLang || p.source_lang || "wgsl",
         })
+        post({ id, type: "TRANSPILE_SUCCESS", data: code, code })
+        break
+      }
+
+      case "TRANSPILE_WGSL": {
+        const data = transpile_wgsl_wasm(p.source || "", p.target || "glsl", p.stage ?? null)
+        post({ id, type: "TRANSPILE_WGSL_SUCCESS", data })
         break
       }
 
       case "NORMALIZE_MESH":
       case "NORMALIZE_OBJ": {
-        const payload = msg.payload || msg
-        const objSource = payload.objSource || payload.text || ""
-        const name = payload.name || "model.obj"
-        const output = normalize_obj_wasm(objSource, name)
-
-        const posBuf = new Float32Array(output.positions)
-        const normBuf = new Float32Array(output.normals)
-        const uvBuf = new Float32Array(output.uvs)
-
-        postWorkerMessage(
-          {
-            id,
-            type: "NORMALIZE_SUCCESS",
-            data: {
-              ...output,
-              positions: posBuf,
-              normals: normBuf,
-              uvs: uvBuf,
-            },
-            positions: posBuf,
-            normals: normBuf,
-            uvs: uvBuf,
-          },
-          [posBuf.buffer, normBuf.buffer, uvBuf.buffer]
-        )
+        const data = drain(normalize_obj_wasm(p.objSource || p.text || "", p.name || "model.obj"), MESH_KEYS)
+        post({ id, type: "NORMALIZE_SUCCESS", data }, buffersOf(data))
         break
       }
 
       case "NORMALIZE_GEOMETRY": {
-        const payload = msg.payload || msg
-        const positions =
-          payload.positions instanceof Float32Array
-            ? payload.positions
-            : new Float32Array(payload.positions || [])
-        const normals = payload.normals
-          ? payload.normals instanceof Float32Array
-            ? payload.normals
-            : new Float32Array(payload.normals)
-          : undefined
-        const uvs = payload.uvs
-          ? payload.uvs instanceof Float32Array
-            ? payload.uvs
-            : new Float32Array(payload.uvs)
-          : undefined
-        const name = payload.name || "geometry"
-
-        const output = normalize_geometry_wasm(positions, normals, uvs, name)
-        const posBuf = new Float32Array(output.positions)
-        const normBuf = new Float32Array(output.normals)
-        const uvBuf = new Float32Array(output.uvs)
-
-        postWorkerMessage(
-          {
-            id,
-            type: "NORMALIZE_SUCCESS",
-            data: {
-              ...output,
-              positions: posBuf,
-              normals: normBuf,
-              uvs: uvBuf,
-            },
-            positions: posBuf,
-            normals: normBuf,
-            uvs: uvBuf,
-          },
-          [posBuf.buffer, normBuf.buffer, uvBuf.buffer]
+        const data = drain(
+          normalize_geometry_wasm(f32(p.positions) ?? new Float32Array(0), f32(p.normals), f32(p.uvs), p.name || "geometry"),
+          MESH_KEYS
         )
+        post({ id, type: "NORMALIZE_SUCCESS", data }, buffersOf(data))
         break
       }
 
       default:
-        postWorkerMessage({ id, type: "ERROR", error: `Unknown message type: ${msg.type}` })
+        post({ id, type: "ERROR", error: `Unknown message type: ${msg.type}` })
     }
   } catch (err: any) {
-    postWorkerMessage({ id, type: "ERROR", error: err?.message || String(err) })
+    post({ id, type: "ERROR", error: err?.message || String(err) })
   }
 }

@@ -1,4 +1,4 @@
-/// Bounding box centering and target radius scaling (~1.2).
+//! Bounding box centering and target radius scaling (~1.2).
 
 pub fn normalize_positions(positions: &mut [f32]) {
     if positions.is_empty() {
@@ -52,8 +52,8 @@ pub fn normalize_positions(positions: &mut [f32]) {
     // 4. Scale to target radius ~1.2
     if max_radius > 1e-6 {
         let scale_factor = 1.2 / max_radius;
-        for i in 0..positions.len() {
-            positions[i] *= scale_factor;
+        for p in positions.iter_mut() {
+            *p *= scale_factor;
         }
     }
 }

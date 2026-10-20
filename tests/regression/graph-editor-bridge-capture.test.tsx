@@ -9,6 +9,7 @@ import { connect, disconnect, bridgeNeedsToken, getBridgeToken, setBridgeToken }
 import { SyncStatusBanner } from "@/components/SyncStatusBanner"
 import { useFileSystemStore } from "@/stores/fileSystemStore"
 import { viewportCapture } from "@/utils/frameCapture"
+import { computeBridgeProof } from "@/bridge/bridgeProtocol"
 import { renderCoordinator } from "@/core/renderCoordinator"
 
 class FakeWS {
@@ -98,8 +99,12 @@ describe("bridge agent:capture", () => {
   it("answers with a frame from captureFrameBase64, not the raw canvas", async () => {
     vi.stubGlobal("WebSocket", FakeWS)
     FakeWS.instances = []
+    setBridgeToken("capture-token")
     connect()
     const sock = FakeWS.instances[0] as FakeWS & { sent: string[] }
+    // The client only trusts a bridge that proves it knows the token (HMAC of our nonce).
+    const nonce = new URL(sock.url).searchParams.get("nonce")!
+    await (sock.onmessage as (e: { data: string }) => Promise<void>)({ data: JSON.stringify({ type: "hello", proof: await computeBridgeProof("capture-token", nonce) }) })
     sock.sent = []
     sock.send = (m: string) => { sock.sent.push(m) }
     sock.readyState = 1

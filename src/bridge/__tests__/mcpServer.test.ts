@@ -4,7 +4,6 @@ import { createInterface } from "readline"
 import { resolve, join } from "path"
 import { tmpdir } from "os"
 import { mkdtempSync, writeFileSync, rmSync } from "fs"
-import { pathToFileURL } from "url"
 import { WebSocket } from "ws"
 // @ts-expect-error -- untyped JS script
 import { createBridgeServer } from "../../../scripts/bridge.js"
@@ -80,7 +79,7 @@ describe("scripts/mcp-server.js over stdio JSON-RPC (real process, real bridge)"
   let bridge: ReturnType<typeof createBridgeServer>
   let browser: WebSocket
   let child: ChildProcessWithoutNullStreams
-  let loaderDir: string
+  let bridgePort = 0
   let nextId = 1
   const pending = new Map<number, (msg: any) => void>()
 
@@ -94,17 +93,19 @@ describe("scripts/mcp-server.js over stdio JSON-RPC (real process, real bridge)"
       })
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n")
     })
+  const executed: Array<{ source?: string }> = []
   const call = async (name: string, args: Record<string, unknown> = {}) =>
     (await rpc("tools/call", { name, arguments: args })).result
 
   beforeAll(async () => {
     bridge = createBridgeServer({ port: 0, token: TOKEN, quiet: true })
-    const port = await bridge.listen(0)
+    const port = (bridgePort = await bridge.listen(0))
 
     // Fake Shader Studio browser tab that answers agent RPCs.
     browser = new WebSocket(`ws://127.0.0.1:${port}?token=${TOKEN}`)
     browser.on("message", (raw) => {
       const msg = JSON.parse(raw.toString())
+      if (msg.type === "agent:execute") executed.push(msg)
       if (msg.type === "agent:execute" || msg.type === "agent:capture") {
         browser.send(
           JSON.stringify({
@@ -122,31 +123,9 @@ describe("scripts/mcp-server.js over stdio JSON-RPC (real process, real bridge)"
     })
     await new Promise((r) => browser.once("open", r))
 
-    // Plain node cannot resolve the extensionless / "@/" imports inside src/core (see it.fails below), so the
-    // handlers are exercised through a tiny resolve hook that maps them onto src/*.ts.
-    loaderDir = mkdtempSync(join(tmpdir(), "ss-mcp-"))
-    const src = pathToFileURL(resolve(process.cwd(), "src")).href
-    writeFileSync(
-      join(loaderDir, "hooks.mjs"),
-      `const EXT = [".ts", ".tsx", "/index.ts", "/index.tsx"]
-export async function resolve(spec, ctx, next) {
-  try { return await next(spec, ctx) } catch (e) {
-    const target = spec.startsWith("@/") ? ${JSON.stringify(src)} + "/" + spec.slice(2)
-      : spec.startsWith(".") ? new URL(spec, ctx.parentURL).href : null
-    if (target) for (const x of EXT) { try { return await next(target + x, ctx) } catch {} }
-    throw e
-  }
-}
-`
-    )
-    writeFileSync(
-      join(loaderDir, "register.mjs"),
-      `import { register } from "node:module"
-register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
-`
-    )
-    child = spawn(process.execPath, ["--import", pathToFileURL(join(loaderDir, "register.mjs")).href, resolve(process.cwd(), "scripts/mcp-server.js")], {
-      env: { ...process.env, SHADER_STUDIO_URL: `http://127.0.0.1:${port}` },
+    // Plain `node scripts/mcp-server.js`, exactly what `npm run mcp` runs: no loader flags.
+    child = spawn(process.execPath, [resolve(process.cwd(), "scripts/mcp-server.js")], {
+      env: { ...process.env, SHADER_STUDIO_URL: `http://127.0.0.1:${port}`, SHADER_STUDIO_BRIDGE_TOKEN: TOKEN },
       stdio: ["pipe", "pipe", "pipe"],
     })
     createInterface({ input: child.stdout }).on("line", (line) => {
@@ -160,7 +139,6 @@ register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
     child?.kill()
     browser?.terminate()
     await bridge?.close()
-    rmSync(loaderDir, { recursive: true, force: true })
   })
 
   it("initializes with protocol version and tools capability", async () => {
@@ -188,7 +166,7 @@ register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
     expect(msg.error.code).toBe(-32601)
   })
 
-  it("get_bridge_status reports the connected browser (public endpoint, no token needed)", async () => {
+  it("get_bridge_status reports the connected browser (authenticated)", async () => {
     const result = await call("get_bridge_status")
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toContain("Browser clients connected: 1")
@@ -205,6 +183,21 @@ register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
     expect(result.content[0].text).toContain("Template not found")
   })
 
+  it("load_template sends the joined GLSL source, and explains graph-only SDF templates", async () => {
+    const mesh = SHADER_TEMPLATES.find((t) => !t.graph)!
+    const ok = await call("load_template", { templateId: mesh.id })
+    expect(ok.isError).toBe(false)
+    expect(executed.at(-1)?.source).toBe(mesh.glsl)
+    expect(executed.at(-1)?.source).not.toContain("undefined")
+
+    const sdf = SHADER_TEMPLATES.find((t) => t.graph)!
+    const before = executed.length
+    const msg = await call("load_template", { templateId: sdf.id })
+    expect(msg.isError).toBe(true)
+    expect(msg.content[0].text).toContain("graph-based")
+    expect(executed.length).toBe(before)
+  })
+
   it("transpile_shader handles unity, godot and shadertoy, and rejects other targets", async () => {
     const source = "void main() { gl_FragColor = vec4(1.0); }"
     expect((await call("transpile_shader", { source, target: "unity" })).content[0].text).toContain("Shader ")
@@ -215,8 +208,7 @@ register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
     expect(bad.content[0].text).toContain("Unsupported target")
   })
 
-  // fleet: fixed in W6 (mcp-server.js postJson sends no bridge Authorization header -> bridge returns 401)
-  it.fails("MCP tool calls authenticate to the bridge", async () => {
+  it("MCP tool calls authenticate to the bridge", async () => {
     const render = await call("render_shader", { source: "void main(){}" })
     expect(render.isError).toBe(false)
     expect(render.content[0].text).toContain("compiled successfully")
@@ -225,8 +217,60 @@ register(${JSON.stringify(pathToFileURL(join(loaderDir, "hooks.mjs")).href)})
     expect(snap.content[0].type).toBe("image")
   })
 
-  // fleet: fixed in W6 (src/core/engineTranspiler.ts imports "./gltfExporter" without an extension, so `npm run mcp` dies with ERR_MODULE_NOT_FOUND)
-  it.fails("npm run mcp starts under plain node", async () => {
+  it("replies to unknown tools and thrown errors with JSON-RPC error objects", async () => {
+    const unknown = await rpc("tools/call", { name: "no_such_tool", arguments: {} })
+    expect(unknown.error.code).toBe(-32602)
+    expect(unknown.error.message).toContain("Unknown tool")
+  })
+
+  it("load_template enum lists only templates with stored shader source (graph-only SDF ones are left out)", async () => {
+    const { result } = await rpc("tools/list")
+    const tool = result.tools.find((t: { name: string }) => t.name === "load_template")
+    const loadable = SHADER_TEMPLATES.filter((t) => !t.graph).map((t) => t.id)
+    const graphOnly = SHADER_TEMPLATES.filter((t) => t.graph).map((t) => t.id)
+    expect(graphOnly.length).toBeGreaterThan(0)
+    expect(tool.inputSchema.properties.templateId.enum).toEqual(loadable)
+    for (const id of graphOnly) expect(tool.inputSchema.properties.templateId.enum).not.toContain(id)
+    expect(tool.inputSchema.properties.templateId.enum.length).toBeGreaterThan(6)
+  })
+
+  it("rejects calls with a wrong token (no silent success)", async () => {
+    const bad = spawn(process.execPath, [resolve(process.cwd(), "scripts/mcp-server.js")], {
+      env: { ...process.env, SHADER_STUDIO_URL: `http://127.0.0.1:${bridgePort}`, SHADER_STUDIO_BRIDGE_TOKEN: "wrong-token", SHADER_STUDIO_TOKEN_FILE: join(tmpdir(), "ss-no-such-token-file") },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    try {
+      const reply = await new Promise<any>((done) => {
+        createInterface({ input: bad.stdout }).once("line", (l) => done(JSON.parse(l)))
+        bad.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_bridge_status", arguments: {} } }) + "\n")
+      })
+      expect(reply.result.isError).toBe(true)
+      expect(reply.result.content[0].text).toContain("403")
+    } finally {
+      bad.kill()
+    }
+  })
+
+  it("reads the token from the token file the bridge writes when no env var is set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ss-token-"))
+    const file = join(dir, "bridge-token")
+    writeFileSync(file, TOKEN + "\n")
+    const env: NodeJS.ProcessEnv = { ...process.env, SHADER_STUDIO_URL: `http://127.0.0.1:${bridgePort}`, SHADER_STUDIO_TOKEN_FILE: file }
+    delete env.SHADER_STUDIO_BRIDGE_TOKEN
+    const viaFile = spawn(process.execPath, [resolve(process.cwd(), "scripts/mcp-server.js")], { env, stdio: ["pipe", "pipe", "pipe"] })
+    try {
+      const reply = await new Promise<any>((done) => {
+        createInterface({ input: viaFile.stdout }).once("line", (l) => done(JSON.parse(l)))
+        viaFile.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_bridge_status", arguments: {} } }) + "\n")
+      })
+      expect(reply.result.isError).toBeUndefined()
+    } finally {
+      viaFile.kill()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("npm run mcp starts under plain node", async () => {
     const plain = spawn(process.execPath, [resolve(process.cwd(), "scripts/mcp-server.js")], { stdio: ["pipe", "pipe", "pipe"] })
     try {
       const reply = await new Promise<string | null>((done) => {

@@ -173,6 +173,12 @@ describe("Visual Raymarching & SDF Core Math", () => {
       expect(wgsl).toContain("calcSoftShadow")
       expect(wgsl).toContain("calcAO")
       expect(wgsl).toContain("@location(0) vec4f")
+      // Fullscreen triangle from the vertex index: independent of the bound mesh and of the MVP.
+      const vs = wgsl.slice(wgsl.indexOf("fn vertex_main"), wgsl.indexOf("fn map("))
+      expect(wgsl).toContain("@builtin(vertex_index)")
+      expect(vs).toContain("input.vertexIndex")
+      expect(vs).not.toMatch(/mvp|input\.position/)
+      expect(wgsl).not.toMatch(/(let|var)\s+ref/)
     })
 
     it("emits SDF params as uniforms: changing a param changes values, never the generated source", () => {

@@ -93,7 +93,7 @@ function makeIco(png32) {
   return Buffer.concat([header, entry, png32]);
 }
 
-const iconsDir = path.resolve("src-tauri/icons");
+const iconsDir = path.resolve(__dirname, "..", "src-tauri", "icons");
 if (!fs.existsSync(iconsDir)) fs.mkdirSync(iconsDir, { recursive: true });
 
 const png32 = makePng(32, 32);

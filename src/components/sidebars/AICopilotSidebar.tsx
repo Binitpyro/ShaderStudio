@@ -45,6 +45,8 @@ export function AICopilotSidebar() {
       endpoints: s.endpoints,
       models: s.models,
       visualCritique: s.visualCritique,
+      rememberKeys: s.rememberKeys,
+      setRememberKeys: s.setRememberKeys,
       setActiveProvider: s.setActiveProvider,
       setApiKey: s.setApiKey,
       setEndpoint: s.setEndpoint,
@@ -123,6 +125,10 @@ export function AICopilotSidebar() {
                 onChange={(e) => ai.setApiKey(provider as KeyProvider, e.target.value)}
                 className="font-mono"
               />
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="copilot-remember-keys">Remember keys on this device</Label>
+                <Switch id="copilot-remember-keys" checked={ai.rememberKeys} onCheckedChange={ai.setRememberKeys} />
+              </div>
             </div>
           )}
 

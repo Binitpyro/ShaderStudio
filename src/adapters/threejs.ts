@@ -50,7 +50,8 @@ type FxModules = { [K in FxName]?: Awaited<ReturnType<(typeof FX_LOADERS)[K]>> }
 
 /** three prepends its own `#version 300 es` in GLSL3 mode, so a user-authored leading #version must go. */
 function stripGlslVersion(src: string): string {
-  return src.replace(/^\s*#version[^\r\n]*\r?\n/, "")
+  // three binds its own `position` attribute: alias a starter-style layout(location=0) `a_position` to it.
+  return src.replace(/^\s*#version[^\r\n]*\r?\n/, "").replace(/layout\s*\(\s*location\s*=\s*0\s*\)\s*in\s+vec3\s+a_position\s*;/, "#define a_position position")
 }
 
 type GeometryKey = "cube" | "sphere" | "plane" | "torus_knot" | "custom"
@@ -1108,6 +1109,20 @@ export class ThreeJSAdapter implements RenderAdapter {
 
     const target = uniforms[key]
 
+    if (value.type === "texture") {
+      const textureId = String(value.value)
+      this.textureBindings[name] = textureId
+      this.loadTexture(textureId)
+      target.value = this.loadedTextures.get(textureId) || this.createDefaultTexture()
+    } else {
+      this.assignUniformValue(target, value)
+    }
+
+    this.material.uniformsNeedUpdate = true
+  }
+
+  /** Copies a non-texture UniformValue into a three uniform slot, reusing the slot's vector/matrix instance. */
+  private assignUniformValue(target: { value: any }, value: UniformValue) {
     switch (value.type) {
       case "mat4": {
         const arr = Array.isArray(value.value) || value.value instanceof Float32Array ? (value.value as any) : []
@@ -1171,17 +1186,7 @@ export class ThreeJSAdapter implements RenderAdapter {
         target.value = Math.round(Number(value.value) || 0)
         break
       }
-      case "texture": {
-        const textureId = String(value.value)
-        this.textureBindings[name] = textureId
-        this.loadTexture(textureId)
-        const tex = this.loadedTextures.get(textureId) || this.createDefaultTexture()
-        target.value = tex
-        break
-      }
     }
-
-    this.material.uniformsNeedUpdate = true
   }
 
   resize(width: number, height: number, customDpr?: number) {
@@ -1233,6 +1238,8 @@ export class ThreeJSAdapter implements RenderAdapter {
       if (timeUniform) {
         timeUniform.value = time / 1000
       }
+      const resUniform = this.material.uniforms["u_resolution"] || this.material.uniforms["resolution"]
+      if (resUniform?.value?.set && this.canvas) resUniform.value.set(this.canvas.width, this.canvas.height)
     }
 
     // TAA Halton subpixel jitter
@@ -2036,6 +2043,16 @@ export class ThreeJSAdapter implements RenderAdapter {
     cam.updateProjectionMatrix()
     const res = mat.uniforms["u_resolution"]?.value
     if (res instanceof THREE.Vector2) res.set(w, h)
+    // Caller-supplied values (store values incl. time) replace the defaults the material was created with.
+    const supplied = request.uniforms ?? {}
+    const t = Number((supplied.time ?? supplied.u_time)?.value)
+    if (mat.uniforms["u_time"]) mat.uniforms["u_time"].value = Number.isFinite(t) ? t : 0
+    for (const [name, val] of Object.entries(supplied)) {
+      if (!val || val.type === "texture" || name === "time" || name === "u_time" || name === "u_resolution") continue
+      const key = mat.uniforms[name] ? name : mat.uniforms[`u_${name}`] ? `u_${name}` : name.startsWith("u_") && mat.uniforms[name.slice(2)] ? name.slice(2) : null
+      if (key) this.assignUniformValue(mat.uniforms[key], val)
+    }
+    mat.uniformsNeedUpdate = true
 
     const prevTarget = r.getRenderTarget()
     const prevColor = r.getClearColor(new THREE.Color())

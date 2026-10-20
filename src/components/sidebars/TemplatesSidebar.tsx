@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from "react"
-import { useProjectStore } from "@/stores/projectStore"
 import { Button } from "@/components/ui"
 import { Check, Layers } from "lucide-react"
-import { SHADER_TEMPLATES, type ShaderTemplate } from "@/core/templates"
+import { SHADER_TEMPLATES, applyTemplate, type ShaderTemplate } from "@/core/templates"
 import { SidebarFrame } from "./SidebarFrame"
 
 /** Every template category, in display order. Categories found in data but not listed are appended. */
@@ -16,33 +15,14 @@ export function TemplatesSidebar() {
   const loadedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(loadedTimer.current), [])
 
-  const setShaderSource = useProjectStore((state) => state.setShaderSource)
-  const setActiveBackend = useProjectStore((state) => state.setActiveBackend)
-  const setUniformValue = useProjectStore((state) => state.setUniformValue)
-  const triggerRecompile = useProjectStore((state) => state.triggerRecompile)
-  const setGraphNodes = useProjectStore((state) => state.setGraphNodes)
-
   const extra = [...new Set(SHADER_TEMPLATES.map((t) => t.category))].filter((c) => !(TEMPLATE_CATEGORIES as readonly string[]).includes(c))
   const categories = ["All", ...TEMPLATE_CATEGORIES, ...extra]
 
   const filteredTemplates = selectedCategory === "All" ? SHADER_TEMPLATES : SHADER_TEMPLATES.filter((t) => t.category === selectedCategory)
 
   const handleApplyTemplate = (template: ShaderTemplate) => {
-    // Templates are GLSL: write the glsl slot and never leave a WebGPU (WGSL) backend active.
-    setActiveBackend(template.backend === "webgpu" ? "webgl2" : template.backend)
-    setShaderSource(template.shaderSource, "glsl")
-
-    for (const [key, val] of Object.entries(template.uniforms)) {
-      setUniformValue(key, val)
-    }
-
-    // Update geometry on the mesh node in the graph
-    const graphNodes = useProjectStore.getState()._graphNodes
-    if (graphNodes.length > 0) {
-      setGraphNodes(graphNodes.map((n) => (n.type === "mesh" ? { ...n, data: { ...n.data, geometry: template.geometry } } : n)))
-    }
-
-    triggerRecompile()
+    // Both languages + (SDF) graph are written; the user's active backend is kept.
+    applyTemplate(template)
     setLoadedId(template.id)
     clearTimeout(loadedTimer.current)
     loadedTimer.current = setTimeout(() => setLoadedId(null), 2000)

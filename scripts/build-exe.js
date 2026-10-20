@@ -7,7 +7,7 @@
  * 1. Checks if web assets exist in dist/; if not (or if --full passed), runs build-all.js.
  * 2. Compiles crates/shaderstudio_desktop into a standalone release executable.
  * 3. Embeds all dist/ assets (HTML, CSS, JS, WebAssembly, SVGs) in-memory inside the binary.
- * 4. Outputs ShaderStudio.exe to the workspace root and dist/ folder.
+ * 4. Outputs ShaderStudio.exe to the workspace root (not dist/, to keep embedding clean).
  */
 
 import { spawnSync } from "node:child_process";
@@ -120,14 +120,15 @@ async function main() {
   }
 
   const rootExe = path.join(ROOT, "ShaderStudio.exe");
-  const distExe = path.join(distDir, "ShaderStudio.exe");
 
+  // Only the workspace root gets the exe. Never write it into dist/: the next cargo build would
+  // see a changed dist/ (build.rs also skips *.exe as a second guard) and web deploys would ship it.
   fs.copyFileSync(targetExe, rootExe);
-  fs.copyFileSync(targetExe, distExe);
+  const stale = path.join(distDir, "ShaderStudio.exe");
+  if (fs.existsSync(stale)) fs.rmSync(stale);
 
   const exeStat = fs.statSync(rootExe);
   logSuccess(`Created root executable: ShaderStudio.exe (${formatBytes(exeStat.size)})`);
-  logSuccess(`Created dist executable: dist/ShaderStudio.exe (${formatBytes(exeStat.size)})`);
 
   const totalDuration = ((Date.now() - totalStart) / 1000).toFixed(2);
   console.log(`\n${colors.bold}${colors.green}================================================================${colors.reset}`);

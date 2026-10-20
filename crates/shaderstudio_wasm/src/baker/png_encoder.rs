@@ -1,4 +1,4 @@
-/// Fast in-memory headless PNG encoder using the `png` crate.
+//! Fast in-memory headless PNG encoder using the `png` crate.
 
 pub fn encode_png_rgba(width: u32, height: u32, rgba_data: &[u8]) -> Result<Vec<u8>, String> {
     if (width * height * 4) as usize != rgba_data.len() {

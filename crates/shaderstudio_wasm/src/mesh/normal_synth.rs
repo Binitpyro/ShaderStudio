@@ -1,5 +1,5 @@
-/// Synthesizes smooth vertex normals for un-indexed triangle positions.
-/// Normalizes each vector to unit length ~1.0.
+//! Synthesizes smooth vertex normals for un-indexed triangle positions.
+//! Normalizes each vector to unit length ~1.0.
 
 pub fn synthesize_smooth_normals(positions: &[f32]) -> Vec<f32> {
     let mut normals = vec![0.0f32; positions.len()];

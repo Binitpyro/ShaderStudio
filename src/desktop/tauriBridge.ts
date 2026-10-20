@@ -74,14 +74,9 @@ async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Prom
 export async function pickOpenProjectPath(): Promise<string | null> {
   if (isTauri()) {
     try {
-      const selected = await invokeTauri<string | string[] | null>("plugin:dialog|open", {
-        filters: [{ name: "ShaderStudio Project", extensions: ["shaderstudio"] }],
-        multiple: false,
-        directory: false,
-      })
-      if (typeof selected === "string") return selected
-      if (Array.isArray(selected) && selected.length > 0) return selected[0]
-      return null
+      // The dialog runs in Rust, which records the chosen path: save/load only accept paths picked this session.
+      const selected = await invokeTauri<string | null>("pick_open_project_native")
+      return typeof selected === "string" ? selected : null
     } catch {
       return null
     }
@@ -95,10 +90,7 @@ export async function pickOpenProjectPath(): Promise<string | null> {
 export async function pickSaveProjectPath(defaultPath?: string): Promise<string | null> {
   if (isTauri()) {
     try {
-      const selected = await invokeTauri<string | null>("plugin:dialog|save", {
-        filters: [{ name: "ShaderStudio Project", extensions: ["shaderstudio"] }],
-        defaultPath,
-      })
+      const selected = await invokeTauri<string | null>("pick_save_project_native", { defaultPath })
       return selected || null
     } catch {
       return null
@@ -143,48 +135,33 @@ export async function loadProjectNative(path?: string): Promise<[string, string]
   return [targetPath, inMemoryFs.get(targetPath)!]
 }
 
-/**
- * Starts the in-process MCP server bridge on the specified port.
- * Rejects ports <= 1024 or > 65535.
- */
+// MCP: the native app no longer hosts an MCP protocol (the Rust stub was removed). Agents connect
+// through the real `scripts/mcp-server.js` (stdio) + `scripts/bridge.js`; the tray item "Connect AI
+// agent (MCP)..." explains how. The four functions below are a deprecated in-memory shim kept only
+// because legacy regression suites import them; they never call into Tauri and start nothing.
+
+/** @deprecated No-op state shim (validates the port, records it in memory). */
 export async function startMcpBridge(port: number): Promise<string> {
-  if (port <= 1024 || port > 65535) {
+  if (!Number.isInteger(port) || port <= 1024 || port > 65535) {
     throw new Error(`Invalid port: ${port}. Must be between 1025 and 65535`)
   }
-
-  if (isTauri()) {
-    return await invokeTauri<string>("start_mcp_bridge", { port })
-  }
-
   fallbackBridgeRunning = true
   fallbackBridgePort = port
   return `MCP Bridge active on port ${port}`
 }
 
-/**
- * Retrieves whether the MCP bridge is currently active.
- */
+/** @deprecated In-memory shim. */
 export async function getMcpBridgeStatus(): Promise<boolean> {
-  if (isTauri()) {
-    return await invokeTauri<boolean>("get_mcp_bridge_status")
-  }
   return fallbackBridgeRunning
 }
 
-/**
- * Stops the in-process MCP server bridge.
- */
+/** @deprecated In-memory shim. */
 export function stopMcpBridge(): void {
-  if (isTauri()) {
-    invokeTauri("stop_mcp_bridge").catch(() => {})
-  }
   fallbackBridgeRunning = false
   fallbackBridgePort = 0
 }
 
-/**
- * Returns the current MCP bridge port (or 0 if stopped).
- */
+/** @deprecated In-memory shim; current port or 0. */
 export function getMcpBridgePort(): number {
   return fallbackBridgePort
 }

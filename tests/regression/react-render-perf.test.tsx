@@ -135,33 +135,33 @@ describe("AudioNode spectrum + gauges are coordinator-driven and throttled", () 
 describe("NodePreviewViewport scheduling", () => {
   const node = { id: "t1", position: { x: 0, y: 0 }, data: { type: "texture" } }
 
-  it("paused: renders one frame, schedules no rAF and no timer", () => {
+  it("paused: schedules no rAF, no interval and registers no coordinator hook", () => {
     const raf = vi.fn()
     vi.stubGlobal("requestAnimationFrame", raf)
     const setIv = vi.spyOn(globalThis, "setInterval")
+    const reg = vi.spyOn(renderCoordinator, "registerPreRenderHook")
     const m = mount(NodePreviewViewport, { node }, false)
-    const { ctx, calls } = fakeCtx()
-    findAll(m.tree, (el) => el.type === "canvas")[0].props.ref.current = { width: 240, height: 180, getContext: () => ctx }
-    m.run()
-    expect(calls.createImageData).toBe(1)
+    m.run().forEach((c) => typeof c === "function" && c())
     expect(raf).not.toHaveBeenCalled()
     expect(setIv).not.toHaveBeenCalled()
+    expect(reg).not.toHaveBeenCalled()
   })
 
-  it("playing: ~10Hz timer (no rAF), single reused ImageData, stops on cleanup", () => {
+  it("playing: refreshes via a coordinator hook (no rAF, no interval) and unregisters on cleanup", () => {
     vi.useFakeTimers()
     vi.stubGlobal("document", { hidden: false })
     const raf = vi.fn()
     vi.stubGlobal("requestAnimationFrame", raf)
+    const setIv = vi.spyOn(globalThis, "setInterval")
+    const reg = vi.spyOn(renderCoordinator, "registerPreRenderHook").mockImplementation(() => {})
+    const unreg = vi.spyOn(renderCoordinator, "unregisterPreRenderHook").mockImplementation(() => {})
     const m = mount(NodePreviewViewport, { node })
-    const { ctx, calls } = fakeCtx()
-    findAll(m.tree, (el) => el.type === "canvas")[0].props.ref.current = { width: 240, height: 180, getContext: () => ctx }
     const cleanups = m.run()
-    vi.advanceTimersByTime(1000)
-    expect(calls.createImageData).toBe(1)
+    expect(reg).toHaveBeenCalledWith("node-preview:t1", expect.any(Function))
     expect(raf).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBe(1)
+    expect(setIv).not.toHaveBeenCalled()
     cleanups.forEach((c) => typeof c === "function" && c())
+    expect(unreg).toHaveBeenCalledWith("node-preview:t1")
     expect(vi.getTimerCount()).toBe(0)
   })
 })
@@ -174,8 +174,8 @@ describe("getActiveAdapter", () => {
   })
 })
 
-describe("template apply writes GLSL into the glsl slot", () => {
-  it("keeps WGSL intact, never leaves WebGPU active, and recompiles", () => {
+describe("template apply writes both sources", () => {
+  it("fills wgsl and glsl, keeps the active backend, and recompiles", () => {
     vi.useFakeTimers()
     const tpl = SHADER_TEMPLATES[0]
     const original = tpl.backend
@@ -187,10 +187,10 @@ describe("template apply writes GLSL into the glsl slot", () => {
       const btn = findAll(m.tree, (el) => typeof el.props.onClick === "function" && textOf(el).includes("Load shader"))[0] // first card = SHADER_TEMPLATES[0]
       btn.props.onClick()
       const s = useProjectStore.getState()
-      expect(s.glslSource).toBe(tpl.shaderSource)
-      expect(s.wgslSource).toBe("// wgsl")
-      expect(s.activeBackend).toBe("webgl2")
-      expect(s.shaderSource).toBe(tpl.shaderSource)
+      expect(s.glslSource).toBe(tpl.glsl)
+      expect(s.wgslSource).toBe(tpl.wgsl)
+      expect(s.activeBackend).toBe("webgpu") // the user's backend is kept
+      expect(s.shaderSource).toBe(tpl.wgsl)
       expect(s.recompileTrigger).toBeGreaterThan(before)
     } finally {
       ;(tpl as { backend: string }).backend = original

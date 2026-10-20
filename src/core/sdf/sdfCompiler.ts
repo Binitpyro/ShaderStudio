@@ -98,7 +98,7 @@ function buildDistanceExpr(lang: Lang, node: SdfTreeNode, uni: SdfUniformMap, pV
   const childB = node.children[1]
 
   if (node.type === "repetition") {
-    const repVar = `opRep(${pVar}, ${vec3("spacing", node.params.repetitionSpacing ?? [3.0, 3.0, 3.0])})`
+    const repVar = `opRepetition(${pVar}, ${vec3("spacing", node.params.repetitionSpacing ?? [3.0, 3.0, 3.0])})`
     return childA ? buildDistanceExpr(lang, childA, uni, repVar) : `sdSphere(${repVar}, 0.5)`
   }
 
@@ -137,6 +137,22 @@ export function collectSdfUniforms(root: SdfTreeNode): SdfUniformMap {
 /**
  * Compile SDF tree to full production GLSL 300 es raymarching fragment shader.
  */
+/**
+ * Vertex stage of the SDF templates (GLSL ES 3.00, WebGL2 + Three.js): no MVP, the bound plane is the clip-space quad.
+ * WebGL2's plane lies in XZ (y = 0) and three's PlaneGeometry in XY (z = 0), so x and (y + z) cover both.
+ */
+export const SDF_VERT_GLSL = `#version 300 es
+layout(location = 0) in vec3 a_position;
+
+out vec2 v_uv;
+
+void main() {
+  vec2 clip = vec2(a_position.x, a_position.y + a_position.z);
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_uv = clip * 0.5 + 0.5;
+}
+`
+
 export function compileSdfToGlsl(root: SdfTreeNode, options: SdfCompileOptions = {}): string {
   const maxSteps = options.maxSteps ?? 128
   const maxDist = (options.maxDistance ?? 40.0).toFixed(1)
@@ -287,6 +303,7 @@ ${sdfFields}
 
 struct VertexInput {
   @location(0) position: vec3f,
+  @builtin(vertex_index) vertexIndex: u32,
 };
 
 struct VertexOutput {
@@ -297,8 +314,12 @@ struct VertexOutput {
 @vertex
 fn vertex_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
-  output.position = vec4f(input.position.xy, 0.0, 1.0);
-  output.uv = input.position.xy * 0.5 + 0.5;
+  // Fullscreen triangle from the vertex index: ignores the mesh and the MVP, so it covers the viewport
+  // whatever geometry is bound (extra triangles of a bigger mesh just repeat it).
+  var corners = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  let c = corners[input.vertexIndex % 3u];
+  output.position = vec4f(c, 0.0, 1.0);
+  output.uv = c * 0.5 + 0.5;
   return output;
 }
 
@@ -375,11 +396,11 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
   if (hit) {
     let pos = ro + rd * t;
     let nor = calcNormal(pos);
-    let ref = reflect(rd, nor);
+    let refl = reflect(rd, nor);
 
     let lightDir = normalize(vec3f(0.8, 1.2, 0.9));
     let diff = max(dot(nor, lightDir), 0.0);
-    let spec = pow(max(dot(ref, lightDir), 0.0), 32.0);
+    let spec = pow(max(dot(refl, lightDir), 0.0), 32.0);
     let fre = clamp(1.0 + dot(rd, nor), 0.0, 1.0);
     let shadow = calcSoftShadow(pos + nor * 0.01, lightDir, 0.02, 10.0, 16.0);
     let ao = calcAO(pos, nor);

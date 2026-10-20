@@ -226,6 +226,8 @@ interface ProjectState {
   parsedUniforms: ParsedUniform[]
   uniformValues: Record<string, UniformValue>
   lastCompileError: string | null
+  /** Bumped by every adapter/compiler report (setLastCompileError); plain clears do not bump it. Lets callers await a real report. */
+  compileSeq: number
   deviceLost: boolean
   autoCompile: boolean
   recompileTrigger: number
@@ -348,6 +350,7 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
   parsedUniforms: [],
   uniformValues: { ...STARTER_UNIFORMS },
   lastCompileError: null,
+  compileSeq: 0,
   deviceLost: false,
   autoCompile: true,
   recompileTrigger: 0,
@@ -506,7 +509,7 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     uniformValues: { ...state.uniformValues, [name]: value },
     hasUnsavedChanges: true,
   })),
-  setLastCompileError: (error) => set({ lastCompileError: error }),
+  setLastCompileError: (error) => set((s) => ({ lastCompileError: error, compileSeq: s.compileSeq + 1 })),
   setDeviceLost: (lost) => set({ deviceLost: lost }),
   setAutoCompile: (auto) => set({ autoCompile: auto }),
   triggerRecompile: () => set((state) => ({ recompileTrigger: state.recompileTrigger + 1 })),

@@ -185,6 +185,7 @@ interface FrameFields {
   envExposure: number
   envRotation: number
   color: number
+  resolution: number
 }
 
 interface UniformResources {
@@ -427,7 +428,7 @@ export class WebGPUAdapter implements RenderAdapter {
   private cpuUniformView: DataView | null = null
   private cachedUniformValues = new Map<string, UniformValue>()
   // Field offsets for the per-frame writes, resolved once per compile (never looked up by name in the frame loop).
-  private frameFields: FrameFields = { mvp: -1, time: -1, audio: [], envExposure: -1, envRotation: -1, color: -1 }
+  private frameFields: FrameFields = { mvp: -1, time: -1, audio: [], envExposure: -1, envRotation: -1, color: -1, resolution: -1 }
   private mvpView: Float32Array | null = null
   private timeView: Float32Array | null = null
   private uniformDirtyMin = Infinity
@@ -532,6 +533,7 @@ export class WebGPUAdapter implements RenderAdapter {
       envExposure: pick("envExposure", "u_envExposure"),
       envRotation: pick("envRotation", "u_envRotation"),
       color: pick("color", "u_color"),
+      resolution: pick("resolution", "u_resolution"),
     }
   }
 
@@ -1465,6 +1467,12 @@ export class WebGPUAdapter implements RenderAdapter {
       if (this.timeView && this.timeView[0] !== Math.fround(seconds)) {
         this.timeView[0] = seconds
         this.markUniformDirty(this.frameFields.time, 4)
+      }
+      // Raymarch / screen-space shaders divide by the viewport size: keep it live in the block (vec2f).
+      const rf = this.frameFields.resolution
+      if (rf >= 0 && this.cpuUniformView) {
+        if (this.setCpuFloat(rf, this.canvas.width)) this.markUniformDirty(rf, 4)
+        if (this.setCpuFloat(rf + 4, this.canvas.height)) this.markUniformDirty(rf + 4, 4)
       }
       this.flushUniforms()
     }
@@ -3012,7 +3020,14 @@ export class WebGPUAdapter implements RenderAdapter {
         const mv = multiplyMatricesInto(new Float32Array(16), view, rot)
         new Float32Array(res.cpu, f.mvp, 16).set(multiplyMatricesInto(new Float32Array(16), proj, mv))
       }
-      if (f.time >= 0) new Float32Array(res.cpu, f.time, 1)[0] = 0
+      // Caller-supplied values win over the store/cached seed; time comes from `time`/`u_time` (0 when absent).
+      const supplied = req.uniforms ?? {}
+      for (const [name, val] of Object.entries(supplied)) if (val) writeUniformValue(res.layout, res.view, name, val)
+      for (const rn of ["resolution", "u_resolution"]) {
+        if (res.layout.fields[rn]?.type === "vec2f" && !supplied[rn]) writeUniformValue(res.layout, res.view, rn, { type: "vec2", value: [w, h] })
+      }
+      const t = Number((supplied.time ?? supplied.u_time)?.value)
+      if (f.time >= 0) new Float32Array(res.cpu, f.time, 1)[0] = Number.isFinite(t) ? t : 0
       device.queue.writeBuffer(res.buffer, 0, res.cpu)
       const bindGroup = device.createBindGroup({ layout: entry.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgsl, res.buffer) })
 

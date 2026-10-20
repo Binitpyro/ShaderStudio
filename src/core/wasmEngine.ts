@@ -11,6 +11,9 @@ import {
 import type { ParsedGeometry } from "@/core/modelLoader"
 import type { ParsedUniform } from "@/stores/projectStore"
 
+// NOTE: this module (and the worker + wasm pkg it spawns) must only ever be reached through
+// dynamic `import()` from startup code, so none of it lands in the entry chunk.
+
 export interface ReflectedUniform {
   name: string
   type_name: string
@@ -41,18 +44,64 @@ export interface WasmEngineStatus {
   usingFallback: boolean
 }
 
+export type WgslTarget = "glsl" | "glsl330" | "hlsl"
+export type WgslStage = "vertex" | "fragment" | "compute"
+export type WgslTranspileResult = { code: string } | { error: string; line?: number }
+
+export interface WasmTimeouts {
+  /** worker + wasm startup (ms) */
+  init: number
+  /** PBR bake + PNG/ZIP encode (ms) */
+  bake: number
+  /** OBJ parse / geometry normalize / reflect / transpile (ms) */
+  parse: number
+}
+
+export const DEFAULT_WASM_TIMEOUTS: WasmTimeouts = { init: 3000, bake: 15000, parse: 5000 }
+
+/** After this many consecutive worker crashes/timeouts the engine stays on the TS fallback. */
+const MAX_CONSECUTIVE_FAILURES = 3
+
+export interface CallOptions {
+  /** Override the per-request timeout (ms). */
+  timeoutMs?: number
+  /** Abort a pending request: the promise rejects with an AbortError and the late result is dropped. */
+  signal?: AbortSignal
+}
+
+type Pending = {
+  resolve: (val: any) => void
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout> | null
+}
+
+const toMesh = (res: any, name: string): ParsedGeometry => ({
+  name: res.name || name,
+  positions: res.positions instanceof Float32Array ? res.positions : new Float32Array(res.positions),
+  normals: res.normals instanceof Float32Array ? res.normals : new Float32Array(res.normals),
+  uvs: res.uvs instanceof Float32Array ? res.uvs : new Float32Array(res.uvs),
+  vertexCount: res.vertex_count ?? res.vertexCount,
+  triangleCount: res.triangle_count ?? res.triangleCount,
+})
+
+const toBytes = (pixels: Uint8Array | ImageData): Uint8Array => {
+  const d: any = pixels instanceof Uint8Array ? pixels : (pixels as ImageData).data
+  if (d instanceof Uint8Array) return d
+  return d && d.buffer ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d)
+}
+
 class WasmEngine {
   private worker: Worker | null = null
   private initPromise: Promise<boolean> | null = null
   private isInitialized = false
-  private pendingRequests = new Map<
-    string,
-    { resolve: (val: any) => void; reject: (err: any) => void }
-  >()
+  private pendingRequests = new Map<string, Pending>()
   private reqCounter = 0
+  private failures = 0
+  public timeouts: WasmTimeouts = { ...DEFAULT_WASM_TIMEOUTS }
 
-  constructor() {
-    // Lazy worker creation when in browser environment
+  /** Overrides request timeouts (ms); unspecified keys keep their current value. */
+  public configure(timeouts: Partial<WasmTimeouts>): void {
+    this.timeouts = { ...this.timeouts, ...timeouts }
   }
 
   /**
@@ -69,76 +118,73 @@ class WasmEngine {
     }
   }
 
+  /** Rejects every in-flight request and kills the worker; the next call respawns it. */
+  private teardown(reason: string): void {
+    const w = this.worker
+    this.worker = null
+    this.isInitialized = false
+    this.initPromise = null
+    w?.terminate()
+    this.failures++
+    const pending = [...this.pendingRequests.values()]
+    this.pendingRequests.clear()
+    for (const p of pending) {
+      if (p.timer) clearTimeout(p.timer)
+      p.reject(new Error(reason))
+    }
+  }
+
+  private settle(id: string): Pending | undefined {
+    const p = this.pendingRequests.get(id)
+    if (!p) return undefined
+    this.pendingRequests.delete(id)
+    if (p.timer) clearTimeout(p.timer)
+    return p
+  }
+
   /**
    * Initializes the Web Worker and Wasm engine.
-   * Resolves immediately with false if WebAssembly or Worker is unsupported.
+   * Resolves with false if WebAssembly/Worker is unsupported, startup fails or times out, or the
+   * worker crashed too many times in a row. Safe to call again after a crash (it respawns).
    */
   public async init(): Promise<boolean> {
     if (this.isInitialized) return true
     if (this.initPromise) return this.initPromise
+    if (this.failures >= MAX_CONSECUTIVE_FAILURES) return false
 
     this.initPromise = (async () => {
-      if (typeof WebAssembly === "undefined" || typeof Worker === "undefined") {
-        this.isInitialized = false
+      if (typeof WebAssembly === "undefined" || typeof Worker === "undefined") return false
+
+      let instance: Worker
+      try {
+        instance = new Worker(new URL("../workers/wasmWorker.ts", import.meta.url), { type: "module" })
+      } catch (e) {
+        console.warn("[WasmEngine] Web Worker failed to initialize, using TypeScript fallback:", e)
         return false
       }
 
+      instance.onmessage = (e: MessageEvent) => {
+        const msg = e.data
+        if (!msg || !msg.id) return
+        const pending = this.settle(msg.id)
+        if (!pending) return
+        if (msg.type === "ERROR") pending.reject(new Error(msg.error || "Wasm worker error"))
+        else pending.resolve(msg.data !== undefined ? msg.data : msg)
+      }
+      const crashed = (what: string) => () => {
+        if (this.worker === instance) this.teardown(`Wasm worker ${what}`)
+      }
+      instance.onerror = crashed("crashed")
+      instance.onmessageerror = crashed("sent an unreadable message")
+
+      this.worker = instance
       try {
-        const workerInstance = new Worker(
-          new URL("../workers/wasmWorker.ts", import.meta.url),
-          { type: "module" }
-        )
-
-        workerInstance.onmessage = (e: MessageEvent) => {
-          const msg = e.data
-          if (!msg || !msg.id) return
-
-          const pending = this.pendingRequests.get(msg.id)
-          if (!pending) return
-          this.pendingRequests.delete(msg.id)
-
-          if (msg.type === "ERROR") {
-            pending.reject(new Error(msg.error || "Wasm worker error"))
-          } else {
-            pending.resolve(msg.data !== undefined ? msg.data : msg)
-          }
-        }
-
-        workerInstance.onerror = (err) => {
-          console.warn("[WasmEngine] Worker error event:", err)
-        }
-
-        // Send INIT ping
-        const id = `init_${++this.reqCounter}`
-        const initPing = new Promise<boolean>((resolve) => {
-          this.pendingRequests.set(id, {
-            resolve: () => resolve(true),
-            reject: () => resolve(false), // Fall back gracefully on failure
-          })
-          workerInstance.postMessage({ id, type: "INIT" })
-
-          // 3 second timeout for init in case of worker block
-          setTimeout(() => {
-            if (this.pendingRequests.has(id)) {
-              this.pendingRequests.delete(id)
-              resolve(false)
-            }
-          }, 3000)
-        })
-
-        const success = await initPing
-        if (success) {
-          this.worker = workerInstance
-          this.isInitialized = true
-          return true
-        } else {
-          workerInstance.terminate()
-          this.isInitialized = false
-          return false
-        }
-      } catch (e) {
-        console.warn("[WasmEngine] Web Worker failed to initialize, using TypeScript fallback:", e)
-        this.isInitialized = false
+        await this.rawRequest("INIT", undefined, undefined, this.timeouts.init)
+        this.isInitialized = true
+        this.failures = 0
+        return true
+      } catch {
+        if (this.worker === instance) this.teardown("Wasm worker failed to start")
         return false
       }
     })()
@@ -146,16 +192,68 @@ class WasmEngine {
     return this.initPromise
   }
 
-  private sendRequest<T>(type: string, payload: any, transferables?: Transferable[]): Promise<T> {
-    if (!this.worker) {
-      throw new Error("Worker not available")
-    }
+  private rawRequest<T>(
+    type: string,
+    payload: unknown,
+    transferables: Transferable[] | undefined,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<T> {
+    const worker = this.worker
+    if (!worker) return Promise.reject(new Error("Worker not available"))
+    if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"))
 
     const id = `req_${++this.reqCounter}_${Date.now()}`
     return new Promise<T>((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject })
-      this.worker!.postMessage({ id, type, payload }, transferables || [])
+      // A hung worker can't be trusted with more work: reject everything, respawn lazily.
+      const timer = setTimeout(
+        () => this.teardown(`Wasm request ${type} timed out after ${timeoutMs}ms`),
+        timeoutMs
+      )
+      this.pendingRequests.set(id, { resolve, reject, timer })
+      signal?.addEventListener("abort", () => this.settle(id)?.reject(new DOMException("Aborted", "AbortError")), {
+        once: true,
+      })
+      try {
+        worker.postMessage({ id, type, payload }, transferables || [])
+      } catch (err) {
+        this.settle(id)
+        reject(err instanceof Error ? err : new Error(String(err)))
+      }
     })
+  }
+
+  /**
+   * Runs a request on the wasm worker (spawning it if needed).
+   * Resolves null when the engine is unavailable; rejects if the worker fails, times out or is aborted.
+   */
+  private async call<T>(
+    type: string,
+    payload: unknown,
+    kind: "bake" | "parse",
+    transferables?: Transferable[],
+    opts: CallOptions = {}
+  ): Promise<T | null> {
+    if (!(await this.init()) || !this.worker) return null
+    return this.rawRequest<T>(type, payload, transferables, opts.timeoutMs ?? this.timeouts[kind], opts.signal)
+  }
+
+  /**
+   * Fast path only: PBR bake on the Rust engine (PNG maps + ZIP). Resolves null if the engine is
+   * unavailable and rejects on worker failure/timeout/abort, so callers can run their own fallback.
+   * The input is copied before transfer, so the caller's buffer stays valid.
+   */
+  public async bakePbrNative(
+    pixels: Uint8Array | ImageData,
+    width: number,
+    height: number,
+    options: BakeOptions = {},
+    opts?: CallOptions
+  ): Promise<PbrBakeOutput | null> {
+    const copy = new Uint8Array(toBytes(pixels))
+    const { canvas: _canvas, ...bakeOptions } = options
+    const res = await this.call<PbrBakeOutput>("BAKE_PBR", { pixels: copy, width, height, options: bakeOptions }, "bake", [copy.buffer], opts)
+    return res ? { ...res, width: res.width || width, height: res.height || height } : null
   }
 
   /**
@@ -168,51 +266,17 @@ class WasmEngine {
     height: number,
     options: BakeOptions = {}
   ): Promise<PbrBakeOutput> {
-    const ready = await this.init()
-
-    const rawPixels =
-      pixels instanceof Uint8Array
-        ? pixels
-        : (pixels as ImageData).data instanceof Uint8ClampedArray
-        ? new Uint8Array((pixels as ImageData).data)
-        : new Uint8Array((pixels as any).data)
-
-    if (ready && this.worker) {
-      try {
-        const transferCopy = new Uint8Array(rawPixels)
-        const res: any = await this.sendRequest(
-          "BAKE_PBR",
-          {
-            pixels: transferCopy,
-            width,
-            height,
-            options,
-          },
-          [transferCopy.buffer]
-        )
-
-        return {
-          albedo_png: new Uint8Array(res.albedo_png),
-          normal_png: new Uint8Array(res.normal_png),
-          roughness_png: new Uint8Array(res.roughness_png),
-          height_png: new Uint8Array(res.height_png),
-          metallic_png: new Uint8Array(res.metallic_png),
-          ao_png: new Uint8Array(res.ao_png),
-          zip_archive: new Uint8Array(res.zip_archive),
-          width: res.width || width,
-          height: res.height || height,
-        }
-      } catch (err) {
-        console.warn("[WasmEngine] Worker bakePbr failed, falling back to TS:", err)
-      }
+    try {
+      const native = await this.bakePbrNative(pixels, width, height, options)
+      if (native) return native
+    } catch (err) {
+      console.warn("[WasmEngine] Worker bakePbr failed, falling back to TS:", err)
     }
 
     // TypeScript Fallback
-    const imgData = {
-      data: rawPixels as any,
-      width,
-      height,
-    } as unknown as ImageData
+    const rawPixels = toBytes(pixels)
+    const data = new Uint8ClampedArray(rawPixels.buffer as ArrayBuffer, rawPixels.byteOffset, rawPixels.byteLength)
+    const imgData = { data, width, height } as unknown as ImageData
 
     const pixelBuffers = generatePbrPixelBuffers(imgData, {
       normalStrength: options.normalStrength,
@@ -244,8 +308,6 @@ class WasmEngine {
       },
     ]
 
-    const zipArchive = createZipArchive(files)
-
     return {
       albedo_png: new Uint8Array(pixelBuffers.albedo.buffer),
       normal_png: new Uint8Array(pixelBuffers.normal.buffer),
@@ -253,7 +315,7 @@ class WasmEngine {
       height_png: new Uint8Array(pixelBuffers.heightMap.buffer),
       metallic_png: new Uint8Array(pixelBuffers.metallic.buffer),
       ao_png: new Uint8Array(pixelBuffers.ao.buffer),
-      zip_archive: zipArchive,
+      zip_archive: createZipArchive(files),
       width,
       height,
     }
@@ -262,24 +324,16 @@ class WasmEngine {
   /**
    * Reflects uniforms from shader source.
    */
-  public async reflectUniforms(
-    source: string,
-    lang: "wgsl" | "glsl" = "wgsl"
-  ): Promise<ReflectedUniform[]> {
-    const ready = await this.init()
-
-    if (ready && this.worker) {
-      try {
-        const res: any = await this.sendRequest("REFLECT_UNIFORMS", { source, lang })
-        return Array.isArray(res) ? res : res.data || []
-      } catch (err) {
-        console.warn("[WasmEngine] Worker reflectUniforms failed, falling back to TS:", err)
-      }
+  public async reflectUniforms(source: string, lang: "wgsl" | "glsl" = "wgsl"): Promise<ReflectedUniform[]> {
+    try {
+      const res = await this.call<any>("REFLECT_UNIFORMS", { source, lang }, "parse")
+      if (res) return Array.isArray(res) ? res : res.data || []
+    } catch (err) {
+      console.warn("[WasmEngine] Worker reflectUniforms failed, falling back to TS:", err)
     }
 
     // TypeScript Fallback
-    const tsUniforms: ParsedUniform[] =
-      lang === "wgsl" ? parseWgslUniforms(source) : parseGlslUniforms(source)
+    const tsUniforms: ParsedUniform[] = lang === "wgsl" ? parseWgslUniforms(source) : parseGlslUniforms(source)
 
     return tsUniforms.map((u, idx) => ({
       name: u.name,
@@ -301,20 +355,15 @@ class WasmEngine {
     target: "unity" | "godot" | "shadertoy",
     options: Partial<EngineExportOptions> = {}
   ): Promise<string> {
-    const ready = await this.init()
-
-    if (ready && this.worker) {
-      try {
-        const res: any = await this.sendRequest("TRANSPILE_SHADER", {
-          source,
-          target,
-          shaderName: options.shaderName,
-          sourceLang: "wgsl",
-        })
-        return typeof res === "string" ? res : res.code || ""
-      } catch (err) {
-        console.warn("[WasmEngine] Worker transpileShader failed, falling back to TS:", err)
-      }
+    try {
+      const res = await this.call<any>(
+        "TRANSPILE_SHADER",
+        { source, target, shaderName: options.shaderName, sourceLang: "wgsl" },
+        "parse"
+      )
+      if (res !== null) return typeof res === "string" ? res : res.code || ""
+    } catch (err) {
+      console.warn("[WasmEngine] Worker transpileShader failed, falling back to TS:", err)
     }
 
     // TypeScript Fallback
@@ -326,8 +375,6 @@ class WasmEngine {
     }
 
     switch (target) {
-      case "unity":
-        return transpileToUnityHLSL(exportOptions)
       case "godot":
         return transpileToGodotShader(exportOptions)
       case "shadertoy":
@@ -338,25 +385,61 @@ class WasmEngine {
   }
 
   /**
+   * Real WGSL -> GLSL/HLSL cross-compilation through naga (Rust).
+   *
+   * @param source WGSL source.
+   * @param target `"glsl"` = GLSL ES 3.00 (Shadertoy / HTML / Godot conversion),
+   *   `"glsl330"` = desktop GLSL 3.30 core, `"hlsl"` = HLSL SM 5.1 (Unity).
+   * @param stage GLSL only: which entry point to emit (`"vertex"` | `"fragment"` | `"compute"`).
+   *   Defaults to the fragment entry point, or the first entry point if there is none.
+   * @returns `{ code }` on success, or `{ error, line? }` (1-based WGSL line when naga reports one)
+   *   for parse / validation / backend errors, an unsupported target, or an unavailable engine.
+   *   Never rejects. There is no TS fallback: without WebAssembly the result is `{ error }`.
+   *
+   * @example
+   * const r = await wasmEngine.transpileWgsl(wgsl, "glsl")
+   * if ("code" in r) useGlsl(r.code); else showError(r.error, r.line)
+   */
+  public async transpileWgsl(source: string, target: WgslTarget = "glsl", stage?: WgslStage): Promise<WgslTranspileResult> {
+    try {
+      const res = await this.call<WgslTranspileResult>("TRANSPILE_WGSL", { source, target, stage }, "parse")
+      if (res) return res
+    } catch (err) {
+      console.warn("[WasmEngine] Worker transpileWgsl failed, running in-process:", err)
+    }
+
+    // No worker (headless / unsupported): run the same wasm module on this thread.
+    try {
+      const mod = await import("@/wasm/pkg/shaderstudio_wasm")
+      try {
+        return mod.transpile_wgsl_wasm(source, target, stage ?? null) as WgslTranspileResult
+      } catch {
+        await mod.default() // module not instantiated yet
+        return mod.transpile_wgsl_wasm(source, target, stage ?? null) as WgslTranspileResult
+      }
+    } catch (err) {
+      return { error: `WASM engine unavailable: ${err instanceof Error ? err.message : String(err)}` }
+    }
+  }
+
+  /**
+   * Fast path only: parse + normals + normalization of an OBJ on the Rust engine.
+   * Resolves null if the engine is unavailable; rejects on worker failure/timeout/abort.
+   */
+  public async normalizeObjNative(objText: string, name = "model.obj", opts?: CallOptions): Promise<ParsedGeometry | null> {
+    const res = await this.call<any>("NORMALIZE_OBJ", { text: objText, name }, "parse", undefined, opts)
+    return res ? toMesh(res, name) : null
+  }
+
+  /**
    * Parses and normalizes a Wavefront OBJ asset.
    */
   public async normalizeObj(objText: string, name = "model.obj"): Promise<ParsedGeometry> {
-    const ready = await this.init()
-
-    if (ready && this.worker) {
-      try {
-        const res: any = await this.sendRequest("NORMALIZE_OBJ", { text: objText, name })
-        return {
-          name: res.name || name,
-          positions: res.positions instanceof Float32Array ? res.positions : new Float32Array(res.positions),
-          normals: res.normals instanceof Float32Array ? res.normals : new Float32Array(res.normals),
-          uvs: res.uvs instanceof Float32Array ? res.uvs : new Float32Array(res.uvs),
-          vertexCount: res.vertex_count || res.vertexCount,
-          triangleCount: res.triangle_count || res.triangleCount,
-        }
-      } catch (err) {
-        console.warn("[WasmEngine] Worker normalizeObj failed, falling back to TS:", err)
-      }
+    try {
+      const native = await this.normalizeObjNative(objText, name)
+      if (native) return native
+    } catch (err) {
+      console.warn("[WasmEngine] Worker normalizeObj failed, falling back to TS:", err)
     }
 
     // TypeScript Fallback
@@ -365,7 +448,7 @@ class WasmEngine {
   }
 
   /**
-   * Normalizes raw 3D geometry buffers.
+   * Normalizes raw 3D geometry buffers. Inputs are copied; the caller's arrays stay valid.
    */
   public async normalizeGeometry(
     positions: Float32Array,
@@ -373,27 +456,15 @@ class WasmEngine {
     uvs?: Float32Array,
     name = "geometry"
   ): Promise<ParsedGeometry> {
-    const ready = await this.init()
-
-    if (ready && this.worker) {
-      try {
-        const res: any = await this.sendRequest("NORMALIZE_GEOMETRY", {
-          positions,
-          normals,
-          uvs,
-          name,
-        })
-        return {
-          name: res.name || name,
-          positions: res.positions instanceof Float32Array ? res.positions : new Float32Array(res.positions),
-          normals: res.normals instanceof Float32Array ? res.normals : new Float32Array(res.normals),
-          uvs: res.uvs instanceof Float32Array ? res.uvs : new Float32Array(res.uvs),
-          vertexCount: res.vertex_count || res.vertexCount,
-          triangleCount: res.triangle_count || res.triangleCount,
-        }
-      } catch (err) {
-        console.warn("[WasmEngine] Worker normalizeGeometry failed, falling back to TS:", err)
-      }
+    try {
+      const p = new Float32Array(positions)
+      const n = normals ? new Float32Array(normals) : undefined
+      const u = uvs ? new Float32Array(uvs) : undefined
+      const transfer = [p.buffer, n?.buffer, u?.buffer].filter((b): b is ArrayBuffer => !!b)
+      const res = await this.call<any>("NORMALIZE_GEOMETRY", { positions: p, normals: n, uvs: u, name }, "parse", transfer)
+      if (res) return toMesh(res, name)
+    } catch (err) {
+      console.warn("[WasmEngine] Worker normalizeGeometry failed, falling back to TS:", err)
     }
 
     // TypeScript Fallback (minimal in-place centering and sphere radius normalization)
@@ -426,37 +497,32 @@ class WasmEngine {
 
     if (maxRadius > 1e-6) {
       const scale = 1.2 / maxRadius
-      for (let i = 0; i < pos.length; i++) {
-        pos[i] *= scale
-      }
+      for (let i = 0; i < pos.length; i++) pos[i] *= scale
     }
 
     const norm = normals ? new Float32Array(normals) : new Float32Array(pos.length).fill(1)
     const uv = uvs ? new Float32Array(uvs) : new Float32Array((pos.length / 3) * 2).fill(0)
     const vertexCount = pos.length / 3
-    const triangleCount = vertexCount / 3
 
-    return {
-      name,
-      positions: pos,
-      normals: norm,
-      uvs: uv,
-      vertexCount,
-      triangleCount,
-    }
+    return { name, positions: pos, normals: norm, uvs: uv, vertexCount, triangleCount: vertexCount / 3 }
   }
 
   /**
-   * Terminates the worker if active.
+   * Terminates the worker if active and rejects anything in flight.
    */
   public dispose(): void {
-    if (this.worker) {
-      this.worker.terminate()
-      this.worker = null
-    }
+    const w = this.worker
+    this.worker = null
     this.isInitialized = false
     this.initPromise = null
+    this.failures = 0
+    w?.terminate()
+    const pending = [...this.pendingRequests.values()]
     this.pendingRequests.clear()
+    for (const p of pending) {
+      if (p.timer) clearTimeout(p.timer)
+      p.reject(new Error("WasmEngine disposed"))
+    }
   }
 }
 

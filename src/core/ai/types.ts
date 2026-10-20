@@ -23,6 +23,8 @@ export interface AISettings {
   }
   maxAutoFixRetries: number
   visualCritique: boolean
+  /** Persist API keys to localStorage on this device. Off by default: keys then live in memory only. */
+  rememberKeys: boolean
   systemPromptPreset?: string
 }
 

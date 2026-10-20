@@ -228,6 +228,11 @@ export interface RenderToTargetRequest {
   source: { wgsl?: string; glsl?: string }
   width: number
   height: number
+  /**
+   * Current uniform values to render with (e.g. store values incl. `time`/`u_time`). Applied over the adapter's
+   * defaults; names not declared by the shader are ignored. `time`/`u_time` also drive the time uniform.
+   */
+  uniforms?: Record<string, UniformValue>
 }
 
 // ----------------------------------------------------------------------------

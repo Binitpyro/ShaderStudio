@@ -1,10 +1,25 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import type { Node } from "@xyflow/react"
 import type { GraphNodeData } from "@/core/graphCompiler"
+import type { NodePreviewResult, PreviewUniform, compileNodePreview as CompileNodePreview } from "@/core/nodePreviewCompiler"
+import { useProjectStore, type UniformValue } from "@/stores/projectStore"
+import { getActiveAdapter } from "@/adapters/activeAdapter"
+import type { RenderToTargetRequest } from "@/adapters/types"
+import { renderCoordinator } from "@/core/renderCoordinator"
 import { cn } from "@/lib/utils"
 import { Play, Pause, Eye, X } from "lucide-react"
 
 export type PreviewChannel = "rgba" | "rgb" | "r" | "g" | "b" | "a"
+
+/** CSS-pixel edge of the preview; the GPU target is this times devicePixelRatio (capped at 2x). */
+export const PREVIEW_SIZE = 160
+/** Refresh ceiling while playing. */
+export const PREVIEW_MAX_HZ = 14
+const MIN_INTERVAL_MS = 1000 / PREVIEW_MAX_HZ
+const RETRY_MS = 400
+const MAX_RETRIES = 10
+
+type Status = "idle" | "ok" | "none" | "error" | "unavailable"
 
 interface NodePreviewViewportProps {
   node: Node<GraphNodeData>
@@ -12,223 +27,239 @@ interface NodePreviewViewportProps {
   className?: string
 }
 
+function previewPixels(): number {
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1
+  return Math.round(PREVIEW_SIZE * Math.min(2, Math.max(1, dpr)))
+}
+
+const docHidden = () => typeof document !== "undefined" && document.hidden
+
+/** Store values (or the node's default) for every uniform the preview shader declares, plus time. */
+function buildUniforms(specs: PreviewUniform[], store: Record<string, UniformValue>, time: number): Record<string, UniformValue> {
+  const out: Record<string, UniformValue> = { time: { type: "float", value: time }, u_time: { type: "float", value: time } }
+  for (const u of specs) {
+    const v = store[u.sourceName]
+    if (u.bool) out[u.field] = { type: "float", value: (v ? Boolean(v.value) : Boolean(u.defaultValue)) ? 1 : 0 }
+    else out[u.field] = v && v.type !== "texture" ? v : { type: u.type, value: u.defaultValue }
+  }
+  return out
+}
+
+/** Draws a render result into `canvas`, applying the channel filter on a copy (the cached result stays untouched). */
+function drawResult(canvas: HTMLCanvasElement, img: ImageBitmap | ImageData, channel: PreviewChannel) {
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return
+  if (canvas.width !== img.width || canvas.height !== img.height) {
+    canvas.width = img.width
+    canvas.height = img.height
+  }
+  const isData = "data" in img
+  if (channel === "rgba") {
+    if (isData) ctx.putImageData(img, 0, 0)
+    else ctx.drawImage(img, 0, 0)
+    return
+  }
+  let src: ImageData
+  if (isData) src = img
+  else {
+    ctx.drawImage(img, 0, 0)
+    src = ctx.getImageData(0, 0, img.width, img.height)
+  }
+  const out = ctx.createImageData(src.width, src.height)
+  const s = src.data
+  const d = out.data
+  const pick = channel === "r" ? 0 : channel === "g" ? 1 : channel === "b" ? 2 : channel === "a" ? 3 : -1
+  for (let i = 0; i < s.length; i += 4) {
+    if (pick < 0) { d[i] = s[i]; d[i + 1] = s[i + 1]; d[i + 2] = s[i + 2] } // "rgb": drop alpha
+    else { d[i] = d[i + 1] = d[i + 2] = s[i + pick] }
+    d[i + 3] = 255
+  }
+  ctx.putImageData(out, 0, 0)
+}
+
 export function NodePreviewViewport({ node, onClose, className }: NodePreviewViewportProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [isPlaying, setIsPlaying] = useState(true)
   const [channel, setChannel] = useState<PreviewChannel>("rgba")
-  const imgRef = useRef<ImageData | null>(null)
-  const visibleRef = useRef(true)
+  const [status, setStatus] = useState<Status>("idle")
+  const [message, setMessage] = useState("")
+  const [size] = useState(previewPixels)
 
   const nodeType = node.data.type
   const isAnnotation = nodeType === "comment" || nodeType === "frame"
-  // Only the fields the preview draws: depending on the whole `node` re-created renderFrame (and reset the
-  // interval) on every drag/select that produced a new node object.
-  const expression: string | undefined = (node.data as any).expression
-  const geometry: string | undefined = (node.data as any).geometry
 
-  // Rendering logic for isolated preview
-  const renderFrame = useCallback(
-    (time: number) => {
-      const canvas = canvasRef.current
-      if (!canvas) return
-      const ctx = canvas.getContext("2d")
-      if (!ctx) return
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const channelRef = useRef(channel)
+  channelRef.current = channel
+  const mounted = useRef(false)
+  const visibleRef = useRef(true)
+  const inFlight = useRef(false)
+  const pending = useRef(false)
+  const generation = useRef(0)
+  const lastSig = useRef("")
+  const lastImage = useRef<ImageBitmap | ImageData | null>(null)
+  const retries = useRef(0)
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // Loaded lazily: the partial-graph compiler (SDF + math codegen) stays out of the entry chunk.
+  const compiler = useRef<typeof CompileNodePreview | null>(null)
+  const compiled = useRef<{ deps: unknown[]; result: NodePreviewResult } | null>(null)
 
-      const width = canvas.width
-      const height = canvas.height
+  const compile = useCallback((): NodePreviewResult | null => {
+    if (!compiler.current) return null
+    const st = useProjectStore.getState()
+    const n = nodeRef.current
+    const deps = [n, st._graphNodes, st._graphEdges, st.wgslSource, st.glslSource]
+    const hit = compiled.current
+    if (hit && hit.deps.every((d, i) => d === deps[i])) return hit.result
+    const nodes = st._graphNodes.some((x) => x.id === n.id) ? st._graphNodes.map((x) => (x.id === n.id ? n : x)) : [...st._graphNodes, n]
+    const result = compiler.current(n.id, nodes, st._graphEdges, { material: { wgsl: st.wgslSource, glsl: st.glslSource } })
+    compiled.current = { deps, result }
+    return result
+  }, [])
 
-      // Clear canvas
-      ctx.fillStyle = "#121316"
-      ctx.fillRect(0, 0, width, height)
-
-      // Draw subtle background grid
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)"
-      ctx.lineWidth = 1
-      for (let x = 0; x < width; x += 16) {
-        ctx.beginPath()
-        ctx.moveTo(x, 0)
-        ctx.lineTo(x, height)
-        ctx.stroke()
+  /**
+   * One preview request: at most one in flight (a "change" arriving meanwhile is coalesced into one follow-up, ticks are
+   * dropped), never while hidden, and skipped when a "change" would render exactly what is already on screen.
+   */
+  const run = useCallback((reason: "change" | "tick") => {
+    if (!mounted.current || !visibleRef.current || docHidden()) return
+    if (inFlight.current) {
+      if (reason === "change") pending.current = true
+      return
+    }
+    const result = compile()
+    if (!result) return
+    if (result.status === "none") { setStatus("none"); return }
+    if (result.status === "error") { setStatus("error"); setMessage(result.error); return }
+    const adapter = getActiveAdapter()
+    if (!adapter?.renderToTarget) {
+      setStatus("unavailable")
+      if (retries.current < MAX_RETRIES) {
+        retries.current++
+        clearTimeout(retryTimer.current)
+        retryTimer.current = setTimeout(() => run("change"), RETRY_MS)
       }
-      for (let y = 0; y < height; y += 16) {
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(width, y)
-        ctx.stroke()
+      return
+    }
+    const st = useProjectStore.getState()
+    const uniforms = buildUniforms(result.uniforms, st.uniformValues, renderCoordinator.getPlaybackTime())
+    const source: RenderToTargetRequest["source"] = adapter.backendType === "threejs"
+      ? { glsl: result.source.glslThree || undefined }
+      : { wgsl: result.source.wgsl || undefined, glsl: result.source.glsl || undefined }
+    const { time: _t, u_time: _ut, ...stable } = uniforms
+    const sig = JSON.stringify([adapter.backendType, source, stable])
+    if (reason === "change" && sig === lastSig.current && lastImage.current) return
+
+    inFlight.current = true
+    const gen = generation.current
+    const request: RenderToTargetRequest = { nodeId: nodeRef.current.id, source, width: size, height: size, uniforms }
+    void (async () => {
+      let img: ImageBitmap | ImageData | null = null
+      let failure = ""
+      try { img = await adapter.renderToTarget!(request) } catch (err) { failure = err instanceof Error ? err.message : String(err) }
+      inFlight.current = false
+      if (mounted.current && gen === generation.current) {
+        if (img) {
+          retries.current = 0
+          lastSig.current = sig
+          lastImage.current = img
+          const canvas = canvasRef.current
+          if (canvas) drawResult(canvas, img, channelRef.current)
+          setStatus("ok")
+        } else {
+          lastSig.current = ""
+          setStatus("error")
+          setMessage(failure || "The shader failed to compile on this backend.")
+        }
       }
-
-      let imgData = imgRef.current
-      if (!imgData || imgData.width !== width || imgData.height !== height) {
-        imgData = imgRef.current = ctx.createImageData(width, height)
-      } else {
-        imgData.data.fill(0)
+      if (pending.current) {
+        pending.current = false
+        run("change")
       }
-      const data = imgData.data
+    })()
+  }, [compile, size])
 
-      if (nodeType === "math_expression") {
-        // Evaluate math formula over [0, 1] domain
-        const expr = (expression || "sin(uv.x * 10.0) * 0.5 + 0.5").toLowerCase()
-        const freq = expr.includes("20") ? 20.0 : expr.includes("5") ? 5.0 : 10.0
-        for (let py = 0; py < height; py++) {
-          const v = 1.0 - py / height
-          for (let px = 0; px < width; px++) {
-            const u = px / width
-            const idx = (py * width + px) * 4
+  useEffect(() => {
+    let alive = true
+    void import("@/core/nodePreviewCompiler").then((m) => {
+      if (!alive) return
+      compiler.current = m.compileNodePreview
+      run("change")
+    })
+    return () => { alive = false }
+  }, [run])
 
-            // Generate procedural domain mapping
-            const t = isPlaying ? time * 0.002 : 1.0
-            const val = Math.sin(u * freq + t) * Math.cos(v * freq + t) * 0.5 + 0.5
-            let r = val
-            let g = Math.sin(val * Math.PI)
-            let b = 1.0 - val
-            let a = 1.0
+  // Selection: drop everything belonging to the previous node.
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      generation.current++
+      clearTimeout(retryTimer.current)
+    }
+  }, [])
+  useEffect(() => {
+    generation.current++
+    lastSig.current = ""
+    lastImage.current = null
+    retries.current = 0
+    setStatus("idle")
+  }, [node.id])
 
-            if (channel === "r") { g = r; b = r }
-            else if (channel === "g") { r = g; b = g }
-            else if (channel === "b") { r = b; g = b }
-            else if (channel === "a") { r = a; g = a; b = a }
+  // Once on selection and whenever this node's data changes (also covers channel-independent re-renders).
+  useEffect(() => {
+    if (!isAnnotation) run("change")
+  }, [node.id, node.data, isAnnotation, run])
 
-            data[idx] = Math.max(0, Math.min(255, Math.floor(r * 255)))
-            data[idx + 1] = Math.max(0, Math.min(255, Math.floor(g * 255)))
-            data[idx + 2] = Math.max(0, Math.min(255, Math.floor(b * 255)))
-            data[idx + 3] = 255
-          }
-        }
-        ctx.putImageData(imgData, 0, 0)
-      } else if (nodeType === "material" || nodeType === "subgraph") {
-        // Render 3D preview sphere with studio lighting
-        const cx = width / 2
-        const cy = height / 2
-        const radius = Math.min(width, height) * 0.38
-        const t = isPlaying ? time * 0.0015 : 0.5
-
-        // Light direction
-        const lx = Math.cos(t)
-        const ly = -0.5
-        const lz = Math.sin(t)
-        const len = Math.sqrt(lx * lx + ly * ly + lz * lz)
-        const nlx = lx / len
-        const nly = ly / len
-        const nlz = lz / len
-
-        for (let py = 0; py < height; py++) {
-          const dy = (py - cy) / radius
-          for (let px = 0; px < width; px++) {
-            const dx = (px - cx) / radius
-            const distSq = dx * dx + dy * dy
-            const idx = (py * width + px) * 4
-
-            if (distSq <= 1.0) {
-              const dz = Math.sqrt(1.0 - distSq)
-              // Surface normal
-              const nx = dx
-              const ny = dy
-              const nz = dz
-
-              // Diffuse N dot L
-              const diff = Math.max(0, nx * nlx + ny * nly + nz * nlz)
-              // Specular
-              const hx = nlx
-              const hy = nly
-              const hz = nlz + 1.0
-              const hlen = Math.sqrt(hx * hx + hy * hy + hz * hz)
-              const spec = Math.pow(Math.max(0, (nx * hx + ny * hy + nz * hz) / hlen), 32)
-              // Fresnel rim
-              const fresnel = Math.pow(1.0 - nz, 3.0)
-
-              let r = 0.15 + diff * 0.7 + spec * 0.6 + fresnel * 0.4
-              let g = 0.2 + diff * 0.8 + spec * 0.6 + fresnel * 0.6
-              let b = 0.35 + diff * 0.95 + spec * 0.6 + fresnel * 0.9
-              let a = 1.0
-
-              if (channel === "r") { g = r; b = r }
-              else if (channel === "g") { r = g; b = g }
-              else if (channel === "b") { r = b; g = b }
-              else if (channel === "a") { r = a; g = a; b = a }
-
-              data[idx] = Math.max(0, Math.min(255, Math.floor(r * 255)))
-              data[idx + 1] = Math.max(0, Math.min(255, Math.floor(g * 255)))
-              data[idx + 2] = Math.max(0, Math.min(255, Math.floor(b * 255)))
-              data[idx + 3] = 255
-            }
-          }
-        }
-        ctx.putImageData(imgData, 0, 0)
-      } else if (nodeType === "mesh") {
-        // Draw 3D wireframe mesh preview
-        const cx = width / 2
-        const cy = height / 2
-        const t = isPlaying ? time * 0.001 : 0.8
-        const geom = geometry || "torus_knot"
-
-        ctx.strokeStyle = "#38bdf8"
-        ctx.lineWidth = 1.5
-
-        const segments = geom === "cube" ? 8 : 16
-        for (let i = 0; i < segments; i++) {
-          const theta = (i / segments) * Math.PI * 2 + t
-          const r1 = Math.min(width, height) * 0.3
-          const x1 = cx + Math.cos(theta) * r1
-          const y1 = cy + Math.sin(theta) * r1 * 0.5
-          ctx.beginPath()
-          ctx.arc(x1, y1, geom === "sphere" ? 12 : 24, 0, Math.PI * 2)
-          ctx.stroke()
-        }
-      } else if (nodeType === "audio") {
-        // Audio waveform & FFT spectrum
-        ctx.fillStyle = "#10b981"
-        const barCount = 32
-        const barWidth = width / barCount
-        const t = isPlaying ? time * 0.005 : 1.0
-
-        for (let i = 0; i < barCount; i++) {
-          const h = (Math.sin(i * 0.3 + t) * 0.5 + 0.5) * (height * 0.7)
-          ctx.fillRect(i * barWidth + 1, height - h, barWidth - 2, h)
-        }
-      } else {
-        // Default gradient pattern for textures, compute, custom
-        const t = isPlaying ? time * 0.001 : 0.5
-        for (let py = 0; py < height; py += 2) {
-          const v = py / height
-          for (let px = 0; px < width; px += 2) {
-            const u = px / width
-            const idx = (py * width + px) * 4
-            const r = Math.sin(u * 5.0 + t) * 0.5 + 0.5
-            const g = Math.cos(v * 5.0 + t) * 0.5 + 0.5
-            const b = Math.sin((u + v) * 5.0 + t) * 0.5 + 0.5
-
-            data[idx] = Math.floor(r * 255)
-            data[idx + 1] = Math.floor(g * 255)
-            data[idx + 2] = Math.floor(b * 255)
-            data[idx + 3] = 255
-          }
-        }
-        ctx.putImageData(imgData, 0, 0)
-      }
-    },
-    [nodeType, expression, geometry, isPlaying, channel]
-  )
-
-  // One frame on selection/data/channel change; ~10Hz timer only while playing AND visible (no rAF).
+  // Upstream graph, shader source, uniform value or backend changes: one debounced refresh, even while paused.
   useEffect(() => {
     if (isAnnotation) return
-    renderFrame(performance.now())
-    if (!isPlaying) return
-    const timer = setInterval(() => {
-      if (visibleRef.current && !document.hidden) renderFrame(performance.now())
-    }, 100)
-    return () => clearInterval(timer)
-  }, [renderFrame, isAnnotation, isPlaying])
+    let t: ReturnType<typeof setTimeout> | undefined
+    const unsub = useProjectStore.subscribe((s, p) => {
+      if (s._graphNodes === p._graphNodes && s._graphEdges === p._graphEdges && s.wgslSource === p.wgslSource && s.glslSource === p.glslSource && s.uniformValues === p.uniformValues && s.activeBackend === p.activeBackend) return
+      clearTimeout(t)
+      t = setTimeout(() => run("change"), 120)
+    })
+    return () => { clearTimeout(t); unsub() }
+  }, [isAnnotation, run])
 
+  // Playing: the coordinator frame hook drives refreshes at <= PREVIEW_MAX_HZ (no own rAF, nothing registered while paused).
+  useEffect(() => {
+    if (isAnnotation || !isPlaying) return
+    const id = `node-preview:${node.id}`
+    let last = 0
+    renderCoordinator.registerPreRenderHook(id, () => {
+      if (!renderCoordinator.getIsPlaying() || !visibleRef.current || docHidden()) return
+      const now = performance.now()
+      if (now - last < MIN_INTERVAL_MS) return
+      last = now
+      run("tick")
+    })
+    return () => renderCoordinator.unregisterPreRenderHook(id)
+  }, [isAnnotation, isPlaying, node.id, run])
+
+  // Visibility: refresh once when scrolled/shown back into view.
   useEffect(() => {
     const el = canvasRef.current
     if (!el || typeof IntersectionObserver === "undefined") return
     const io = new IntersectionObserver((entries) => {
-      visibleRef.current = entries[entries.length - 1]?.isIntersecting ?? true
+      const visible = entries[entries.length - 1]?.isIntersecting ?? true
+      const was = visibleRef.current
+      visibleRef.current = visible
+      if (visible && !was) run("change")
     })
     io.observe(el)
     return () => io.disconnect()
-  }, [isAnnotation])
+  }, [isAnnotation, run])
+
+  // Channel switch re-filters the last result; no GPU request.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (canvas && lastImage.current) drawResult(canvas, lastImage.current, channel)
+  }, [channel])
+
+  const overlay = status === "none" ? "No preview" : status === "unavailable" ? "Preview unavailable" : status === "error" ? "Preview failed" : null
 
   return (
     <div
@@ -275,13 +306,20 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
           Annotation node — no isolated shader output.
         </div>
       ) : (
-        <div className="relative aspect-[4/3] w-full bg-[#121316] overflow-hidden flex items-center justify-center">
+        <div data-testid="node-preview" data-preview-status={status} className="relative h-40 w-full bg-[#121316] overflow-hidden flex items-center justify-center">
           <canvas
             ref={canvasRef}
-            width={240}
-            height={180}
-            className="w-full h-full object-contain"
+            width={size}
+            height={size}
+            className={cn("h-full w-full object-contain", overlay && "opacity-0")}
           />
+
+          {overlay && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 px-3 text-center text-xs text-muted-foreground" title={status === "error" ? message : undefined}>
+              <span>{overlay}</span>
+              {status === "error" && message ? <span className="max-w-full truncate text-[10px] text-destructive/80">{message}</span> : null}
+            </div>
+          )}
 
           {/* Bottom Channel Selector Overlay */}
           <div className="absolute bottom-1.5 left-2 flex items-center gap-1 bg-black/60 backdrop-blur-xs px-1.5 py-0.5 rounded border border-white/10 text-[9px] font-mono">
@@ -304,7 +342,7 @@ export function NodePreviewViewport({ node, onClose, className }: NodePreviewVie
 
           {/* Resolution Badge */}
           <div className="absolute top-1.5 right-2 bg-black/50 px-1 py-0.5 rounded text-[8px] font-mono text-muted-foreground">
-            240×180
+            {size}×{size}
           </div>
         </div>
       )}

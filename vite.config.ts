@@ -10,4 +10,6 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Cargo writes locked .dll/.pdb files under target/ while building; watching them crashes the dev server on Windows.
+  server: { watch: { ignored: ["**/target/**"] } },
 })

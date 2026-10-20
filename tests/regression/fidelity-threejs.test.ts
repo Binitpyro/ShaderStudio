@@ -271,6 +271,19 @@ describe("ThreeJSAdapter fidelity layer (fleet w4)", () => {
     expect(await adapter.renderToTarget({ nodeId: "n", source: { wgsl: "x" }, width: 4, height: 4 })).toBeNull()
   })
 
+  it("renderToTarget applies the supplied uniform values and time instead of the defaults", async () => {
+    a.renderer.readRenderTargetPixels = vi.fn((_t: unknown, _x: number, _y: number, _w: number, _h: number, buf: Uint8Array) => buf.fill(1))
+    const frag = "uniform float u_time;\nuniform float pu_amount;\nuniform vec3 pu_tint;\nvoid main() { gl_FragColor = vec4(pu_tint * pu_amount, 1.0); }"
+    await adapter.renderToTarget({
+      nodeId: "u", source: { glsl: frag }, width: 8, height: 8,
+      uniforms: { pu_amount: { type: "float", value: 0.75 }, pu_tint: { type: "vec3", value: [1, 0.5, 0.25] }, time: { type: "float", value: 2.5 } },
+    })
+    const mat = [...a.previewMaterials.values()].at(-1)
+    expect(mat.uniforms.pu_amount.value).toBe(0.75)
+    expect(mat.uniforms.pu_tint.value.toArray()).toEqual([1, 0.5, 0.25])
+    expect(mat.uniforms.u_time.value).toBe(2.5)
+  })
+
   it("reports unsupported settings and the effective shadow filter via getFidelityCapabilities", () => {
     expect(adapter.getFidelityCapabilities()).toEqual({ effectiveShadowFilter: "pcf", unsupported: ["ssao.intensity", "dof.bokehShape", "ssr.iblBlend"] })
   })

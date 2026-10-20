@@ -21,7 +21,7 @@ pub fn normalize_geometry(
     uvs: Option<Vec<f32>>,
     name: &str,
 ) -> Result<MeshOutput, String> {
-    if positions.is_empty() || positions.len() % 3 != 0 {
+    if positions.is_empty() || !positions.len().is_multiple_of(3) {
         return Err("Positions must be non-empty and a multiple of 3 floats".to_string());
     }
 

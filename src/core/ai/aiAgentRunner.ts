@@ -124,6 +124,17 @@ export async function runAIShaderGeneration(
 
       // If compilation failed
       compileStep.status = "error"
+      if (feedback.status === "unverified") {
+        // No compile report arrived: never call it success, and there is no error text to feed an auto-fix.
+        compileStep.errorMessages = ["Compile unverified: the GPU adapter did not report a result in time."]
+        compileStep.description = compileStep.errorMessages[0]
+        callbacks?.onStepUpdate?.(compileStep)
+        session.status = "error"
+        session.errorMessage = "Shader compile could not be verified (adapter timed out); not treated as success."
+        session.completedAt = performance.now()
+        callbacks?.onComplete?.(session)
+        return session
+      }
       const errorStrings = feedback.errors.map((e) =>
         e.line ? `Line ${e.line}${e.column ? `:${e.column}` : ""}: ${e.message}` : e.message
       )
@@ -183,15 +194,18 @@ export async function runAIShaderGeneration(
         if (!critiqueResponse.includes("AESTHETIC_APPROVED")) {
           const refinedCode = extractShaderCode(critiqueResponse, backend)
           if (refinedCode && refinedCode.length > 50 && refinedCode !== currentShaderCode) {
-            currentShaderCode = refinedCode
             const refinedFeedback = await executeShaderLocally({
               id: `${sessionId}_refined`,
-              source: currentShaderCode,
+              source: refinedCode,
               backend,
               captureSnapshot: true,
             })
             if (refinedFeedback.status === "success") {
+              currentShaderCode = refinedCode
               currentScreenshot = refinedFeedback.screenshotBase64 || currentScreenshot
+            } else {
+              // Refinement broke the shader: put the last good version back on screen.
+              await executeShaderLocally({ id: `${sessionId}_restore`, source: currentShaderCode, backend, captureSnapshot: false })
             }
           }
         }
@@ -216,9 +230,8 @@ export async function runAIShaderGeneration(
     session.finalScreenshotBase64 = currentScreenshot
     session.completedAt = performance.now()
 
-    // Sync to store
-    store.setShaderSource(currentShaderCode)
-    store.triggerRecompile()
+    // The last executeShaderLocally already put this source in the store and compiled it once; no second recompile.
+    useProjectStore.getState().setShaderSource(currentShaderCode)
 
     callbacks?.onComplete?.(session)
     return session

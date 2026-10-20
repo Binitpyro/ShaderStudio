@@ -374,6 +374,13 @@ describe("WebGPU fidelity layer (fleet w4)", () => {
       expect(subs[0].copies).toHaveLength(1)
     })
 
+    it("renders with the supplied uniform values (they win over the store seed)", async () => {
+      await adapter.renderToTarget!({ ...req(), uniforms: { color: { type: "color", value: [0.25, 0.5, 0.75] } } })
+      const buf = device.createdBuffers.filter((b: any) => b.label === "ShaderStudio_DynamicUniformBuffer").at(-1)
+      const f = new Float32Array(buf.data.buffer, buf.data.byteOffset + 64, 3) // `color` follows the 64-byte mvp
+      expect([f[0], f[1], f[2]]).toEqual([0.25, 0.5, 0.75])
+    })
+
     it("reuses the pipeline per source and compiles a new one for a new source", async () => {
       await adapter.renderToTarget!(req())
       const n = device.createdPipelines.length

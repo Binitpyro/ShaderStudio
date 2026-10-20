@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest"
-import { SHADER_TEMPLATES } from "../templates"
+import { SHADER_TEMPLATES, normalizeTemplate } from "../templates"
+
+describe("normalizeTemplate migration", () => {
+  it("maps the legacy single shaderSource field to glsl", () => {
+    const t = normalizeTemplate({ id: "x", name: "x", category: "Atmospheric", description: "d", geometry: "plane", shaderSource: "void main(){}" })
+    expect(t.glsl).toBe("void main(){}")
+    expect(t.wgsl).toBe("")
+    expect(t.backend).toBe("threejs")
+  })
+})
 
 describe("SHADER_TEMPLATES", () => {
   it("contains at least 6 production-grade curated templates", () => {
@@ -23,7 +32,9 @@ describe("SHADER_TEMPLATES", () => {
       expect(tmpl.description).toBeTruthy()
       expect(["threejs", "webgl2", "webgpu"]).toContain(tmpl.backend)
       expect(validGeometries).toContain(tmpl.geometry)
-      expect(tmpl.shaderSource.trim().length).toBeGreaterThan(100)
+      expect(tmpl.glsl.trim().length).toBeGreaterThan(100)
+      expect(tmpl.wgsl.trim().length).toBeGreaterThan(100)
+      expect(tmpl.shaderSource).toBe(tmpl.glsl)
       expect(typeof tmpl.uniforms).toBe("object")
     }
   })
