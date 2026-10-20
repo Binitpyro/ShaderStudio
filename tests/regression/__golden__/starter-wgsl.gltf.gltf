@@ -1,0 +1,46 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "ShaderStudio-glTF-Exporter"
+  },
+  "extensionsUsed": [
+    "KHR_materials_pbrSpecularGlossiness"
+  ],
+  "materials": [
+    {
+      "name": "ShaderStudio_Material",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.4,
+          0.6,
+          0.9,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.35
+      },
+      "extras": {
+        "shaderStudio": {
+          "language": "glsl",
+          "fragment": "#version 300 es\n\nprecision highp float;\nprecision highp int;\n\nstruct VertexInput {\n    vec3 position;\n};\nstruct VertexOutput {\n    vec4 clip_position;\n    vec3 world_pos;\n    vec2 uv;\n};\nuniform float u_time;\nuniform float pulseSpeed;\nuniform float fresnelPower;\nuniform float iridescence;\nuniform vec3 color;\nuniform float roughness;\nuniform float u_audio_bass;\nuniform float u_audio_mid;\nuniform float u_audio_treble;\nuniform float u_audio_beat;\n\nsmooth in vec3 v_world_pos;\nsmooth in vec2 v_uv;\nlayout(location = 0) out vec4 fragColor;\n\nvec3 palette(float t) {\n    vec3 a = vec3(0.5, 0.5, 0.5);\n    vec3 b = vec3(0.5, 0.5, 0.5);\n    vec3 c = vec3(1.0, 1.0, 1.0);\n    vec3 d = vec3(0.0, 0.33, 0.67);\n    return (a + (b * cos((6.28318 * ((c * t) + d)))));\n}\n\nvoid main() {\n    VertexOutput input_1 = VertexOutput(gl_FragCoord, v_world_pos, v_uv);\n    vec3 normal = vec3(0.0);\n    vec3 dX = dFdx(input_1.world_pos);\n    vec3 dY = dFdy(input_1.world_pos);\n    vec3 crossNorm = cross(dX, dY);\n    normal = ((length(crossNorm) > 1e-5) ? normalize(crossNorm) : vec3(0.0, 1.0, 0.0));\n    vec3 viewDir = normalize((vec3(0.0, 2.0, 4.0) - input_1.world_pos));\n    vec3 _e23 = normal;\n    if ((dot(_e23, viewDir) < 0.0)) {\n        vec3 _e27 = normal;\n        normal = -(_e27);\n    }\n    vec3 lightDir = normalize(vec3(1.0, 2.0, 1.5));\n    vec3 halfVec = normalize((lightDir + viewDir));\n    vec3 _e36 = normal;\n    float NdotV = clamp(dot(_e36, viewDir), 0.0, 1.0);\n    float _e49 = fresnelPower;\n    float fresnel = pow(clamp((1.0 - NdotV), 0.0, 1.0), max(0.1, _e49));\n    vec3 _e52 = normal;\n    float NdotH = clamp(dot(_e52, halfVec), 0.0, 1.0);\n    float _e61 = roughness;\n    float shininess = mix(128.0, 8.0, clamp(_e61, 0.0, 1.0));\n    float spec = pow(NdotH, shininess);\n    float _e69 = u_time;\n    float _e72 = pulseSpeed;\n    float wavePhase = (((_e69 * _e72) * 0.5) + (input_1.world_pos.y * 2.0));\n    float _e94 = u_audio_mid;\n    float thinFilm = ((pow(clamp((1.0 - NdotV), 0.0, 1.0), 2.0) + (sin(wavePhase) * 0.15)) + (_e94 * 0.3));\n    float _e100 = iridescence;\n    vec3 _e102 = palette((thinFilm * _e100));\n    vec3 _e104 = normal;\n    float diff = max(0.25, ((dot(_e104, lightDir) * 0.55) + 0.45));\n    vec3 _e113 = color;\n    vec3 base = (_e113 * diff);\n    float _e117 = u_audio_beat;\n    float audioBoost = (1.0 + (_e117 * 0.5));\n    vec3 rgb = (((mix(base, _e102, 0.65) + vec3((spec * 1.8))) + ((_e102 * fresnel) * 1.6)) * audioBoost);\n    fragColor = vec4(rgb, 1.0);\n    return;\n}\n"
+        }
+      },
+      "extensions": {
+        "KHR_materials_pbrSpecularGlossiness": {
+          "diffuseFactor": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "specularFactor": [
+            1,
+            1,
+            1
+          ],
+          "glossinessFactor": 0.5
+        }
+      }
+    }
+  ]
+}

@@ -240,13 +240,52 @@ void main() {
       expect(transpileToUnityHLSL({ shaderSource: comments }).length).toBeGreaterThan(0)
     })
 
-    // fleet: fixed in W6 (keyword replacement is a bare substring regex: user_u_time -> user__Time.y)
-    it.fails("does not mangle identifiers that merely contain a keyword (user_u_time)", () => {
+    it("does not mangle identifiers that merely contain a keyword (user_u_time)", () => {
       const hlsl = transpileToUnityHLSL({
         shaderSource: "void main() { float user_u_time = 1.0; fragColor = vec4(user_u_time); }",
         parsedUniforms: [],
       })
       expect(hlsl).toContain("user_u_time")
+    })
+
+    it("rewrites whole identifiers only: u_time2, my_u_time, comments, strings, members and local 'time'", () => {
+      const src = [
+        "// u_time in a comment stays; so does vec3 in /* block u_time */",
+        "void main() {",
+        "  float u_time2 = 2.0; float my_u_time = u_time2;",
+        "  float t = u_time;",
+        "  float time = 3.0;",
+        "  float k = time * 2.0;",
+        '  string s = "u_time vec2";',
+        "  vec2 a = vec2(my_u_time, ivec2(1, 2).x);",
+        "  fragColor = vec4(t, a, my_u_time + k);",
+        "}",
+      ].join("\n")
+      const hlsl = transpileToUnityHLSL({ shaderSource: src, parsedUniforms: [] })
+      expect(hlsl).toContain("u_time2")
+      expect(hlsl).toContain("my_u_time")
+      expect(hlsl).not.toContain("my__Time")
+      expect(hlsl).not.toContain("_Time.y2")
+      expect(hlsl).toContain("float t = _Time.y;")
+      expect(hlsl).toContain("// u_time in a comment stays; so does vec3 in /* block u_time */")
+      expect(hlsl).toContain('"u_time vec2"')
+      expect(hlsl).toContain("float time = 3.0;") // a local named like a built-in is not the engine time
+      expect(hlsl).toContain("float k = time * 2.0;")
+      expect(hlsl).toContain("int2(1, 2)")
+      expect(hlsl).not.toContain("ifloat2")
+      const godot = transpileToGodotShader({ shaderSource: src, parsedUniforms: [] })
+      expect(godot).toContain("float t = TIME;")
+      expect(godot).toContain("u_time2")
+      expect(godot).toContain("float k = time * 2.0;")
+      const toy = transpileToShadertoy({ shaderSource: src, parsedUniforms: [] })
+      expect(toy).toContain("float t = iTime;")
+      expect(toy).toContain("my_u_time")
+      expect(toy).not.toContain("my_iTime")
+    })
+
+    it("does not rewrite member accesses (obj.time / light.u_time)", () => {
+      const hlsl = transpileToUnityHLSL({ shaderSource: "void main() { fragColor = vec4(s.time, s.u_time, u_time, 1.0); }", parsedUniforms: [] })
+      expect(hlsl).toContain("s.time, s.u_time, _Time.y")
     })
   })
 

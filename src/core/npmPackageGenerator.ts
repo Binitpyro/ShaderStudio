@@ -1,4 +1,6 @@
 import { createZipArchive, type ZipFileInput } from "@/utils/zipBuilder"
+import type { ParsedUniform, UniformValue } from "@/stores/projectStore"
+import { buildThreeVertexShader, prepareThreeFragment, threeUniformEntries } from "./r3fExporter"
 
 export interface NpmPackageOptions {
   version?: string
@@ -6,6 +8,9 @@ export interface NpmPackageOptions {
   author?: string
   license?: string
   threeVersion?: string
+  /** Extra uniforms to initialise on the material (u_time / u_resolution are always present). */
+  uniforms?: ParsedUniform[]
+  uniformValues?: Record<string, UniformValue>
 }
 
 export interface NpmPackageResult {
@@ -45,16 +50,19 @@ export function generateNpmPackage(
     license,
   }
 
+  // three.js wants no `#version` line / `out vec4` (it adds its own); the vertex shader must feed the fragment's varyings.
+  const fragment = prepareThreeFragment(shaderSource)
+  const vertex = buildThreeVertexShader(fragment)
+  const extraUniforms = threeUniformEntries(options?.uniforms, options?.uniformValues)
+    .map(([k, v]) => `\n      ${k}: { value: ${v} },`)
+    .join("")
+
   const indexTs = `
 import * as THREE from 'three';
 
-export const shaderSource = ${JSON.stringify(shaderSource)};
+export const shaderSource = ${JSON.stringify(fragment)};
 
-export const defaultVertexShader = \`varying vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}\`;
+export const defaultVertexShader = ${JSON.stringify(vertex)};
 
 export interface MaterialUniforms {
   time: number;
@@ -67,7 +75,7 @@ export function createMaterial(renderer: any): THREE.ShaderMaterial {
     fragmentShader: shaderSource,
     uniforms: {
       u_time: { value: 0 },
-      u_resolution: { value: new THREE.Vector2(1920, 1080) },
+      u_resolution: { value: new THREE.Vector2(1920, 1080) },${extraUniforms}
     },
   });
 }

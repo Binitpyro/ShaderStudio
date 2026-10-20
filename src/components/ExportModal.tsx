@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import { useDialogA11y } from "@/lib/useDialogA11y"
 import { useProjectStore } from "@/stores/projectStore"
 import { Badge, Button, IconButton } from "@/components/ui"
@@ -18,16 +18,8 @@ import {
   Package,
 } from "lucide-react"
 import { bakePbrMaps, type PbrBakeResult, type PbrResolution, type PbrMapItem } from "@/core/textureBaker"
-import {
-  transpileToUnityHLSL,
-  transpileToGodotShader,
-  transpileToShadertoy,
-  transpileToUnrealHLSL,
-  transpileToBlenderOSL,
-  createGltfBundle,
-  createNpmPackageZip,
-  generateR3FExport,
-} from "@/core/engineTranspiler"
+// The exporters (and, lazily through them, the wasm engine) load with this lazily-mounted modal, never with the app entry.
+import { generateExport, createNpmPackageZip, resolveGlslSource, type ExportTarget, type ExportResult, type ExportGeometry } from "@/core/engineTranspiler"
 import { viewportCapture } from "@/utils/frameCapture"
 
 interface ExportModalProps {
@@ -35,17 +27,34 @@ interface ExportModalProps {
   onClose: () => void
 }
 
+type ExportTab = "r3f" | "html" | "raw" | "pbr" | "engine"
+type EngineTarget = "unity" | "godot" | "unreal" | "osl" | "gltf" | "shadertoy"
+
+/** Small stable string hash (djb2) so the memo key doesn't hold whole sources. */
+function hashString(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36) + ":" + s.length
+}
+
+const DEBOUNCE_MS = 250
+const CACHE_LIMIT = 40
+
+type View = { status: "loading" } | { status: "ready"; code: string; via: string } | { status: "error"; error: string; line?: number }
+
 export function ExportModal({ isOpen, onClose }: ExportModalProps) {
   const rawSource = useProjectStore((state) => state.shaderSource)
+  const wgslSource = useProjectStore((state) => state.wgslSource)
   const glslSource = useProjectStore((state) => state.glslSource)
   const activeBackend = useProjectStore((state) => state.activeBackend)
-  const liveValues = useProjectStore((state) => state.uniformValues)
-  const liveUniforms = useProjectStore((state) => state.parsedUniforms)
+  const uniformValues = useProjectStore((state) => state.uniformValues)
+  const parsedUniforms = useProjectStore((state) => state.parsedUniforms)
 
-  const [activeTab, setActiveTab] = useState<"r3f" | "html" | "raw" | "pbr" | "engine">("r3f")
-  const [engineTarget, setEngineTarget] = useState<"unity" | "godot" | "unreal" | "osl" | "gltf" | "shadertoy">("unity")
+  const [activeTab, setActiveTab] = useState<ExportTab>("r3f")
+  const [engineTarget, setEngineTarget] = useState<EngineTarget>("unity")
   const [r3fFormat, setR3fFormat] = useState<"drei" | "component">("drei")
   const [copied, setCopied] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(copyTimer.current), [])
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -61,262 +70,72 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
   const [isBaking, setIsBaking] = useState(false)
   const [bakeError, setBakeError] = useState<string | null>(null)
 
-  // Only the selected target is generated, from debounced inputs, so slider ticks don't run every
-  // transpiler. GLSL-based targets read the GLSL slot (under WebGPU shaderSource is WGSL).
-  const [deb, setDeb] = useState({ glsl: glslSource, parsedUniforms: liveUniforms, uniformValues: liveValues })
-  useEffect(() => {
-    const t = setTimeout(() => setDeb({ glsl: glslSource, parsedUniforms: liveUniforms, uniformValues: liveValues }), 250)
-    return () => clearTimeout(t)
-  }, [glslSource, liveUniforms, liveValues])
-  const shaderSource = deb.glsl
-  const { parsedUniforms, uniformValues } = deb
-
-  // 1. Generate React Three Fiber Component Code
-  const r3fCode = (): string => {
-    const glslFrag = shaderSource || `precision highp float; out vec4 fragColor; void main() { fragColor = vec4(1.0); }`
-    const defaultVert = `
-varying vec2 vUv;
-varying vec3 vNormal;
-void main() {
-  vUv = uv;
-  vNormal = normal;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}`
-
-    const propTypes = parsedUniforms
-      .filter((u) => u.name !== "u_time" && u.name !== "u_resolution")
-      .map((u) => `  ${u.name}?: ${u.type === "vec3f" ? "[number, number, number]" : u.type === "vec4f" ? "[number, number, number, number]" : u.type === "bool" ? "boolean" : "number"}`)
-      .join("\n")
-
-    const uniformInits = parsedUniforms
-      .map((u) => {
-        const val = uniformValues[u.name]?.value ?? (u.type === "vec3f" ? [0.4, 0.6, 0.9] : 0)
-        return `    ${u.name}: { value: ${JSON.stringify(val)} },`
-      })
-      .join("\n")
-
-    return `// =====================================================================
-// Generated by Shader Studio (https://github.com/Binitpyro/ShaderStudio)
-// React Three Fiber (R3F) Component
-// =====================================================================
-import { useRef, useMemo, useEffect } from "react"
-import { useFrame } from "@react-three/fiber"
-import * as THREE from "three"
-
-export interface CustomShaderMeshProps {
-${propTypes || "  // No custom uniforms"}
-  [key: string]: any
-}
-
-const VERTEX_SHADER = \`${defaultVert.trim()}\`
-
-const FRAGMENT_SHADER = \`${glslFrag.trim()}\`
-
-export function CustomShaderMesh(props: CustomShaderMeshProps) {
-  const materialRef = useRef<THREE.ShaderMaterial>(null)
-
-  const uniforms = useMemo(
-    () => ({
-      u_time: { value: 0 },
-      u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-${uniformInits}
-    }),
-    []
+  // Only the selected target is generated. The tab/target decides what to build, a hash of the inputs decides whether
+  // it must be rebuilt, and a debounce keeps a slider drag from running a transpile per tick. Nothing runs while closed.
+  const target: ExportTarget | null =
+    activeTab === "r3f" ? (r3fFormat === "drei" ? "r3f" : "r3f-component") : activeTab === "html" ? "html" : activeTab === "engine" ? engineTarget : null
+  // baked maps only reach the glTF export, so they are hashed (once per bake) only when that target is selected
+  const bakedKey = useMemo(
+    () => (target === "gltf" && bakeResult ? hashString(Object.values(bakeResult.maps).map((m) => m.dataUrl).join("|")) : ""),
+    [target, bakeResult],
+  )
+  const meshData = useProjectStore((state) => state._graphNodes.find((n) => n.type === "mesh")?.data) as { geometry?: ExportGeometry } | undefined
+  const geometry = target === "html" || target === "r3f" || target === "r3f-component" ? meshData?.geometry : undefined
+  const inputKey = useMemo(
+    () =>
+      isOpen && target
+        ? [target, hashString(wgslSource), hashString(glslSource), hashString(JSON.stringify([parsedUniforms, uniformValues])), target === "gltf" ? bakedKey : "", geometry ?? ""].join("|")
+        : "",
+    [isOpen, target, wgslSource, glslSource, parsedUniforms, uniformValues, bakedKey, geometry],
   )
 
-  // Update uniforms when props change
+  const cache = useRef(new Map<string, View>())
+  const [view, setView] = useState<View>({ status: "loading" })
   useEffect(() => {
-    if (!materialRef.current) return
-    Object.entries(props).forEach(([key, val]) => {
-      if (materialRef.current?.uniforms[key]) {
-        materialRef.current.uniforms[key].value = val
-      }
-    })
-  }
-
-  // Real-time animation loop
-  useFrame((_, delta) => {
-    if (materialRef.current?.uniforms.u_time) {
-      materialRef.current.uniforms.u_time.value += delta
+    if (!inputKey || !target) return
+    const hit = cache.current.get(inputKey)
+    if (hit) {
+      setView(hit)
+      return
     }
-  })
-
-  return (
-    <mesh {...props}>
-      <torusKnotGeometry args={[0.8, 0.25, 100, 16]} />
-      <shaderMaterial
-        ref={materialRef}
-        vertexShader={VERTEX_SHADER}
-        fragmentShader={FRAGMENT_SHADER}
-        uniforms={uniforms}
-        transparent
-      />
-    </mesh>
-  )
-}
-
-export default CustomShaderMesh
-`
-  }
-
-  // 2. Generate Standalone HTML / Webflow Embed Snippet
-  const htmlEmbedCode = (): string => {
-    const glslFrag = shaderSource || `precision highp float; out vec4 fragColor; void main() { fragColor = vec4(1.0); }`
-
-    return `<!-- ===================================================================== -->
-<!-- Shader Studio Interactive Canvas Embed (Webflow, Framer, or HTML)      -->
-<!-- Paste this code directly into any HTML embed block.                     -->
-<!-- ===================================================================== -->
-<div id="shader-container" style="width: 100%; height: 400px; position: relative; overflow: hidden; background: #000;">
-  <canvas id="shader-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
-</div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
-(function() {
-  var container = document.getElementById('shader-container');
-  var canvas = document.getElementById('shader-canvas');
-  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
-  var scene = new THREE.Scene();
-  var camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
-  camera.position.z = 3.5;
-
-  var uniforms = {
-    u_time: { value: 0 },
-    u_resolution: { value: new THREE.Vector2(container.clientWidth, container.clientHeight) }
-  };
-
-  var material = new THREE.ShaderMaterial({
-    vertexShader: \`
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    setView({ status: "loading" })
+    let stale = false
+    const timer = setTimeout(async () => {
+      let res: ExportResult
+      try {
+        res = await generateExport(target, {
+          wgslSource,
+          glslSource,
+          parsedUniforms,
+          uniformValues,
+          shaderName: "Custom/ShaderStudioEffect",
+          geometry,
+          bakedMaps: bakeResult ? Object.fromEntries(Object.entries(bakeResult.maps).map(([k, v]) => [k, { dataUrl: v.dataUrl }])) : undefined,
+        })
+      } catch (err) {
+        res = { error: err instanceof Error ? err.message : String(err) }
       }
-    \`,
-    fragmentShader: \`${glslFrag.replace(/`/g, "\\`")}\`,
-    uniforms: uniforms,
-    transparent: true
-  });
-
-  var mesh = new THREE.Mesh(new THREE.TorusKnotGeometry(0.8, 0.25, 100, 16), material);
-  scene.add(mesh);
-
-  function resize() {
-    var w = container.clientWidth;
-    var h = container.clientHeight;
-    renderer.setSize(w, h);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-    uniforms.u_resolution.value.set(w, h);
-  }
-  window.addEventListener('resize', resize);
-  resize();
-
-  var clock = new THREE.Clock();
-  function animate() {
-    requestAnimationFrame(animate);
-    uniforms.u_time.value = clock.getElapsedTime();
-    mesh.rotation.y += 0.005;
-    renderer.render(scene, camera);
-  }
-  animate();
-})();
-</script>
-`
-  }
-
-  // 1b. Upgraded React Three Fiber with @react-three/drei shaderMaterial & Storybook
-  const dreiR3fCode = (): string => {
-    return generateR3FExport("CustomShader", {
-      shaderSource: shaderSource || `void main() { gl_FragColor = vec4(1.0); }`,
-      uniforms: parsedUniforms,
-      uniformValues,
-    })
-  }
-
-  // 3. Game Engine Shader Transpiled Codes
-  const unityCode = (): string => {
-    return transpileToUnityHLSL({
-      shaderName: "Custom/ShaderStudioEffect",
-      shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
-      parsedUniforms,
-      uniformValues,
-    })
-  }
-
-  const godotCode = (): string => {
-    return transpileToGodotShader({
-      shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
-      parsedUniforms,
-      uniformValues,
-    })
-  }
-
-  const unrealCode = (): string => {
-    return transpileToUnrealHLSL({
-      shaderName: "Custom/ShaderStudioEffect",
-      shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
-      parsedUniforms,
-      uniformValues,
-    })
-  }
-
-  const oslCode = (): string => {
-    return transpileToBlenderOSL({
-      shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
-      parsedUniforms,
-      uniformValues,
-    })
-  }
-
-  const gltfCode = (): string => {
-    return createGltfBundle("ShaderStudio_Material", false, {
-      bakedMaps: bakeResult?.maps
-        ? Object.fromEntries(
-            Object.entries(bakeResult.maps).map(([k, v]) => [k, { dataUrl: v.dataUrl }])
-          )
-        : undefined,
-    })
-  }
-
-  const shadertoyCode = (): string => {
-    return transpileToShadertoy({
-      shaderSource: shaderSource || `void main() { fragColor = vec4(1.0); }`,
-      parsedUniforms,
-      uniformValues,
-    })
-  }
+      if (stale) return
+      const next: View = "error" in res ? { status: "error", error: res.error, line: res.line } : { status: "ready", code: res.code, via: res.via }
+      if (cache.current.size >= CACHE_LIMIT) cache.current.clear()
+      cache.current.set(inputKey, next)
+      setView(next)
+    }, DEBOUNCE_MS)
+    return () => {
+      stale = true
+      clearTimeout(timer)
+    }
+    // inputKey is the hash of every input read inside the effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputKey])
 
   if (!isOpen) return null
 
-  const needsGlsl = activeTab === "r3f" || activeTab === "html" || (activeTab === "engine" && engineTarget !== "gltf")
-  const glslMissing = needsGlsl && !shaderSource.trim()
-  const activeCode = glslMissing
-    ? "// No GLSL source available for this export target. Use the WebGL2 or Three.js backend and write a GLSL shader (WGSL to GLSL conversion is not available yet)."
-    : (
-    activeTab === "r3f"
-      ? r3fFormat === "drei"
-        ? dreiR3fCode()
-        : r3fCode()
-      : activeTab === "html"
-      ? htmlEmbedCode()
-      : activeTab === "engine"
-      ? engineTarget === "unity"
-        ? unityCode()
-        : engineTarget === "godot"
-        ? godotCode()
-        : engineTarget === "unreal"
-        ? unrealCode()
-        : engineTarget === "osl"
-        ? oslCode()
-        : engineTarget === "gltf"
-        ? gltfCode()
-        : shadertoyCode()
-      : rawSource
-    )
+  const generated: View = activeTab === "raw" ? { status: "ready", code: rawSource, via: "raw" } : view
+  const activeCode = generated.status === "ready" ? generated.code : ""
 
   const handleCopy = () => {
+    if (!activeCode) return
     navigator.clipboard.writeText(activeCode)
     setCopied(true)
     clearTimeout(copyTimer.current)
@@ -324,6 +143,7 @@ export default CustomShaderMesh
   }
 
   const handleDownload = () => {
+    if (!activeCode) return
     let filename = "ShaderStudio_Export.txt"
     if (activeTab === "r3f") {
       filename = r3fFormat === "drei" ? "CustomShaderMaterial.tsx" : "ShaderStudio_Component.tsx"
@@ -352,12 +172,16 @@ export default CustomShaderMesh
     URL.revokeObjectURL(url)
   }
 
-  const handleDownloadNpmZip = () => {
+  const handleDownloadNpmZip = async () => {
+    setActionError(null)
     try {
-      const zipBytes = createNpmPackageZip(
-        "@shaderstudio/custom-material",
-        shaderSource || "precision highp float; out vec4 fragColor; void main() { fragColor = vec4(1.0); }"
-      )
+      // npm package ships GLSL for three.js: the project's GLSL, or WGSL through naga
+      const glsl = await resolveGlslSource({ wgslSource, glslSource })
+      if ("error" in glsl) {
+        setActionError(glsl.error)
+        return
+      }
+      const zipBytes = createNpmPackageZip("@shaderstudio/custom-material", glsl.code, { uniforms: parsedUniforms, uniformValues })
       const blob = new Blob([zipBytes as unknown as BlobPart], { type: "application/zip" })
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
@@ -369,6 +193,7 @@ export default CustomShaderMesh
       URL.revokeObjectURL(url)
     } catch (err) {
       console.error("Failed to generate npm package zip:", err)
+      setActionError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -768,7 +593,23 @@ export default CustomShaderMesh
               </div>
             )}
             <div className="flex-1 overflow-auto p-4 font-mono text-xs text-success">
-              <pre className="whitespace-pre-wrap break-all select-all">{activeCode}</pre>
+              {generated.status === "ready" ? (
+                <pre className="whitespace-pre-wrap break-all select-all">{activeCode}</pre>
+              ) : generated.status === "loading" ? (
+                <div className="flex items-center gap-2 text-fg-muted" role="status">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Generating export...
+                </div>
+              ) : (
+                <div role="alert" className="text-danger whitespace-pre-wrap">
+                  Export failed: {generated.error}
+                </div>
+              )}
+              {actionError && (
+                <div role="alert" className="mt-3 text-danger whitespace-pre-wrap">
+                  npm package: {actionError}
+                </div>
+              )}
             </div>
           </div>
         )}

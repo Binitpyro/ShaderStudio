@@ -14,6 +14,28 @@ export interface GltfExportOptions {
   bakedMaps?: Record<string, { dataUrl?: string; blob?: Blob; buffer?: Uint8ClampedArray }>
   width?: number
   height?: number
+  /**
+   * GLSL fragment the material was authored with. glTF has no shader slot, so it travels in `extras.shaderStudio`
+   * (readable by importers that want the procedural source) and drives the PBR factors below when not set explicitly.
+   */
+  shaderSource?: string
+  uniformValues?: Record<string, { type?: string; value: unknown }>
+}
+
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
+const channel = (n: unknown): number => Math.min(1, Math.max(0, num(n) ?? 1))
+
+/** PBR factors guessed from conventionally named uniforms (u_color / u_albedo / u_baseColor, u_roughness, u_metallic). */
+function factorsFromUniforms(values: NonNullable<GltfExportOptions["uniformValues"]>) {
+  const find = (re: RegExp) => Object.entries(values).find(([k]) => re.test(k))?.[1]?.value
+  const color = find(/^(u_)?(base_?color|albedo|color)$/i)
+  const rough = num(find(/^(u_)?roughness$/i))
+  const metal = num(find(/^(u_)?metallic$/i))
+  return {
+    baseColorFactor: Array.isArray(color) && color.length >= 3 ? ([channel(color[0]), channel(color[1]), channel(color[2]), channel(color[3] ?? 1)] as [number, number, number, number]) : undefined,
+    roughnessFactor: rough === undefined ? undefined : Math.min(1, Math.max(0, rough)),
+    metallicFactor: metal === undefined ? undefined : Math.min(1, Math.max(0, metal)),
+  }
 }
 
 export interface GltfMaterialExportResult {
@@ -72,13 +94,17 @@ export function exportGltf2Material(
   options?: GltfExportOptions
 ): GltfMaterialExportResult {
   const extensionsUsed: string[] = []
+  const guess = options?.uniformValues ? factorsFromUniforms(options.uniformValues) : undefined
   const material: Record<string, any> = {
     name: materialName,
     pbrMetallicRoughness: {
-      baseColorFactor: options?.baseColorFactor ?? [1, 1, 1, 1],
-      metallicFactor: options?.metallicFactor ?? 0.0,
-      roughnessFactor: options?.roughnessFactor ?? 0.5,
+      baseColorFactor: options?.baseColorFactor ?? guess?.baseColorFactor ?? [1, 1, 1, 1],
+      metallicFactor: options?.metallicFactor ?? guess?.metallicFactor ?? 0.0,
+      roughnessFactor: options?.roughnessFactor ?? guess?.roughnessFactor ?? 0.5,
     },
+  }
+  if (options?.shaderSource?.trim()) {
+    material.extras = { shaderStudio: { language: "glsl", fragment: options.shaderSource } }
   }
 
   if (unlit) {

@@ -1,0 +1,46 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "ShaderStudio-glTF-Exporter"
+  },
+  "extensionsUsed": [
+    "KHR_materials_pbrSpecularGlossiness"
+  ],
+  "materials": [
+    {
+      "name": "ShaderStudio_Material",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.5
+      },
+      "extras": {
+        "shaderStudio": {
+          "language": "glsl",
+          "fragment": "#version 300 es\nprecision highp float;\n\nin vec3 v_world_pos;\nout vec4 fragColor;\n\nuniform float u_time;\nuniform vec3 u_gridColor;\nuniform vec3 u_sunColor;\nuniform float u_speed;\n\n// Plane coordinates in [-1, 1] with +y up (handles both XY and XZ plane meshes)\nvec2 planeUv(vec3 p) {\n    float v = abs(p.z) > 0.0001 ? -p.z : p.y;\n    return vec2(p.x, v);\n}\n\nvoid main() {\n    vec2 uv = planeUv(v_world_pos);\n    float horizon = -0.1;\n\n    // Perspective ground projection (derivatives are taken outside any branch)\n    float depth = 1.0 / max(horizon - uv.y, 0.001);\n    vec2 gridUv = vec2(uv.x * depth, depth - u_time * u_speed);\n    vec2 fw = max(fwidth(gridUv), vec2(0.0001));\n    vec2 grid = abs(fract(gridUv - 0.5) - 0.5) / fw;\n    float line = min(grid.x, grid.y);\n    float gridIntensity = 1.0 - min(line, 1.0);\n    float fog = exp(-depth * 0.15);\n\n    vec3 finalColor = vec3(0.02, 0.01, 0.06);\n\n    if (uv.y < horizon) {\n        finalColor += u_gridColor * gridIntensity * fog;\n    } else {\n        // Sunset sky gradient\n        float sky = (uv.y - horizon) / (1.0 - horizon);\n        finalColor = mix(vec3(0.1, 0.0, 0.2), vec3(0.02, 0.0, 0.08), sky);\n\n        // Glowing digital sun with horizontal blinds\n        vec2 sunPos = vec2(0.0, 0.25);\n        float sunDist = length(uv - sunPos);\n        if (sunDist < 0.35) {\n            float blinds = sin(uv.y * 50.0) * 0.5 + 0.5;\n            float sunCut = smoothstep(0.2, 0.8, blinds);\n            float sunGrad = (uv.y - (sunPos.y - 0.35)) / 0.7;\n            vec3 sunC = mix(u_sunColor, vec3(1.0, 0.9, 0.2), sunGrad);\n            finalColor = mix(finalColor, sunC, sunCut);\n        }\n\n        // Sun corona bloom\n        finalColor += u_sunColor * (0.15 / (sunDist + 0.1));\n    }\n\n    fragColor = vec4(finalColor, 1.0);\n}"
+        }
+      },
+      "extensions": {
+        "KHR_materials_pbrSpecularGlossiness": {
+          "diffuseFactor": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "specularFactor": [
+            1,
+            1,
+            1
+          ],
+          "glossinessFactor": 0.5
+        }
+      }
+    }
+  ]
+}
