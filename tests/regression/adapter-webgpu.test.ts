@@ -265,12 +265,17 @@ describe("WebGPUAdapter (fleet w3)", () => {
     })
   })
 
-  describe("shadow pass guard", () => {
-    it("never encodes the (invalid) shadow depth pass even when shadows are enabled", () => {
-      adapter.updateShadowSettings({ enabled: true })
+  describe("shadow pass", () => {
+    it("encodes the depth-only shadow pass only when shadows are enabled", () => {
+      adapter.updateShadowSettings({ enabled: false })
       adapter.renderFrame(16, 16)
-      const labels = device.queue.submittedCommands.at(-1).renderPasses.map((p: any) => p.descriptor.label)
+      let labels = device.queue.submittedCommands.at(-1).renderPasses.map((p: any) => p.descriptor.label)
       expect(labels).not.toContain("ShadowDepthPass")
+
+      adapter.updateShadowSettings({ enabled: true })
+      adapter.renderFrame(32, 16)
+      labels = device.queue.submittedCommands.at(-1).renderPasses.map((p: any) => p.descriptor.label)
+      expect(labels).toContain("ShadowDepthPass")
     })
   })
 })

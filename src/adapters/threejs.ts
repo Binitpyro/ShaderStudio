@@ -16,6 +16,9 @@ import type {
   DoFSettings,
   SSAOSettings,
   MultiBackendParityState,
+  RenderSettings,
+  RenderToTargetRequest,
+  FidelityCapabilities,
 } from "./types"
 import type { RenderQueue } from "@/core/graphCompiler"
 import type { UniformValue, ParsedUniform, EnvironmentSettings } from "@/stores/projectStore"
@@ -26,6 +29,29 @@ import { customModelRegistry } from "@/core/customModelRegistry"
 import { generateEnvironmentCanvas, ENVIRONMENT_PRESETS } from "@/core/environmentGenerator"
 import { renderCoordinator } from "@/core/renderCoordinator"
 import { performanceTelemetry } from "@/core/performanceTelemetry"
+import { DEFAULT_RENDER_SETTINGS } from "@/stores/renderSettingsStore"
+import type { Pass } from "three/examples/jsm/postprocessing/Pass.js"
+
+/**
+ * Fidelity effects come from three/examples/jsm and are imported lazily (first time an effect is
+ * enabled) so they live in their own chunks. Pass order matches the other backends:
+ * scene -> SSAO -> SSR -> DoF -> AA (FXAA | TAA) -> user post chain.
+ */
+export const FX_LOADERS = {
+  ssao: () => import("three/examples/jsm/postprocessing/SSAOPass.js"),
+  ssr: () => import("three/examples/jsm/postprocessing/SSRPass.js"),
+  dof: () => import("three/examples/jsm/postprocessing/BokehPass.js"),
+  taa: () => import("three/examples/jsm/postprocessing/TAARenderPass.js"),
+  fxaa: () => import("three/examples/jsm/shaders/FXAAShader.js"),
+  sky: () => import("three/examples/jsm/objects/Sky.js"),
+}
+type FxName = keyof typeof FX_LOADERS
+type FxModules = { [K in FxName]?: Awaited<ReturnType<(typeof FX_LOADERS)[K]>> }
+
+/** three prepends its own `#version 300 es` in GLSL3 mode, so a user-authored leading #version must go. */
+function stripGlslVersion(src: string): string {
+  return src.replace(/^\s*#version[^\r\n]*\r?\n/, "")
+}
 
 type GeometryKey = "cube" | "sphere" | "plane" | "torus_knot" | "custom"
 
@@ -122,6 +148,28 @@ export class ThreeJSAdapter implements RenderAdapter {
   public deferredLightingProgram: THREE.ShaderMaterial | null = null
   private taaFrameIndex = 0
 
+  // W4 fidelity layer
+  private postSteps: Array<{ id: string; pass: PostProcessPassType; customSource?: string; uniforms: Record<string, number | number[]> }> = []
+  private fxModules: FxModules = {}
+  private fxLoading: Promise<void> = Promise.resolve()
+  private settingsKeys: Record<string, string> = {}
+  private renderSettings: RenderSettings = DEFAULT_RENDER_SETTINGS
+  private taaPass: Pass | null = null
+  private fxaaPass: ShaderPass | null = null
+  private shadowCatcher: THREE.Mesh | null = null
+  private sky: THREE.Mesh | null = null
+  private settingsPending = false
+  private gTex: { albedo: THREE.Texture; normal: THREE.Texture; material: THREE.Texture; depth: THREE.Texture; motion: THREE.Texture } | null = null
+  private previewScene: THREE.Scene | null = null
+  private previewMesh: THREE.Mesh | null = null
+  private previewCamera: THREE.PerspectiveCamera | null = null
+  private skyActive = false
+  private albedoTarget: THREE.WebGLRenderTarget | null = null
+  private gBufferMaterial: THREE.ShaderMaterial | null = null
+  private readonly tmpSun = new THREE.Vector3()
+  private previewMaterials = new Map<string, THREE.ShaderMaterial>()
+  private previewTarget: THREE.WebGLRenderTarget | null = null
+
   private halton(index: number, base: number): number {
     let result = 0
     let f = 1 / base
@@ -191,6 +239,7 @@ export class ThreeJSAdapter implements RenderAdapter {
         this.updateEnvironment(envSettings)
       }
       this.initialized = true
+      if (this.settingsPending) this.applyRenderSettings(this.renderSettings)
       useProjectStore.getState().setLastCompileError(null)
       this.startRenderLoop()
       return true
@@ -398,20 +447,32 @@ export class ThreeJSAdapter implements RenderAdapter {
       }
     }
     this.pruneTextures(keepTextures)
-    if (this.hasPostProcess) {
-      const key = JSON.stringify(ppSteps)
-      if (this.composer && key === this.postChainKey) return // same chain: keep passes (and their GPU programs)
-      this.setupPostProcess(ppSteps)
-      this.postChainKey = key
-    } else {
-      this.disposePostChain()
-    }
+    this.postSteps = this.hasPostProcess ? ppSteps : []
+    this.syncChain()
     renderCoordinator.requestRender()
   }
 
+  private fxActive(): boolean {
+    const s = this.renderSettings
+    return s.ssao.enabled || s.ssr.enabled || s.dof.enabled || s.antiAliasing === "fxaa" || s.antiAliasing === "taa"
+  }
+
+  /** (Re)builds the composer only when the user chain, fidelity settings or render mode changed. */
+  private syncChain() {
+    if (!this.hasPostProcess && !this.fxActive()) { this.disposePostChain(); return }
+    const s = this.renderSettings
+    const key = JSON.stringify([this.postSteps, s.ssao, s.ssr, s.dof, s.antiAliasing, this.state.pipelineMode, Object.keys(this.fxModules)])
+    if (this.composer && key === this.postChainKey) return // same chain: keep passes (and their GPU programs)
+    this.setupPostProcess(this.postSteps)
+    this.postChainKey = key
+  }
+
   private disposePostChain() {
+    for (const pass of this.composer?.passes ?? []) pass.dispose?.()
     for (const pass of this.postPasses) pass.dispose()
     this.postPasses = []
+    this.taaPass = null
+    this.fxaaPass = null
     this.composer?.dispose()
     this.composer = null
     this.postProcessPassesMap.clear()
@@ -423,12 +484,50 @@ export class ThreeJSAdapter implements RenderAdapter {
     this.disposePostChain()
     this.composer = new EffectComposer(this.renderer)
 
-    const renderPass = new RenderPass(this.scene, this.camera)
-    this.composer.addPass(renderPass)
-
     const w = this.canvas?.width || 800
     const h = this.canvas?.height || 600
-    const passSteps = steps.length > 0
+    const fx = this.fxModules
+    const cfg = this.renderSettings
+    const deferred = this.state.pipelineMode === "deferred" && !!this.deferredLightingScene && !!this.deferredLightingCamera
+    if (deferred) {
+      // G-buffer + lighting quad produce the scene colour; screen-space effects then run on top of it.
+      this.composer.addPass(new RenderPass(this.deferredLightingScene!, this.deferredLightingCamera!))
+    } else if (cfg.antiAliasing === "taa" && fx.taa) {
+      const taa = new fx.taa.TAARenderPass(this.scene, this.camera)
+      taa.sampleLevel = 2
+      this.taaPass = taa
+      this.composer.addPass(taa)
+    } else {
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+    }
+    if (cfg.ssao.enabled && fx.ssao) {
+      const p = new fx.ssao.SSAOPass(this.scene, this.camera, w, h, Math.max(1, Math.min(64, Math.round(cfg.ssao.sampleCount))))
+      p.kernelRadius = cfg.ssao.radius
+      p.minDistance = Math.max(0.0001, cfg.ssao.bias)
+      p.maxDistance = Math.max(0.05, cfg.ssao.radius * 0.5)
+      this.composer.addPass(p)
+    }
+    if (cfg.ssr.enabled && fx.ssr) {
+      const p = new fx.ssr.SSRPass({ renderer: this.renderer, scene: this.scene, camera: this.camera, width: w, height: h, groundReflector: null, selects: null })
+      p.thickness = cfg.ssr.thickness
+      p.maxDistance = Math.max(1, cfg.ssr.maxSteps * 0.25)
+      p.opacity = cfg.ssr.falloff
+      this.composer.addPass(p)
+    }
+    if (cfg.dof.enabled && fx.dof) {
+      this.composer.addPass(new fx.dof.BokehPass(this.scene, this.camera, {
+        focus: cfg.dof.focalDistance,
+        aperture: cfg.dof.aperture,
+        maxblur: cfg.dof.maxBlur / Math.max(1, h),
+      }))
+    }
+    if (cfg.antiAliasing === "fxaa" && fx.fxaa) {
+      const p = new ShaderPass(fx.fxaa.FXAAShader)
+      p.uniforms["resolution"].value.set(1 / w, 1 / h)
+      this.fxaaPass = p
+      this.composer.addPass(p)
+    }
+    const passSteps = steps.length > 0 || this.fxActive()
       ? steps
       : [{ id: "vignette-default", pass: "vignette" as PostProcessPassType, uniforms: {} }]
 
@@ -892,12 +991,14 @@ export class ThreeJSAdapter implements RenderAdapter {
       }
 
       const shaderPass = new ShaderPass(shaderDef)
-      if (isFinal) shaderPass.renderToScreen = true
+      void isFinal
       this.postProcessPassesMap.set(step.id, shaderPass)
       this.postProcessPassesMap.set(step.pass, shaderPass)
       this.postPasses.push(shaderPass)
       this.composer.addPass(shaderPass)
     }
+    const passes = this.composer.passes
+    passes[passes.length - 1].renderToScreen = true
   }
 
   updatePostProcessUniform(nodeId: string, name: string, value: number | number[]) {
@@ -920,7 +1021,11 @@ export class ThreeJSAdapter implements RenderAdapter {
   private validateShader(vertexShader: string, fragmentShader: string, glsl3: boolean): string | null {
     const r = this.renderer
     if (!r || !this.camera || !this.mesh || typeof r.compile !== "function") return null
-    const probe = new THREE.ShaderMaterial({ vertexShader, fragmentShader, glslVersion: glsl3 ? THREE.GLSL3 : null, side: THREE.DoubleSide })
+    const probe = new THREE.ShaderMaterial({
+      vertexShader: glsl3 ? stripGlslVersion(vertexShader) : vertexShader,
+      fragmentShader: glsl3 ? stripGlslVersion(fragmentShader) : fragmentShader,
+      glslVersion: glsl3 ? THREE.GLSL3 : null, side: THREE.DoubleSide,
+    })
     const probeScene = new THREE.Scene()
     probeScene.add(new THREE.Mesh(this.mesh.geometry, probe))
     const dbg = r.debug
@@ -928,11 +1033,15 @@ export class ThreeJSAdapter implements RenderAdapter {
     const stage = (gl: WebGLRenderingContext, sh: WebGLShader | null, label: string, user: string) => {
       const log = (sh && gl.getShaderInfoLog(sh)) || ""
       if (!log.trim()) return ""
-      const body = user.replace(/^\s*#version[^\n]*\n/, "").trim()
+      // Map driver lines back to the user's original source (its #version line may have been stripped).
+      const src = glsl3 ? stripGlslVersion(user) : user
+      const removedLines = user.slice(0, user.length - src.length).split("\n").length - 1
+      const lead = src.slice(0, src.length - src.trimStart().length).split("\n").length - 1
+      const body = src.trim()
       const full = (sh && gl.getShaderSource(sh)) || ""
       const at = body ? full.lastIndexOf(body) : -1
-      const offset = at > 0 ? full.slice(0, at).split("\n").length - 1 : 0
-      const mapped = log.trim().replace(/(ERROR|WARNING):\s*(\d+):(\d+)/g, (_m, sev, f, line) => `${sev}: ${f}:${Math.max(1, Number(line) - offset)}`)
+      const shift = at > 0 ? removedLines + lead - (full.slice(0, at).split("\n").length - 1) : 0
+      const mapped = log.trim().replace(/(ERROR|WARNING):\s*(\d+):(\d+)/g, (_m, sev, f, line) => `${sev}: ${f}:${Math.max(1, Number(line) + shift)}`)
       return `${label} shader error:\n${mapped}`
     }
     let message = ""
@@ -971,8 +1080,8 @@ export class ThreeJSAdapter implements RenderAdapter {
       }
       this.material.glslVersion = glsl3 ? THREE.GLSL3 : null
       this.material.side = THREE.DoubleSide
-      this.material.vertexShader = vertexShader
-      this.material.fragmentShader = fragmentShader
+      this.material.vertexShader = glsl3 ? stripGlslVersion(vertexShader) : vertexShader
+      this.material.fragmentShader = glsl3 ? stripGlslVersion(fragmentShader) : fragmentShader
       this.syncMaterialUniforms(fragmentShader)
       this.material.needsUpdate = true
       useProjectStore.getState().setLastCompileError(null)
@@ -1096,6 +1205,7 @@ export class ThreeJSAdapter implements RenderAdapter {
         if (res instanceof THREE.Vector2) res.set(canvasWidth, canvasHeight)
       }
     }
+    this.fxaaPass?.uniforms["resolution"].value.set(1 / canvasWidth, 1 / canvasHeight)
     if (this.state.pipelineMode === "deferred") {
       this.initGBuffer(canvasWidth, canvasHeight)
     }
@@ -1116,6 +1226,7 @@ export class ThreeJSAdapter implements RenderAdapter {
     this.mesh.rotation.x = seconds * 0.6
     this.mesh.rotation.y = seconds * 0.9
     this.renderer.info?.reset()
+    if (this.sky) this.sky.visible = this.skyActive && !this.scene.background
 
     if (this.material) {
       const timeUniform = this.material.uniforms["u_time"] || this.material.uniforms["time"]
@@ -1126,7 +1237,7 @@ export class ThreeJSAdapter implements RenderAdapter {
 
     // TAA Halton subpixel jitter
     let jittered = false
-    if (this.state.postProcessState.taa.enabled) {
+    if (this.state.postProcessState.taa.enabled && !this.taaPass) { // TAARenderPass jitters itself
       this.taaFrameIndex = (this.taaFrameIndex + 1) % 8
       const jX = (this.halton(this.taaFrameIndex, 2) - 0.5) / (this.canvas?.width || 800)
       const jY = (this.halton(this.taaFrameIndex, 3) - 0.5) / (this.canvas?.height || 600)
@@ -1140,23 +1251,15 @@ export class ThreeJSAdapter implements RenderAdapter {
     }
 
     try {
-      if (this.state.pipelineMode === "deferred") {
-        if (!this.gBufferRenderTarget) {
-          this.initGBuffer(this.canvas?.width || 800, this.canvas?.height || 600)
-        }
-        this.renderer.setRenderTarget(this.gBufferRenderTarget)
-        this.renderer.clear()
-        this.renderer.render(this.scene, this.camera)
-        this.renderer.setRenderTarget(null)
-
+      const deferred = this.state.pipelineMode === "deferred"
+      if (deferred) {
+        if (!this.gBufferRenderTarget) this.initGBuffer(this.canvas?.width || 800, this.canvas?.height || 600)
+        this.renderGBuffer()
         this.updateDeferredLightingUniforms()
-        if (this.deferredLightingScene && this.deferredLightingCamera) {
-          this.renderer.render(this.deferredLightingScene, this.deferredLightingCamera)
-        }
-      } else {
-        if (this.composer && this.hasPostProcess) this.composer.render()
-        else this.renderer.render(this.scene, this.camera)
       }
+      if (this.composer && (this.hasPostProcess || this.fxActive())) this.composer.render()
+      else if (deferred && this.deferredLightingScene && this.deferredLightingCamera) this.renderer.render(this.deferredLightingScene, this.deferredLightingCamera)
+      else this.renderer.render(this.scene, this.camera)
     } finally {
       // a throw in composer.render must not leave the camera jittered (it would compound next frame)
       if (jittered) this.camera.projectionMatrix.copy(this.tmpProj)
@@ -1284,60 +1387,42 @@ export class ThreeJSAdapter implements RenderAdapter {
     const w = Math.max(1, width)
     const h = Math.max(1, height)
 
-    if (this.gBufferRenderTarget) {
-      this.gBufferRenderTarget.dispose()
-      this.gBufferRenderTarget = null
-    }
+    this.releaseGBuffer()
 
     try {
       this.gBufferRenderTarget = new THREE.WebGLRenderTarget(w, h, {
-        count: 4,
+        count: 3,
         minFilter: THREE.NearestFilter,
         magFilter: THREE.NearestFilter,
         format: THREE.RGBAFormat,
         type: THREE.HalfFloatType,
       })
-      this.gBufferRenderTarget.depthTexture = new THREE.DepthTexture(w, h)
-    } catch {}
-
-    const albedoTex = this.gBufferRenderTarget?.textures?.[0] || this.gBufferRenderTarget?.texture || this.createDefaultTexture()
-    const normalTex = this.gBufferRenderTarget?.textures?.[1] || albedoTex
-    const roughnessTex = this.gBufferRenderTarget?.textures?.[2] || albedoTex
-    const motionTex = this.gBufferRenderTarget?.textures?.[3] || albedoTex
-    const depthTex = this.gBufferRenderTarget?.depthTexture || this.createDefaultTexture()
-
-    const setTexMeta = (tex: any, format: string, width: number, height: number) => {
-      if (!tex) return
-      try { tex.image = { width, height } } catch {}
-      try {
-        Object.defineProperty(tex, "format", { value: format, configurable: true, writable: true })
-      } catch {
-        tex.format = format
-      }
-      try {
-        Object.defineProperty(tex, "width", { value: width, configurable: true, writable: true })
-      } catch {
-        tex.width = width
-      }
-      try {
-        Object.defineProperty(tex, "height", { value: height, configurable: true, writable: true })
-      } catch {
-        tex.height = height
-      }
+      this.gBufferRenderTarget.depthTexture = new THREE.DepthTexture(w, h, THREE.UnsignedIntType, undefined, undefined, undefined, undefined, undefined, undefined, THREE.DepthFormat)
+      this.albedoTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, format: THREE.RGBAFormat })
+    } catch (e) {
+      useProjectStore.getState().setLastCompileError(`Three.js G-buffer creation failed: ${e instanceof Error ? e.message : String(e)}`)
+      this.releaseGBuffer()
+      this.state.gBufferTargets = null
+      return
     }
 
-    setTexMeta(albedoTex, "rgba16float", w, h)
-    setTexMeta(normalTex, "rgba16float", w, h)
-    setTexMeta(roughnessTex, "rg8unorm", w, h)
-    setTexMeta(depthTex, "depth24plus-stencil8", w, h)
-    setTexMeta(motionTex, "rg16float", w, h)
+    // attachments: 0 world normal, 1 roughness/metallic, 2 motion; albedo (user shader) has its own target
+    const albedoTex = this.albedoTarget?.texture || this.createDefaultTexture()
+    const normalTex = this.gBufferRenderTarget?.textures?.[0] || albedoTex
+    const roughnessTex = this.gBufferRenderTarget?.textures?.[1] || albedoTex
+    const motionTex = this.gBufferRenderTarget?.textures?.[2] || albedoTex
+    const depthTex = this.gBufferRenderTarget?.depthTexture || this.createDefaultTexture()
 
+    // Real textures feed the lighting pass; the public parity state exposes WebGPU-style descriptors that
+    // WRAP them. (Never write string formats onto the textures: three needs numeric format/type pairs.)
+    this.gTex = { albedo: albedoTex, normal: normalTex, material: roughnessTex, depth: depthTex, motion: motionTex }
+    const desc = (texture: THREE.Texture, format: string) => ({ texture, format, width: w, height: h })
     this.state.gBufferTargets = {
-      albedo: albedoTex,
-      normal: normalTex,
-      roughnessMetallic: roughnessTex,
-      depth: depthTex,
-      motionVectors: motionTex,
+      albedo: desc(albedoTex, "rgba16float"),
+      normal: desc(normalTex, "rgba16float"),
+      roughnessMetallic: desc(roughnessTex, "rg8unorm"),
+      depth: desc(depthTex, "depth24plus-stencil8"),
+      motionVectors: desc(motionTex, "rg16float"),
     }
 
     this.initDeferredLightingScene()
@@ -1345,13 +1430,13 @@ export class ThreeJSAdapter implements RenderAdapter {
 
   private initDeferredLightingScene() {
     if (this.deferredLightingScene && this.deferredLightingMaterial) {
-      const gbuffer = this.state.gBufferTargets
+      const gbuffer = this.gTex
       if (gbuffer) {
         this.deferredLightingMaterial.uniforms["u_albedoTex"].value = gbuffer.albedo
         this.deferredLightingMaterial.uniforms["u_normalTex"].value = gbuffer.normal
-        this.deferredLightingMaterial.uniforms["u_roughnessTex"].value = gbuffer.roughnessMetallic
+        this.deferredLightingMaterial.uniforms["u_roughnessTex"].value = gbuffer.material
         this.deferredLightingMaterial.uniforms["u_depthTex"].value = gbuffer.depth
-        this.deferredLightingMaterial.uniforms["u_motionTex"].value = gbuffer.motionVectors
+        this.deferredLightingMaterial.uniforms["u_motionTex"].value = gbuffer.motion
       }
       return
     }
@@ -1359,12 +1444,12 @@ export class ThreeJSAdapter implements RenderAdapter {
     this.deferredLightingScene = new THREE.Scene()
     this.deferredLightingCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
 
-    const gbuffer = this.state.gBufferTargets
+    const gbuffer = this.gTex
     const albedo = gbuffer?.albedo || this.createDefaultTexture()
     const normal = gbuffer?.normal || this.createDefaultTexture()
-    const roughness = gbuffer?.roughnessMetallic || this.createDefaultTexture()
+    const roughness = gbuffer?.material || this.createDefaultTexture()
     const depth = gbuffer?.depth || this.createDefaultTexture()
-    const motion = gbuffer?.motionVectors || this.createDefaultTexture()
+    const motion = gbuffer?.motion || this.createDefaultTexture()
 
     this.deferredLightingMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -1416,6 +1501,7 @@ export class ThreeJSAdapter implements RenderAdapter {
           if (u_debugView == 5) { gl_FragColor = vec4(vec3(depth), 1.0); return; }
           if (u_debugView == 6) { gl_FragColor = vec4(vec3(motion.rg * 10.0 + 0.5, 0.0), 1.0); return; }
 
+          if (depth >= 1.0) { gl_FragColor = vec4(albedo.rgb, 1.0); return; }
           vec3 L = normalize(u_lightDir);
           float NdotL = max(dot(N, L), 0.0);
           vec3 diffuse = albedo.rgb * u_lightColor * (NdotL * u_lightIntensity);
@@ -1482,11 +1568,9 @@ export class ThreeJSAdapter implements RenderAdapter {
       this.initGBuffer(w, h)
     } else {
       this.state.gBufferTargets = null
-      if (this.gBufferRenderTarget) {
-        this.gBufferRenderTarget.dispose()
-        this.gBufferRenderTarget = null
-      }
+      this.releaseGBuffer()
     }
+    if (this.renderer) this.syncChain() // composer first pass differs between forward and deferred
   }
 
   setPipelineMode(mode: RenderingPipelineMode) {
@@ -1495,6 +1579,10 @@ export class ThreeJSAdapter implements RenderAdapter {
 
   getPipelineMode(): RenderingPipelineMode {
     return this.state.pipelineMode
+  }
+
+  getFidelityCapabilities(): FidelityCapabilities {
+    return { effectiveShadowFilter: this.renderSettings.shadows.filterMode, unsupported: ["ssao.intensity", "dof.bokehShape", "ssr.iblBlend"] }
   }
 
   getGBufferTextures(): GBufferTargets | null {
@@ -1635,6 +1723,346 @@ export class ThreeJSAdapter implements RenderAdapter {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // W4 fidelity layer: applyRenderSettings, shadows, atmosphere, G-buffer, renderToTarget
+  // --------------------------------------------------------------------------
+
+  /** Resolves once lazily imported effect modules (and the passes that needed them) are built. */
+  whenFidelityReady(): Promise<void> {
+    return this.fxLoading
+  }
+
+  private trackLoad(p: Promise<unknown>) {
+    // a rejected load must never poison later ones: swallow here (callers surface errors themselves)
+    this.fxLoading = Promise.all([this.fxLoading, p.catch(() => undefined)]).then(() => undefined)
+  }
+
+  /** Diffs against the previously applied settings; unchanged sections rebuild nothing. */
+  applyRenderSettings(settings: RenderSettings) {
+    this.renderSettings = settings
+    if (!this.initialized || !this.renderer) { this.settingsPending = true; return }
+    this.settingsPending = false
+    const keys = this.settingsKeys
+    let changed = false
+    const diff = (name: string, v: unknown) => {
+      const j = JSON.stringify(v)
+      if (keys[name] === j) return false
+      keys[name] = j
+      changed = true
+      return true
+    }
+    if (diff("shadows", settings.shadows)) this.applyShadows(settings.shadows)
+    if (diff("atmosphere", settings.atmosphere)) this.applyAtmosphere(settings.atmosphere)
+    if (diff("gbuffer", settings.gbufferDebugView)) this.setGBufferDebugView(settings.gbufferDebugView)
+    let rebuild = false
+    if (diff("renderMode", settings.renderMode)) { this.setRenderingPipelineMode(settings.renderMode); rebuild = true }
+    for (const n of ["ssao", "ssr", "dof"] as const) rebuild = diff(n, settings[n]) || rebuild
+    rebuild = diff("aa", settings.antiAliasing) || rebuild
+    if (rebuild) {
+      this.updateSSAOSettings(settings.ssao)
+      this.updateSSRSettings(settings.ssr)
+      this.updateDoFSettings(settings.dof)
+      this.setAntiAliasingMode(settings.antiAliasing)
+      this.loadFx()
+    }
+    if (changed) renderCoordinator.requestRender()
+  }
+
+  /** Imports the jsm modules the enabled effects need (once), then rebuilds the composer. */
+  private loadFx() {
+    const s = this.renderSettings
+    const need: FxName[] = []
+    if (s.ssao.enabled) need.push("ssao")
+    if (s.ssr.enabled) need.push("ssr")
+    if (s.dof.enabled) need.push("dof")
+    if (s.antiAliasing === "taa") need.push("taa")
+    if (s.antiAliasing === "fxaa") need.push("fxaa")
+    const missing = need.filter((n) => !this.fxModules[n])
+    this.syncChain() // disposes passes that were disabled right away
+    if (!missing.length) return
+    const session = this.session
+    this.trackLoad(
+      Promise.all(missing.map(async (n) => { (this.fxModules as Record<string, unknown>)[n] = await FX_LOADERS[n]() }))
+        .then(() => {
+          if (session !== this.session || !this.renderer) return
+          this.syncChain()
+          renderCoordinator.requestRender()
+        })
+        .catch((e) => useProjectStore.getState().setLastCompileError(`Three.js effect load failed: ${e instanceof Error ? e.message : String(e)}`)),
+    )
+  }
+
+  private ensureShadowCatcher(): THREE.Mesh | null {
+    if (this.shadowCatcher || !this.scene) return this.shadowCatcher
+    const geo = new THREE.PlaneGeometry(40, 40)
+    geo.rotateX(-Math.PI / 2)
+    const catcher = new THREE.Mesh(geo, new THREE.ShadowMaterial({ opacity: 0.35 }))
+    catcher.position.y = -2
+    catcher.receiveShadow = true
+    this.scene.add(catcher)
+    this.shadowCatcher = catcher
+    return catcher
+  }
+
+  /**
+   * Directional + point shadow maps. The user's ShaderMaterial does not sample shadow maps (it has no
+   * lights), so the preview mesh casts onto a ShadowMaterial ground plane instead.
+   */
+  private applyShadows(sh: RenderSettings["shadows"]) {
+    const r = this.renderer
+    if (!r || !this.scene) return
+    const type = sh.filterMode === "vsm" ? THREE.VSMShadowMap : THREE.PCFSoftShadowMap
+    const recompile = r.shadowMap.type !== type || r.shadowMap.enabled !== sh.enabled || this.pointLight?.castShadow !== (sh.enabled && sh.pointShadows)
+    r.shadowMap.enabled = sh.enabled
+    r.shadowMap.type = type
+    this.shadowSettings = { ...this.shadowSettings, enabled: sh.enabled, resolution: sh.resolution, filterMode: sh.filterMode, bias: sh.bias, normalBias: sh.normalBias }
+    this.state.shadowConfig = { resolution: sh.resolution, filtering: sh.filterMode, bias: sh.bias, normalBias: sh.normalBias }
+    this.state.pointShadowCubeEnabled = sh.pointShadows
+    const lights: Array<[THREE.DirectionalLight | THREE.PointLight | null, boolean]> = [
+      [this.directionalLight, sh.enabled],
+      [this.pointLight, sh.enabled && sh.pointShadows],
+    ]
+    for (const [light, cast] of lights) {
+      if (!light) continue
+      const resized = light.shadow.mapSize.x !== sh.resolution
+      light.castShadow = cast
+      light.shadow.mapSize.set(sh.resolution, sh.resolution)
+      light.shadow.bias = sh.bias
+      light.shadow.normalBias = sh.normalBias
+      light.shadow.radius = sh.filterMode === "vsm" ? 4 : 1
+      if (resized && light.shadow.map) { light.shadow.map.dispose(); light.shadow.map = null }
+    }
+    const cam = this.directionalLight?.shadow.camera
+    if (cam) {
+      cam.left = -8; cam.right = 8; cam.top = 8; cam.bottom = -8; cam.near = 0.1; cam.far = 50
+      cam.updateProjectionMatrix()
+    }
+    const catcher = this.ensureShadowCatcher()
+    if (catcher) catcher.visible = sh.enabled
+    if (this.mesh) this.mesh.castShadow = sh.enabled
+    if (recompile) {
+      if (this.material) this.material.needsUpdate = true
+      if (catcher) (catcher.material as THREE.Material).needsUpdate = true
+    }
+  }
+
+  /**
+   * Drives the three.js Sky + sun light from the atmosphere settings. Non-default atmosphere enables the
+   * Sky (the contract has no enabled flag); it is shown whenever no environment background is set.
+   */
+  private applyAtmosphere(a: RenderSettings["atmosphere"]) {
+    this.state.atmosphereParams = { ...a }
+    this.skyActive = JSON.stringify(a) !== JSON.stringify(DEFAULT_RENDER_SETTINGS.atmosphere)
+    this.tmpSun.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - a.solarElevationDeg), THREE.MathUtils.degToRad((a.timeOfDay / 24) * 360 - 180))
+    const dl = this.directionalLight
+    if (dl) {
+      if (this.skyActive) {
+        dl.position.copy(this.tmpSun).multiplyScalar(10)
+        dl.intensity = a.solarElevationDeg > 0 ? 0.8 * a.sunIntensity : 0
+      } else {
+        dl.position.set(5, 5, 5)
+        dl.intensity = 0.8
+      }
+    }
+    if (!this.skyActive) return
+    const mod = this.fxModules.sky
+    if (!mod) {
+      const session = this.session
+      this.trackLoad(FX_LOADERS.sky().then((m) => {
+        this.fxModules.sky = m
+        if (session === this.session && this.initialized) { this.applyAtmosphere(this.renderSettings.atmosphere); renderCoordinator.requestRender() }
+      }).catch((e) => useProjectStore.getState().setLastCompileError(`Three.js sky load failed: ${e instanceof Error ? e.message : String(e)}`)))
+      return
+    }
+    if (!this.sky && this.scene) {
+      const sky = new mod.Sky()
+      sky.scale.setScalar(50) // inside the camera far plane; the sky shader only uses view direction
+      sky.renderOrder = -1
+      this.scene.add(sky)
+      this.sky = sky
+    }
+    const u = (this.sky as THREE.Mesh | null)?.material && ((this.sky as THREE.Mesh).material as THREE.ShaderMaterial).uniforms
+    if (u) {
+      u["turbidity"].value = a.turbidity
+      u["rayleigh"].value = 2
+      u["sunPosition"].value.copy(this.tmpSun)
+    }
+  }
+
+  private ensureGBufferMaterial(): THREE.ShaderMaterial {
+    if (this.gBufferMaterial) return this.gBufferMaterial
+    this.gBufferMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      side: THREE.DoubleSide,
+      uniforms: { u_rough: { value: 0.5 }, u_metal: { value: 0 } },
+      vertexShader: `
+        varying vec3 vN;
+        void main() {
+          vN = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        layout(location = 0) out highp vec4 gNormal;
+        layout(location = 1) out highp vec4 gMaterial;
+        layout(location = 2) out highp vec4 gMotion;
+        uniform float u_rough;
+        uniform float u_metal;
+        varying vec3 vN;
+        void main() {
+          vec3 n = normalize(vN);
+          if (!gl_FrontFacing) n = -n;
+          gNormal = vec4(n * 0.5 + 0.5, 1.0);
+          gMaterial = vec4(u_rough, u_metal, 0.0, 1.0);
+          gMotion = vec4(0.0, 0.0, 0.0, 1.0);
+        }
+      `,
+    })
+    return this.gBufferMaterial
+  }
+
+  /**
+   * G-buffer fill: the user's shader renders the albedo target; an override MRT material (3 attachments:
+   * world normal, roughness/metallic, motion) plus the depth texture complete the buffer. Motion is zero
+   * (static camera; no previous-frame transforms are kept).
+   */
+  private renderGBuffer() {
+    const r = this.renderer, scene = this.scene, camera = this.camera
+    const mrt = this.gBufferRenderTarget, albedo = this.albedoTarget
+    if (!r || !scene || !camera || !mrt || !albedo) return
+    const prevTarget = r.getRenderTarget()
+    const prevBackground = scene.background
+    const sky = this.sky, catcher = this.shadowCatcher
+    const skyVisible = sky?.visible, catcherVisible = catcher?.visible
+    try {
+      r.setRenderTarget(albedo)
+      r.clear()
+      r.render(scene, camera)
+
+      const mat = this.ensureGBufferMaterial()
+      const um = this.material?.uniforms
+      const rough = um?.["u_roughness"]?.value ?? um?.["roughness"]?.value
+      const metal = um?.["u_metallic"]?.value ?? um?.["metallic"]?.value
+      mat.uniforms["u_rough"].value = typeof rough === "number" ? rough : 0.5
+      mat.uniforms["u_metal"].value = typeof metal === "number" ? metal : 0
+      if (sky) sky.visible = false
+      if (catcher) catcher.visible = false
+      scene.overrideMaterial = mat
+      scene.background = null
+      r.setRenderTarget(mrt)
+      r.clear()
+      r.render(scene, camera)
+    } finally {
+      scene.overrideMaterial = null
+      scene.background = prevBackground
+      if (sky && skyVisible !== undefined) sky.visible = skyVisible
+      if (catcher && catcherVisible !== undefined) catcher.visible = catcherVisible
+      r.setRenderTarget(prevTarget)
+    }
+  }
+
+  private releaseGBuffer() {
+    this.gTex = null
+    this.gBufferRenderTarget?.dispose()
+    this.gBufferRenderTarget = null
+    this.albedoTarget?.dispose()
+    this.albedoTarget = null
+    this.gBufferMaterial?.dispose()
+    this.gBufferMaterial = null
+  }
+
+  private static hashSource(src: string): string {
+    let h = 5381
+    for (let i = 0; i < src.length; i++) h = ((h << 5) + h + src.charCodeAt(i)) | 0
+    return `${src.length}:${h >>> 0}`
+  }
+
+  private getPreviewMaterial(glsl: string): THREE.ShaderMaterial | null {
+    const vertexShader = useProjectStore.getState().vertexShaderSource || this.defaultVertexShader
+    const key = ThreeJSAdapter.hashSource(vertexShader + "\u0000" + glsl)
+    const cached = this.previewMaterials.get(key)
+    if (cached) { this.previewMaterials.delete(key); this.previewMaterials.set(key, cached); return cached }
+    const glsl3 = glsl.includes("#version 300 es") || vertexShader.includes("#version 300 es")
+    if (this.validateShader(vertexShader, glsl, glsl3)) return null
+    const uniforms: Record<string, { value: unknown }> = {
+      u_time: { value: 0 },
+      u_resolution: { value: new THREE.Vector2(1, 1) },
+    }
+    for (const u of parseGlslUniforms(glsl)) {
+      uniforms[u.name] = { value: u.kind === "texture" ? this.createDefaultTexture() : this.createInitialValue(u) }
+    }
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: glsl3 ? stripGlslVersion(vertexShader) : vertexShader,
+      fragmentShader: glsl3 ? stripGlslVersion(glsl) : glsl,
+      uniforms: uniforms as never, glslVersion: glsl3 ? THREE.GLSL3 : null, side: THREE.DoubleSide,
+    })
+    this.previewMaterials.set(key, mat)
+    if (this.previewMaterials.size > 16) {
+      const oldest = this.previewMaterials.keys().next().value as string
+      this.previewMaterials.get(oldest)?.dispose()
+      this.previewMaterials.delete(oldest)
+    }
+    return mat
+  }
+
+  /**
+   * One-off preview of a node's GLSL on the preview geometry. Never runs inside renderFrame; renderer
+   * target, clear colour/alpha and autoClear are restored (three restores the canvas viewport itself).
+   */
+  async renderToTarget(request: RenderToTargetRequest): Promise<ImageData | null> {
+    const r = this.renderer
+    const glsl = request.source.glsl
+    if (!r || !this.initialized || !this.mesh || !glsl) return null
+    const w = Math.max(1, Math.floor(request.width))
+    const h = Math.max(1, Math.floor(request.height))
+    const mat = this.getPreviewMaterial(glsl)
+    if (!mat) return null
+    if (!this.previewTarget || this.previewTarget.width !== w || this.previewTarget.height !== h) {
+      this.previewTarget?.dispose()
+      this.previewTarget = new THREE.WebGLRenderTarget(w, h)
+    }
+    if (!this.previewScene) {
+      this.previewScene = new THREE.Scene()
+      this.previewMesh = new THREE.Mesh(this.mesh.geometry, mat)
+      this.previewScene.add(this.previewMesh)
+      this.previewCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
+      this.previewCamera.position.set(0, 2, 4)
+      this.previewCamera.lookAt(0, 0, 0)
+    }
+    const mesh = this.previewMesh!, cam = this.previewCamera!
+    mesh.geometry = this.mesh.geometry
+    mesh.material = mat
+    cam.aspect = w / h
+    cam.updateProjectionMatrix()
+    const res = mat.uniforms["u_resolution"]?.value
+    if (res instanceof THREE.Vector2) res.set(w, h)
+
+    const prevTarget = r.getRenderTarget()
+    const prevColor = r.getClearColor(new THREE.Color())
+    const prevAlpha = r.getClearAlpha()
+    const prevAutoClear = r.autoClear
+    const pixels = new Uint8Array(w * h * 4)
+    try {
+      r.autoClear = true
+      r.setRenderTarget(this.previewTarget)
+      r.setClearColor(0x14141a, 1)
+      r.clear()
+      r.render(this.previewScene, cam)
+      r.readRenderTargetPixels(this.previewTarget, 0, 0, w, h, pixels)
+    } catch {
+      return null
+    } finally {
+      r.setRenderTarget(prevTarget)
+      r.setClearColor(prevColor, prevAlpha)
+      r.autoClear = prevAutoClear
+    }
+    // GL rows run bottom-up; flip into image order.
+    const out = new Uint8ClampedArray(w * h * 4)
+    const stride = w * 4
+    for (let y = 0; y < h; y++) out.set(pixels.subarray((h - 1 - y) * stride, (h - y) * stride), y * stride)
+    return typeof ImageData !== "undefined" ? new ImageData(out, w, h) : ({ data: out, width: w, height: h, colorSpace: "srgb" } as ImageData)
+  }
+
   calculateRayleighMieScattering(wavelengthNm = [680, 550, 440]): { rayleigh: number[]; mie: number } {
     const rayleigh = wavelengthNm.map((lambda) => {
       const lambdaUm = lambda / 1000.0
@@ -1687,10 +2115,15 @@ export class ThreeJSAdapter implements RenderAdapter {
       this.unsubscribeCustomModel()
       this.unsubscribeCustomModel = null
     }
-    if (this.gBufferRenderTarget) {
-      this.gBufferRenderTarget.dispose()
-      this.gBufferRenderTarget = null
-    }
+    this.releaseGBuffer()
+    for (const m of this.previewMaterials.values()) m.dispose()
+    this.previewMaterials.clear()
+    this.previewTarget?.dispose()
+    this.previewTarget = null
+    this.previewScene = null; this.previewMesh = null; this.previewCamera = null
+    this.shadowCatcher = null; this.sky = null; this.skyActive = false
+    this.fxLoading = Promise.resolve(); this.settingsKeys = {}; this.settingsPending = false
+    this.renderSettings = DEFAULT_RENDER_SETTINGS
     if (this.deferredLightingMaterial) {
       this.deferredLightingMaterial.dispose()
       this.deferredLightingMaterial = null

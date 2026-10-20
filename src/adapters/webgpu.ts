@@ -12,6 +12,10 @@ import type {
   DoFSettings,
   SSAOSettings,
   MultiBackendParityState,
+  RenderSettings,
+  RenderToTargetRequest,
+  FidelityCapabilities,
+  FrameStats,
 } from "./types"
 import type { RenderQueue, ComputePreset } from "@/core/graphCompiler"
 import type { UniformValue, EnvironmentSettings } from "@/stores/projectStore"
@@ -37,6 +41,20 @@ import curlNoiseWgsl from "../shaders/compute/curl_noise.wgsl?raw"
 import particleRenderWgsl from "../shaders/compute/particle_render.wgsl?raw"
 import { getComputePresetCode } from "@/core/computePresets"
 import skyboxWgsl from "../shaders/skybox.wgsl?raw"
+import fxCommonWgsl from "../shaders/fidelity/common.wgsl?raw"
+import fxShadowResolveWgsl from "../shaders/fidelity/shadow_resolve.wgsl?raw"
+import fxSsaoWgsl from "../shaders/fidelity/ssao.wgsl?raw"
+import fxSsrWgsl from "../shaders/fidelity/ssr.wgsl?raw"
+import fxDofWgsl from "../shaders/fidelity/dof.wgsl?raw"
+import fxFxaaWgsl from "../shaders/fidelity/fxaa.wgsl?raw"
+import fxTaaWgsl from "../shaders/fidelity/taa.wgsl?raw"
+import fxDebugWgsl from "../shaders/fidelity/debug.wgsl?raw"
+import fxDepthCopyWgsl from "../shaders/fidelity/depth_copy.wgsl?raw"
+import fxDeferredLightingWgsl from "../shaders/fidelity/deferred_lighting.wgsl?raw"
+import shadowDepthWgsl from "../shaders/fidelity/shadow_depth.wgsl?raw"
+import gbufferWgsl from "../shaders/fidelity/gbuffer.wgsl?raw"
+import skyWgsl from "../shaders/fidelity/sky.wgsl?raw"
+import { DEFAULT_RENDER_SETTINGS } from "@/stores/renderSettingsStore"
 
 export { getComputePresetCode }
 
@@ -75,12 +93,98 @@ export function createPerspectiveMatrix(fov: number, aspect: number, near: numbe
 }
 
 
+/**
+ * Fidelity pass order inside one frame (documented contract, asserted by tests):
+ *   shadow depth passes -> scene (forward colour pass, or G-buffer + deferred lighting)
+ *   -> shadow resolve (forward only; deferred samples shadows inside the lighting pass)
+ *   -> SSAO -> SSR -> DoF -> AA (TAA or FXAA) -> G-buffer debug (forward only) -> user post-process chain -> canvas.
+ */
+export const FIDELITY_PASS_ORDER = ["shadow", "ssao", "ssr", "dof", "aa", "debug"] as const
+
+/** Single source of truth for the G-buffer formats: textures and the geometry pipeline targets both read these. */
+export const GBUFFER_FORMATS = {
+  albedo: "rgba8unorm",
+  normal: "rgba16float",
+  roughnessMetallic: "rg8unorm",
+  motion: "rg16float",
+  depth: "depth24plus",
+} as const
+
+type FxKind = "shadow" | "ssao" | "ssr" | "dof" | "fxaa" | "taa" | "debug" | "depthcopy"
+interface FxPass {
+  kind: FxKind
+  label: string
+  pipeline: GPURenderPipeline
+  /** TAA writes the resolved colour AND the next history texture (second colour target). */
+  history: boolean
+  desc: { label: string; colorAttachments: any[] }
+  /** Bind groups per history parity, keyed by the input view (built lazily, cleared on resize/mode changes). */
+  bgCache: [Map<GPUTextureView, GPUBindGroup>, Map<GPUTextureView, GPUBindGroup>]
+}
+
+// Float offsets of the shared `Fx` uniform block (src/shaders/fidelity/common.wgsl).
+const FX_LIGHT_DIR = 0, FX_LIGHT_COLOR = 4, FX_INV_VP = 8, FX_VP = 24, FX_LIGHT_VP = 40, FX_FACE_VP = 56
+const FX_PROJ = 152, FX_SIZE = 156, FX_POINT_POS = 160, FX_POINT_COLOR = 164
+const FX_SHADOW = 168, FX_SHADOW2 = 172, FX_AO = 176, FX_SSR = 180, FX_DOF = 184, FX_MISC = 188, FX_EYE = 192
+const FX_FLOATS = 196
+const SHADOW_SLOT_BYTES = 256
+const FACE_DIRS: Array<[number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+const FACE_UPS: Array<[number, number, number]> = [[0, 1, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, 1, 0]]
+const DEBUG_CODES: Record<GBufferDebugView, number> = { none: 0, albedo: 1, normal: 2, roughness: 3, metallic: 4, depth: 5, motion: 6 }
+const BG_CLEAR = { r: 0.08, g: 0.08, b: 0.1, a: 1 }
+
+/** General 4x4 inverse (column-major), scalar-only so it never allocates. Returns false when singular. */
+function invertMatrixInto(o: Float32Array, m: Float32Array): boolean {
+  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3], a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7]
+  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11], a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15]
+  const b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10
+  const b03 = a01 * a12 - a02 * a11, b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12
+  const b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30, b08 = a20 * a33 - a23 * a30
+  const b09 = a21 * a32 - a22 * a31, b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06
+  if (!det) return false
+  det = 1 / det
+  o[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det
+  o[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det
+  o[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det
+  o[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det
+  o[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det
+  o[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det
+  o[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det
+  o[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det
+  o[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det
+  o[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det
+  o[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det
+  o[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det
+  o[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det
+  o[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det
+  o[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det
+  o[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det
+  return true
+}
+
+/** Orthographic projection for a [0,1] depth range, looking down -Z (matches setLookAtMatrix). */
+function setOrthoMatrixWebGPU(o: Float32Array, half: number, near: number, far: number): Float32Array {
+  o.fill(0)
+  o[0] = 1 / half; o[5] = 1 / half; o[10] = 1 / (near - far); o[14] = near / (near - far); o[15] = 1
+  return o
+}
+
+const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now())
+
+function sourceHash(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return `${s.length}:${h >>> 0}`
+}
+
 interface FrameFields {
   mvp: number
   time: number
   audio: Array<{ offset: number; key: keyof AudioUniforms }>
   envExposure: number
   envRotation: number
+  color: number
 }
 
 interface UniformResources {
@@ -258,7 +362,6 @@ export class WebGPUAdapter implements RenderAdapter {
   private shadowCubeTex: GPUTexture | null = null
   private deferredLightingPipeline: GPURenderPipeline | null = null
   deferredLightingProgram: any = null
-  private deferredLightingUniformBuffer: GPUBuffer | null = null
   private deferredLightingBindGroup: GPUBindGroup | null = null
   private deferredGeometryPipeline: GPURenderPipeline | null = null
 
@@ -324,7 +427,7 @@ export class WebGPUAdapter implements RenderAdapter {
   private cpuUniformView: DataView | null = null
   private cachedUniformValues = new Map<string, UniformValue>()
   // Field offsets for the per-frame writes, resolved once per compile (never looked up by name in the frame loop).
-  private frameFields: FrameFields = { mvp: -1, time: -1, audio: [], envExposure: -1, envRotation: -1 }
+  private frameFields: FrameFields = { mvp: -1, time: -1, audio: [], envExposure: -1, envRotation: -1, color: -1 }
   private mvpView: Float32Array | null = null
   private timeView: Float32Array | null = null
   private uniformDirtyMin = Infinity
@@ -337,15 +440,78 @@ export class WebGPUAdapter implements RenderAdapter {
   // Per-frame draw statistics reported to performanceTelemetry (plain counters, no allocation).
   private statDraws = 0
   private statTriangles = 0
-  private frameStats = { drawCalls: 0, triangles: 0 }
-  private deferredArray = new Float32Array(16)
-  private deferredInts = new Int32Array(this.deferredArray.buffer)
+  private frameStats: FrameStats = { drawCalls: 0, triangles: 0 }
   private skyboxArray = new Float32Array(16)
   private ppScratch = new Float32Array(4)
   private loadingTextures = new Set<string>()
   private postProcessSignature = ""
-  /** Shadow depth pass is disabled until W4 provides a depth-only pipeline (see encodeShadowPass). */
-  private readonly shadowPassReady: boolean = false
+  // ---- Fidelity layer (shadows, deferred, post effects, sky, previews) ----
+  private appliedSettings: RenderSettings = DEFAULT_RENDER_SETTINGS
+  private ssaoBias = 0.025
+  private dofMaxBlur = 8
+  private inFrame = false
+  private fxSignature = ""
+  private fxPasses: FxPass[] = []
+  private fxPipelines = new Map<string, GPURenderPipeline>()
+  private fxLayout: GPUBindGroupLayout | null = null
+  private fxPipelineLayout: GPUPipelineLayout | null = null
+  private fxSampler: GPUSampler | null = null
+  private fxCmpSampler: GPUSampler | null = null
+  private fxUniformBuffer: GPUBuffer | null = null
+  private fxData = new Float32Array(FX_FLOATS)
+  private dummyDepthView: GPUTextureView | null = null
+  private dummyShadowArrayView: GPUTextureView | null = null
+  private dummyTextures: GPUTexture[] = []
+  private defaultView: GPUTextureView | null = null
+  private shadowDepthView: GPUTextureView | null = null
+  private shadowArrayView: GPUTextureView | null = null
+  private shadowFaceViews: GPUTextureView[] = []
+  private shadowPipeline: GPURenderPipeline | null = null
+  private shadowUniformBuffer: GPUBuffer | null = null
+  private shadowBindGroup: GPUBindGroup | null = null
+  private shadowData = new Float32Array(7 * (SHADOW_SLOT_BYTES / 4))
+  private shadowOffsets: number[][] = [0, 1, 2, 3, 4, 5, 6].map(i => [i * SHADOW_SLOT_BYTES])
+  /** One preallocated descriptor per shadow pass (slot 0 = directional, 1..6 = point faces): no per-frame object literals. */
+  private shadowDescs = [0, 1, 2, 3, 4, 5, 6].map(i => ({
+    label: i === 0 ? "ShadowDepthPass" : "PointShadowFacePass", colorAttachments: [] as any[],
+    depthStencilAttachment: { view: null as any, depthClearValue: 1.0, depthLoadOp: "clear" as const, depthStoreOp: "store" as const },
+  }))
+  private lightView = new Float32Array(16)
+  private lightProj = new Float32Array(16)
+  private lightVP = new Float32Array(16)
+  private faceVP = new Float32Array(96)
+  private faceTmpView = new Float32Array(16)
+  private faceTmpProj = new Float32Array(16)
+  private faceTmpVP = new Float32Array(16)
+  private slotMatrix = new Float32Array(16)
+  private lightEye: [number, number, number] = [0, 0, 0]
+  private lightTarget: [number, number, number] = [0, 0, 0]
+  private lightUp: [number, number, number] = [0, 1, 0]
+  private vpMatrix = new Float32Array(16)
+  private invVpMatrix = new Float32Array(16)
+  private prevMvp = new Float32Array(16)
+  private gbufferData = new Float32Array(60)
+  private gbufferUniformBuffer: GPUBuffer | null = null
+  private gbufferBindGroup: GPUBindGroup | null = null
+  private taaHistory: [GPUTexture | null, GPUTexture | null] = [null, null]
+  private taaHistoryViews: [GPUTextureView | null, GPUTextureView | null] = [null, null]
+  private taaHistoryIndex = 0
+  private taaHistoryValid = false
+  private userDepthTex: GPUTexture | null = null
+  private userDepthView: GPUTextureView | null = null
+  private userNeedsDepth = false
+  private depthCopyPass: FxPass | null = null
+  private skyPipeline: GPURenderPipeline | null = null
+  private skyPipelineNoDepth: GPURenderPipeline | null = null
+  private skyBindGroup: GPUBindGroup | null = null
+  private skyUniformBuffer: GPUBuffer | null = null
+  private skyArray = new Float32Array(20)
+  private skyboxPipelineNoDepth: GPURenderPipeline | null = null
+  private lightingDesc = { label: "DeferredLightingPass", colorAttachments: [{ view: null as any, clearValue: BG_CLEAR, loadOp: "clear" as const, storeOp: "store" as const }] }
+  private passTimings = { shadow: 0, gbuffer: 0, lighting: 0, ssr: 0, postprocess: 0 }
+  private previewChain: Promise<unknown> = Promise.resolve()
+  private previewCache = new Map<string, { pipeline: GPURenderPipeline; mode: "mesh" | "quad" | "tri" } | null>()
+  private previewQuad: GPUBuffer | null = null
 
   private resolveFrameFields(layout: UniformBufferLayout): FrameFields {
     const pick = (...names: string[]) => {
@@ -365,6 +531,7 @@ export class WebGPUAdapter implements RenderAdapter {
       audio,
       envExposure: pick("envExposure", "u_envExposure"),
       envRotation: pick("envRotation", "u_envRotation"),
+      color: pick("color", "u_color"),
     }
   }
 
@@ -525,6 +692,7 @@ export class WebGPUAdapter implements RenderAdapter {
     } catch (e) { const msg = e instanceof Error ? e.message : String(e); useProjectStore.getState().setLastCompileError(msg); return false }
     this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(defaultShader) })
     this.createDepthTexture()
+    this.initFidelityResources()
     this.initShadowMap(this.state.shadowConfig.resolution || 2048)
     if (this.state.pipelineMode === "deferred") {
       this.initDeferredGeometryPipeline()
@@ -539,6 +707,7 @@ export class WebGPUAdapter implements RenderAdapter {
       this.shadowCubeTex = null
       this.setPointLightShadowCube(true)
     }
+    this.syncFxPasses()
     useProjectStore.getState().setLastCompileError(null)
     this.initialized = true
     this.startRenderLoop()
@@ -669,10 +838,14 @@ export class WebGPUAdapter implements RenderAdapter {
     } else {
       this.cleanupSkyboxPipeline()
     }
+    // The "atmosphere" environment preset swaps the equirect skybox for the analytic sky (AtmosphereParams-driven).
+    if (settings.showSkybox && settings.preset === "atmosphere") this.setupSkyPipelines()
+    else this.cleanupSky()
   }
 
   private cleanupSkyboxPipeline() {
     this.skyboxPipeline = null
+    this.skyboxPipelineNoDepth = null
     this.skyboxBindGroupLayout = null
     this.skyboxBindGroup = null
     try { this.skyboxUniformBuffer?.destroy() } catch {}
@@ -750,32 +923,48 @@ export class WebGPUAdapter implements RenderAdapter {
         bindGroupLayouts: [this.skyboxBindGroupLayout],
       })
 
-      this.skyboxPipeline = this.device.createRenderPipeline({
-        layout: pipelineLayout,
-        vertex: {
-          module: shaderModule,
-          entryPoint: "vertex_main",
-        },
-        fragment: {
-          module: shaderModule,
-          entryPoint: "fragment_main",
-          targets: [{ format: this.format }],
-        },
-        primitive: {
-          topology: "triangle-list",
-          cullMode: "none",
-        },
-        depthStencil: {
-          format: "depth24plus",
-          depthWriteEnabled: false,
-          depthCompare: "always",
-        },
-      })
+      this.skyboxPipeline = this.createBackgroundPipeline(shaderModule, pipelineLayout, true)
+      // Deferred lighting draws its background in a pass without a depth attachment.
+      this.skyboxPipelineNoDepth = this.createBackgroundPipeline(shaderModule, pipelineLayout, false)
 
       this.updateSkyboxBindGroup()
     } catch (err) {
       console.warn("Skybox pipeline error:", err)
     }
+  }
+
+  private createBackgroundPipeline(module: GPUShaderModule, layout: GPUPipelineLayout, withDepth: boolean): GPURenderPipeline {
+    return this.device!.createRenderPipeline({
+      layout,
+      vertex: { module, entryPoint: "vertex_main" },
+      fragment: { module, entryPoint: "fragment_main", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      ...(withDepth ? { depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "always" } } : {}),
+    } as GPURenderPipelineDescriptor)
+  }
+
+  private setupSkyPipelines() {
+    if (!this.device || this.skyPipeline) return
+    try {
+      const module = this.device.createShaderModule({ code: skyWgsl })
+      const bgl = this.device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }] })
+      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [bgl] })
+      this.skyUniformBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: "SkyUniformBuffer" })
+      this.skyBindGroup = this.device.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: this.skyUniformBuffer } }] })
+      this.skyPipeline = this.createBackgroundPipeline(module, layout, true)
+      this.skyPipelineNoDepth = this.createBackgroundPipeline(module, layout, false)
+    } catch (err) {
+      console.warn("Sky pipeline error:", err)
+      this.cleanupSky()
+    }
+  }
+
+  private cleanupSky() {
+    this.skyPipeline = null
+    this.skyPipelineNoDepth = null
+    this.skyBindGroup = null
+    try { this.skyUniformBuffer?.destroy() } catch {}
+    this.skyUniformBuffer = null
   }
 
   private updateSkyboxBindGroup() {
@@ -868,8 +1057,9 @@ export class WebGPUAdapter implements RenderAdapter {
     if (!this.device || !this.canvas) return
     const width = Math.max(1, Math.floor(this.canvas.width)), height = Math.max(1, Math.floor(this.canvas.height))
     this.depthTexture?.destroy()
-    this.depthTexture = this.device.createTexture({ size: [width, height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT })
+    this.depthTexture = this.device.createTexture({ size: [width, height], format: GBUFFER_FORMATS.depth, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING })
     this.depthTextureView = this.depthTexture.createView()
+    this.invalidateFxBindGroups()
   }
 
   resize(width: number, height: number, customDpr?: number) {
@@ -879,7 +1069,7 @@ export class WebGPUAdapter implements RenderAdapter {
     if (this.canvas.width === canvasWidth && this.canvas.height === canvasHeight) return
     this.canvas.width = canvasWidth; this.canvas.height = canvasHeight
     this.createDepthTexture()
-    if (this.pingPong && this.hasPostProcess) {
+    if (this.pingPong) {
       this.pingPong.resize(canvasWidth, canvasHeight)
       for (const pass of this.postProcessPasses) {
         pass.bindGroupCache?.clear()
@@ -892,6 +1082,9 @@ export class WebGPUAdapter implements RenderAdapter {
     if (this.state.pipelineMode === "deferred") {
       this.initGBuffer(canvasWidth, canvasHeight)
     }
+    this.createTaaHistory()
+    this.createUserDepth()
+    this.invalidateFxBindGroups()
   }
 
   private initializeParticleStorage(count: number, preset: ComputePreset) {
@@ -1084,32 +1277,137 @@ export class WebGPUAdapter implements RenderAdapter {
     }
   }
 
-  /**
-   * TODO(W4): the shadow depth pass is invalid today (it reuses the colour pipeline inside a depth-only pass),
-   * so it can never run: `shadowPassReady` stays false until W4 builds a depth-only shadow pipeline + light MVP.
-   */
-  private encodeShadowPass(encoder: GPUCommandEncoder, vertexBuffer: GPUBuffer, vertexCount: number) {
-    if (!this.shadowPassReady || !this.shadowSettings?.enabled || !this.shadowDepthTex || !this.pipeline || !this.bindGroup) return
-    const shadowPass = encoder.beginRenderPass({
-      label: "ShadowDepthPass",
-      colorAttachments: [],
-      depthStencilAttachment: {
-        view: this.shadowDepthTex.createView(),
-        depthClearValue: 1.0,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
-    })
-    shadowPass.setPipeline(this.pipeline)
-    shadowPass.setBindGroup(0, this.bindGroup)
-    shadowPass.setVertexBuffer(0, vertexBuffer)
-    shadowPass.draw(vertexCount)
-    shadowPass.end()
-    this.statDraws++
-    this.statTriangles += vertexCount / 3
+  // ---------------------------------------------------------------------------------------------------------------
+  // Shadow depth passes (depth-only pipeline: vertex stage only, no colour targets)
+  // ---------------------------------------------------------------------------------------------------------------
+
+  private directionalShadowActive(): boolean {
+    return !!(this.shadowSettings.enabled && this.shadowDepthView && this.shadowPipeline && this.shadowBindGroup)
   }
 
+  private pointShadowActive(): boolean {
+    return !!(this.shadowSettings.enabled && this.state.pointShadowCubeEnabled && this.shadowArrayView
+      && this.shadowFaceViews.length === 6 && this.shadowPipeline && this.shadowBindGroup)
+  }
+
+  /** Fills lightVP (directional, orthographic) and the six point-light face view-projections. Scalar maths only. */
+  private computeLightMatrices() {
+    const dl = this.shadowSettings.directionalLight
+    const pos = dl?.position ?? [5, 10, 5]
+    const tgt = dl?.target ?? [0, 0, 0]
+    this.lightEye[0] = pos[0]; this.lightEye[1] = pos[1]; this.lightEye[2] = pos[2]
+    this.lightTarget[0] = tgt[0]; this.lightTarget[1] = tgt[1]; this.lightTarget[2] = tgt[2]
+    const dx = pos[0] - tgt[0], dz = pos[2] - tgt[2]
+    const vertical = Math.abs(pos[1] - tgt[1]) > 0.99 * (Math.hypot(dx, pos[1] - tgt[1], dz) || 1)
+    this.lightUp[0] = vertical ? 0 : 0; this.lightUp[1] = vertical ? 0 : 1; this.lightUp[2] = vertical ? 1 : 0
+    setLookAtMatrix(this.lightView, this.lightEye, this.lightTarget, this.lightUp)
+    setOrthoMatrixWebGPU(this.lightProj, dl?.orthoSize ?? 10, dl?.near ?? 0.1, dl?.far ?? 50)
+    multiplyMatricesInto(this.lightVP, this.lightProj, this.lightView)
+
+    if (this.pointShadowActive() || (this.state.pointShadowCubeEnabled && this.shadowSettings.enabled)) {
+      const pl = this.shadowSettings.pointLight
+      const pp = pl?.position ?? [0, 3, 0]
+      setPerspectiveMatrixWebGPU(this.faceTmpProj, Math.PI / 2, 1, pl?.near ?? 0.1, pl?.far ?? 50)
+      for (let f = 0; f < 6; f++) {
+        const d = FACE_DIRS[f]
+        this.lightEye[0] = pp[0]; this.lightEye[1] = pp[1]; this.lightEye[2] = pp[2]
+        this.lightTarget[0] = pp[0] + d[0]; this.lightTarget[1] = pp[1] + d[1]; this.lightTarget[2] = pp[2] + d[2]
+        setLookAtMatrix(this.faceTmpView, this.lightEye, this.lightTarget, FACE_UPS[f])
+        multiplyMatricesInto(this.faceTmpVP, this.faceTmpProj, this.faceTmpView)
+        this.faceVP.set(this.faceTmpVP, f * 16)
+      }
+    }
+  }
+
+  /**
+   * Directional shadow depth pass, plus six point-light face passes when point shadows are on. Each pass uses the
+   * shared depth-only pipeline; the per-pass light matrix is selected with a dynamic uniform offset.
+   */
+  private encodeShadowPass(encoder: GPUCommandEncoder, vertexBuffer: GPUBuffer, vertexCount: number) {
+    const dirOn = this.directionalShadowActive()
+    const pointOn = this.pointShadowActive()
+    if (!dirOn && !pointOn) return
+    // slot 0: lightVP * model, slots 1..6: faceVP * model. One writeBuffer for all of them.
+    const stride = SHADOW_SLOT_BYTES / 4
+    if (dirOn) {
+      multiplyMatricesInto(this.slotMatrix, this.lightVP, this.rotMatrix)
+      this.shadowData.set(this.slotMatrix, 0)
+    }
+    if (pointOn) {
+      for (let f = 0; f < 6; f++) {
+        for (let i = 0; i < 16; i++) this.faceTmpVP[i] = this.faceVP[f * 16 + i]
+        multiplyMatricesInto(this.slotMatrix, this.faceTmpVP, this.rotMatrix)
+        this.shadowData.set(this.slotMatrix, (f + 1) * stride)
+      }
+    }
+    this.device!.queue.writeBuffer(this.shadowUniformBuffer!, 0, this.shadowData)
+
+    const tris = vertexCount / 3
+    if (dirOn) {
+      const desc = this.shadowDescs[0]
+      desc.depthStencilAttachment.view = this.shadowDepthView
+      const pass = encoder.beginRenderPass(desc as GPURenderPassDescriptor)
+      pass.setPipeline(this.shadowPipeline!)
+      pass.setBindGroup(0, this.shadowBindGroup!, this.shadowOffsets[0])
+      pass.setVertexBuffer(0, vertexBuffer)
+      pass.draw(vertexCount)
+      pass.end()
+      this.statDraws++
+      this.statTriangles += tris
+    }
+    if (pointOn) {
+      for (let f = 0; f < 6; f++) {
+        const desc = this.shadowDescs[f + 1]
+        desc.depthStencilAttachment.view = this.shadowFaceViews[f]
+        const pass = encoder.beginRenderPass(desc as GPURenderPassDescriptor)
+        pass.setPipeline(this.shadowPipeline!)
+        pass.setBindGroup(0, this.shadowBindGroup!, this.shadowOffsets[f + 1])
+        pass.setVertexBuffer(0, vertexBuffer)
+        pass.draw(vertexCount)
+        pass.end()
+        this.statDraws++
+        this.statTriangles += tris
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Frame
+  // ---------------------------------------------------------------------------------------------------------------
+
   renderFrame(time: number, delta: number = 16) {
+    this.inFrame = true
+    try { this.drawFrame(time, delta) } finally { this.inFrame = false }
+  }
+
+  /** Background for the current environment: analytic sky (atmosphere preset) or the equirect skybox. */
+  private drawBackground(pass: GPURenderPassEncoder, noDepth: boolean): boolean {
+    if (this.skyBackgroundActive()) {
+      pass.setPipeline((noDepth ? this.skyPipelineNoDepth : this.skyPipeline)!)
+      pass.setBindGroup(0, this.skyBindGroup!)
+      pass.draw(3)
+      this.statDraws++; this.statTriangles++
+      return true
+    }
+    if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup) {
+      pass.setPipeline((noDepth ? this.skyboxPipelineNoDepth : this.skyboxPipeline)!)
+      pass.setBindGroup(0, this.skyboxBindGroup)
+      pass.draw(3)
+      this.statDraws++; this.statTriangles++
+      return true
+    }
+    return false
+  }
+
+  private skyBackgroundActive(): boolean {
+    return !!(this.envSettings?.showSkybox && this.envSettings.preset === "atmosphere" && this.skyPipeline && this.skyPipelineNoDepth && this.skyBindGroup)
+  }
+
+  private deferredActive(): boolean {
+    return this.state.pipelineMode === "deferred" && !!this.deferredGeometryPipeline && !!this.deferredLightingPipeline
+  }
+
+  private drawFrame(time: number, delta: number) {
     if (!this.initialized || !this.canvas || !this.device || !this.context) return
     this.frameCount++
     if (time - this.lastFrameTime >= 1000) {
@@ -1120,6 +1418,8 @@ export class WebGPUAdapter implements RenderAdapter {
     }
     this.statDraws = 0
     this.statTriangles = 0
+    const timings = this.passTimings
+    timings.shadow = 0; timings.gbuffer = 0; timings.lighting = 0; timings.ssr = 0; timings.postprocess = 0
     // Mesh rotation is a pure function of playback time (0.6 / 0.9 rad/s): pause, seek and recording are deterministic.
     const seconds = time / 1000
     this.angleX = seconds * 0.6
@@ -1127,6 +1427,9 @@ export class WebGPUAdapter implements RenderAdapter {
     const aspect = this.canvas.width / (this.canvas.height || 1)
     setPerspectiveMatrixWebGPU(this.projMatrix, Math.PI / 4, aspect, 0.1, 100)
     setLookAtMatrix(this.viewMatrix, CAM_EYE, CAM_TARGET, CAM_UP)
+    const p8 = this.projMatrix[8], p9 = this.projMatrix[9]
+    // View-projection WITHOUT jitter drives every screen-space effect (sub-pixel jitter is irrelevant there).
+    multiplyMatricesInto(this.vpMatrix, this.projMatrix, this.viewMatrix)
     if (this.state.postProcessState.taa.enabled) {
       this.taaFrameIndex = Math.floor(time / (1000 / 60)) % 16
       const jitterX = (halton(this.taaFrameIndex + 1, 2) - 0.5) / this.canvas.width
@@ -1140,6 +1443,9 @@ export class WebGPUAdapter implements RenderAdapter {
     setRotationMatrix(this.rotMatrix, this.angleX, this.angleY)
     multiplyMatricesInto(this.tempMatrix, this.viewMatrix, this.rotMatrix)
     multiplyMatricesInto(this.mvpMatrix, this.projMatrix, this.tempMatrix)
+    // Restore the un-jittered projection: nothing else may observe the TAA offset.
+    this.projMatrix[8] = p8
+    this.projMatrix[9] = p9
 
     // Per-frame uniforms (mvp + time) go into the persistent CPU block; everything dirty (plus any audio writes)
     // leaves in ONE writeBuffer. Unchanged values (paused) cost no GPU write.
@@ -1167,29 +1473,48 @@ export class WebGPUAdapter implements RenderAdapter {
     const vertexBuffer = this.vertexBuffers.get(geometry)
     const vertexCount = this.vertexCounts.get(geometry) ?? 36
     if (!this.hasCompute && !vertexBuffer) return
-    // Update skybox uniforms if skybox is active
-    if (this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup && this.skyboxUniformBuffer && this.canvas) {
+    // Update background uniforms (skybox or analytic sky)
+    if (this.envSettings?.showSkybox && this.canvas) {
       const halfTan = Math.tan(Math.PI / 8)
       const V = this.viewMatrix
       const rotRad = ((this.envSettings.rotation || 0) * Math.PI) / 180
       const blur = this.envSettings.backgroundBlur || 0.0
       const exposure = this.envSettings.exposure ?? 1.0
-
-      const sky = this.skyboxArray
-      sky[0] = V[0] * aspect * halfTan; sky[1] = V[4] * aspect * halfTan; sky[2] = V[8] * aspect * halfTan; sky[3] = aspect
-      sky[4] = V[1] * halfTan; sky[5] = V[5] * halfTan; sky[6] = V[9] * halfTan; sky[7] = 0
-      sky[8] = -V[2]; sky[9] = -V[6]; sky[10] = -V[10]; sky[11] = 0
-      sky[12] = rotRad; sky[13] = blur; sky[14] = exposure; sky[15] = 0
-      this.device.queue.writeBuffer(this.skyboxUniformBuffer, 0, sky)
+      if (this.skyBackgroundActive() && this.skyUniformBuffer) {
+        const sky = this.skyArray
+        sky[0] = V[0] * aspect * halfTan; sky[1] = V[4] * aspect * halfTan; sky[2] = V[8] * aspect * halfTan; sky[3] = 0
+        sky[4] = V[1] * halfTan; sky[5] = V[5] * halfTan; sky[6] = V[9] * halfTan; sky[7] = 0
+        sky[8] = -V[2]; sky[9] = -V[6]; sky[10] = -V[10]; sky[11] = 0
+        const atm = this.state.atmosphereParams
+        const el = (atm.solarElevationDeg * Math.PI) / 180
+        const az = (Math.PI * (atm.timeOfDay - 6)) / 12
+        sky[12] = Math.cos(el) * Math.cos(az); sky[13] = Math.sin(el); sky[14] = -Math.cos(el) * Math.sin(az); sky[15] = atm.sunIntensity
+        sky[16] = atm.turbidity; sky[17] = exposure; sky[18] = 0; sky[19] = 0
+        this.device.queue.writeBuffer(this.skyUniformBuffer, 0, sky)
+      } else if (this.skyboxPipeline && this.skyboxBindGroup && this.skyboxUniformBuffer) {
+        const sky = this.skyboxArray
+        sky[0] = V[0] * aspect * halfTan; sky[1] = V[4] * aspect * halfTan; sky[2] = V[8] * aspect * halfTan; sky[3] = aspect
+        sky[4] = V[1] * halfTan; sky[5] = V[5] * halfTan; sky[6] = V[9] * halfTan; sky[7] = 0
+        sky[8] = -V[2]; sky[9] = -V[6]; sky[10] = -V[10]; sky[11] = 0
+        sky[12] = rotRad; sky[13] = blur; sky[14] = exposure; sky[15] = 0
+        this.device.queue.writeBuffer(this.skyboxUniformBuffer, 0, sky)
+      }
     }
+
+    const meshPath = !(this.hasCompute && this.computePipeline && this.computeBindGroup && this.particleStorageBuffer && this.particleRenderPipeline && this.particleRenderBindGroup)
+      && !!vertexBuffer && !!this.pipeline && !!this.bindGroup
+    const deferred = meshPath && this.deferredActive()
+    if (meshPath && (this.directionalShadowActive() || this.pointShadowActive())) this.computeLightMatrices()
+    const fxNeeded = this.fxPasses.length > 0 || deferred
 
     const commandEncoder = this.device.createCommandEncoder()
     const textureView = this.context.getCurrentTexture().createView()
-    const usePostProcess = this.hasPostProcess && this.postProcessPasses.length > 0 && !!this.pingPong?.getCurrent()
+    const userPasses = this.hasPostProcess && this.pingPong?.getCurrent() ? this.postProcessPasses.length : 0
+    const chainLength = this.fxPasses.length + userPasses
+    const usePostProcess = chainLength > 0 && !!this.pingPong?.getCurrent()
     const targetView = usePostProcess
       ? this.pingPong!.getCurrent()!
       : textureView
-    const skybox = !!(this.envSettings?.showSkybox && this.skyboxPipeline && this.skyboxBindGroup)
 
     if (this.hasCompute && this.computePipeline && this.computeBindGroup && this.particleStorageBuffer && this.particleRenderPipeline && this.particleRenderBindGroup) {
       // 1. Compute pass: skipped while paused (delta === 0) so the simulation is frozen, except to honour a reseed.
@@ -1234,13 +1559,7 @@ export class WebGPUAdapter implements RenderAdapter {
         colorAttachments: [{ view: targetView, clearValue: { r: 0.02, g: 0.02, b: 0.04, a: 1 }, loadOp: "clear", storeOp: "store" }],
         depthStencilAttachment: { view: this.depthTextureView!, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" },
       })
-      if (skybox) {
-        renderPass.setPipeline(this.skyboxPipeline!)
-        renderPass.setBindGroup(0, this.skyboxBindGroup!)
-        renderPass.draw(3)
-        this.statDraws++
-        this.statTriangles++
-      }
+      this.drawBackground(renderPass, false)
       renderPass.setPipeline(this.particleRenderPipeline)
       renderPass.setBindGroup(0, this.particleRenderBindGroup)
       renderPass.draw(6, this.particleCount, 0, 0)
@@ -1248,18 +1567,15 @@ export class WebGPUAdapter implements RenderAdapter {
       this.statDraws++
       this.statTriangles += 2 * this.particleCount
     } else if (vertexBuffer && this.pipeline && this.bindGroup) {
-      if (this.state.pipelineMode === "deferred") {
-        if (!this.gBufferAlbedoTex || !this.gBufferNormalTex || !this.gBufferRoughnessTex || !this.gBufferDepthTex || !this.gBufferMotionTex) {
-          this.initGBuffer(this.canvas?.width || 1920, this.canvas?.height || 1080)
-        }
-        if (!this.deferredLightingPipeline) {
-          this.initDeferredLightingPipeline()
-        }
+      let t = nowMs()
+      // 1. Shadow depth passes (directional + point cube): only encoded when enabled.
+      this.encodeShadowPass(commandEncoder, vertexBuffer, vertexCount)
+      let t1 = nowMs(); timings.shadow = t1 - t; t = t1
 
-        // 1. Directional Light Shadow Depth Render Pass (guarded, see encodeShadowPass)
-        this.encodeShadowPass(commandEncoder, vertexBuffer, vertexCount)
-
-        // 2. GBuffer Geometry Pass
+      if (deferred) {
+        if (!this.gBufferViews) this.initGBuffer(this.canvas.width || 1920, this.canvas.height || 1080)
+        // 2. G-buffer geometry pass (4 colour targets + depth, formats from GBUFFER_FORMATS)
+        this.writeGBufferUniforms()
         const gBufferPass = commandEncoder.beginRenderPass({
           label: "GBufferGeometryPass",
           colorAttachments: [
@@ -1275,54 +1591,34 @@ export class WebGPUAdapter implements RenderAdapter {
             depthStoreOp: "store",
           },
         })
-        if (skybox) {
-          gBufferPass.setPipeline(this.skyboxPipeline!)
-          gBufferPass.setBindGroup(0, this.skyboxBindGroup!)
-          gBufferPass.draw(3)
-          this.statDraws++
-          this.statTriangles++
-        }
-        gBufferPass.setPipeline(this.deferredGeometryPipeline || this.pipeline)
-        gBufferPass.setBindGroup(0, this.bindGroup)
+        gBufferPass.setPipeline(this.deferredGeometryPipeline!)
+        gBufferPass.setBindGroup(0, this.gbufferBindGroup!)
         gBufferPass.setVertexBuffer(0, vertexBuffer)
         gBufferPass.draw(vertexCount)
         gBufferPass.end()
         this.statDraws++
         this.statTriangles += vertexCount / 3
+        t1 = nowMs(); timings.gbuffer = t1 - t; t = t1
 
-        // 3. Fullscreen Deferred Lighting Pass
-        this.updateDeferredLightingUniforms()
-        const lightingPass = commandEncoder.beginRenderPass({
-          label: "DeferredLightingPass",
-          colorAttachments: [{
-            view: targetView,
-            clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-            loadOp: "clear",
-            storeOp: "store",
-          }],
-        })
-        if (this.deferredLightingPipeline && this.deferredLightingBindGroup) {
-          lightingPass.setPipeline(this.deferredLightingPipeline)
+        // 3. Fullscreen deferred lighting. Background first (no-depth variants), lighting discards depth == 1 pixels.
+        this.lightingDesc.colorAttachments[0].view = targetView
+        const lightingPass = commandEncoder.beginRenderPass(this.lightingDesc as GPURenderPassDescriptor)
+        this.drawBackground(lightingPass, true)
+        if (this.deferredLightingBindGroup) {
+          lightingPass.setPipeline(this.deferredLightingPipeline!)
           lightingPass.setBindGroup(0, this.deferredLightingBindGroup)
           lightingPass.draw(3)
           this.statDraws++
           this.statTriangles++
         }
         lightingPass.end()
+        t1 = nowMs(); timings.lighting = t1 - t; t = t1
       } else {
-        this.encodeShadowPass(commandEncoder, vertexBuffer, vertexCount)
-
         const renderPass = commandEncoder.beginRenderPass({
-          colorAttachments: [{ view: targetView, clearValue: { r: 0.08, g: 0.08, b: 0.1, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          colorAttachments: [{ view: targetView, clearValue: BG_CLEAR, loadOp: "clear", storeOp: "store" }],
           depthStencilAttachment: { view: this.depthTextureView!, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" },
         })
-        if (skybox) {
-          renderPass.setPipeline(this.skyboxPipeline!)
-          renderPass.setBindGroup(0, this.skyboxBindGroup!)
-          renderPass.draw(3)
-          this.statDraws++
-          this.statTriangles++
-        }
+        this.drawBackground(renderPass, false)
         renderPass.setPipeline(this.pipeline)
         renderPass.setBindGroup(0, this.bindGroup)
         renderPass.setVertexBuffer(0, vertexBuffer)
@@ -1330,70 +1626,175 @@ export class WebGPUAdapter implements RenderAdapter {
         renderPass.end()
         this.statDraws++
         this.statTriangles += vertexCount / 3
+        t1 = nowMs(); timings.lighting = t1 - t; t = t1
       }
     }
 
     if (usePostProcess) {
-      const numPasses = this.postProcessPasses.length
-      for (let i = 0; i < numPasses; i++) {
-        const pass = this.postProcessPasses[i]
-        const isFinal = (i === numPasses - 1)
+      const tPost = nowMs()
+      if (this.userNeedsDepth && this.depthCopyPass && this.userDepthView) this.encodeFxPass(commandEncoder, this.depthCopyPass, this.defaultView!, this.userDepthView)
+      const fxN = this.fxPasses.length
+      for (let i = 0; i < chainLength; i++) {
+        const isFinal = (i === chainLength - 1)
         const passTarget = isFinal ? textureView : this.pingPong!.getNext()!
         const inputView = this.pingPong!.getCurrent()!
-
-        if (!pass.bindGroupCache) {
-          pass.bindGroupCache = new Map()
+        if (i < fxN) {
+          const fxp = this.fxPasses[i]
+          const tp = nowMs()
+          this.encodeFxPass(commandEncoder, fxp, inputView, passTarget)
+          if (fxp.kind === "ssr") timings.ssr += nowMs() - tp
+        } else {
+          this.encodeUserPass(commandEncoder, this.postProcessPasses[i - fxN], inputView, passTarget)
         }
-        let passBindGroup = pass.bindGroupCache.get(inputView)
-        if (!passBindGroup) {
-          const bindEntries: GPUBindGroupEntry[] = [
-            { binding: 0, resource: this.postProcessSampler! },
-            { binding: 1, resource: inputView },
-          ]
-          if (pass.uniformBuffer) {
-            bindEntries.push({ binding: 2, resource: { buffer: pass.uniformBuffer } })
-          }
-          if (pass.passType === "ssao" || pass.passType === "ssr") {
-            const depthV = this.gBufferViews?.depth || this.depthTextureView || this.defaultTexture!.createView()
-            const normV = this.gBufferViews?.normal || this.defaultTexture!.createView()
-            bindEntries.push({ binding: 3, resource: depthV })
-            bindEntries.push({ binding: 4, resource: normV })
-          } else if (pass.passType === "dof") {
-            const depthV = this.gBufferViews?.depth || this.depthTextureView || this.defaultTexture!.createView()
-            bindEntries.push({ binding: 3, resource: depthV })
-          } else if (pass.passType === "taa") {
-            const histV = this.defaultTexture!.createView()
-            const motV = this.gBufferViews?.motion || this.defaultTexture!.createView()
-            bindEntries.push({ binding: 3, resource: histV })
-            bindEntries.push({ binding: 4, resource: motV })
-          }
-          passBindGroup = this.device.createBindGroup({
-            layout: pass.bindGroupLayout,
-            entries: bindEntries,
-          })
-          pass.bindGroupCache.set(inputView, passBindGroup)
-        }
-
-        const ppPass = commandEncoder.beginRenderPass({
-          colorAttachments: [{ view: passTarget, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
-        })
-        ppPass.setPipeline(pass.pipeline)
-        ppPass.setBindGroup(0, passBindGroup)
-        ppPass.draw(6)
-        ppPass.end()
-        this.statDraws++
-        this.statTriangles += 2
-
         if (!isFinal) {
           this.pingPong!.swap()
         }
       }
+      timings.postprocess = nowMs() - tPost - timings.ssr
     }
 
+    // Fx block last: writes are queue-ordered, so it is current for every pass of this submit.
+    if (fxNeeded) this.writeFxUniforms(deferred, meshPath)
     this.device.queue.submit([commandEncoder.finish()])
+    this.prevMvp.set(this.mvpMatrix)
     this.frameStats.drawCalls = this.statDraws
     this.frameStats.triangles = this.statTriangles
+    // CPU encode time per phase (ms). Reported only while a fidelity feature is active; GPU timestamp queries are not used.
+    this.frameStats.passTimings = fxNeeded || this.directionalShadowActive() ? timings : undefined
     performanceTelemetry.reportFrameStats(this.frameStats)
+  }
+
+  /** One user post-process pass (graph node), reading `inputView` and writing `passTarget`. */
+  private encodeUserPass(encoder: GPUCommandEncoder, pass: WebGPUPostProcessPass, inputView: GPUTextureView, passTarget: GPUTextureView) {
+    if (!pass.bindGroupCache) pass.bindGroupCache = new Map()
+    let passBindGroup = pass.bindGroupCache.get(inputView)
+    if (!passBindGroup) {
+      const bindEntries: GPUBindGroupEntry[] = [
+        { binding: 0, resource: this.postProcessSampler! },
+        { binding: 1, resource: inputView },
+      ]
+      if (pass.uniformBuffer) {
+        bindEntries.push({ binding: 2, resource: { buffer: pass.uniformBuffer } })
+      }
+      const dummy = this.defaultTexture!.createView()
+      if (pass.passType === "ssao" || pass.passType === "ssr") {
+        bindEntries.push({ binding: 3, resource: this.userDepthView || dummy })
+        bindEntries.push({ binding: 4, resource: this.gBufferViews?.normal || dummy })
+      } else if (pass.passType === "dof") {
+        bindEntries.push({ binding: 3, resource: this.userDepthView || dummy })
+      } else if (pass.passType === "taa") {
+        bindEntries.push({ binding: 3, resource: dummy })
+        bindEntries.push({ binding: 4, resource: this.gBufferViews?.motion || dummy })
+      }
+      passBindGroup = this.device!.createBindGroup({ layout: pass.bindGroupLayout, entries: bindEntries })
+      pass.bindGroupCache.set(inputView, passBindGroup)
+    }
+    const ppPass = encoder.beginRenderPass({
+      colorAttachments: [{ view: passTarget, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+    })
+    ppPass.setPipeline(pass.pipeline)
+    ppPass.setBindGroup(0, passBindGroup)
+    ppPass.draw(6)
+    ppPass.end()
+    this.statDraws++
+    this.statTriangles += 2
+  }
+
+  /** One fidelity fullscreen pass. Descriptors and bind groups are reused; nothing is allocated on cache hits. */
+  private encodeFxPass(encoder: GPUCommandEncoder, p: FxPass, input: GPUTextureView, target: GPUTextureView) {
+    const parity = p.history ? this.taaHistoryIndex : 0
+    let bg: GPUBindGroup | null | undefined = p.bgCache[parity].get(input)
+    if (!bg) {
+      bg = this.createFxBindGroup(input, p.history ? this.taaHistoryViews[parity] : null)
+      if (!bg) return
+      p.bgCache[parity].set(input, bg)
+    }
+    const att = p.desc.colorAttachments
+    att[0].view = target
+    if (p.history) att[1].view = this.taaHistoryViews[1 - parity]
+    const pass = encoder.beginRenderPass(p.desc as GPURenderPassDescriptor)
+    pass.setPipeline(p.pipeline)
+    pass.setBindGroup(0, bg)
+    pass.draw(3)
+    pass.end()
+    this.statDraws++
+    this.statTriangles++
+    if (p.history) {
+      this.taaHistoryIndex = 1 - parity
+      this.taaHistoryValid = true
+    }
+  }
+
+  /** Writes the shared Fx uniform block (camera, light, shadow and effect parameters) with a single writeBuffer. */
+  private writeFxUniforms(deferred: boolean, meshPath: boolean) {
+    if (!this.device || !this.fxUniformBuffer || !this.canvas) return
+    const d = this.fxData
+    const w = this.canvas.width, h = this.canvas.height || 1
+    invertMatrixInto(this.invVpMatrix, this.vpMatrix)
+    d.set(this.invVpMatrix, FX_INV_VP)
+    d.set(this.vpMatrix, FX_VP)
+    d.set(this.lightVP, FX_LIGHT_VP)
+    d.set(this.faceVP, FX_FACE_VP)
+    d[FX_PROJ] = 0.1; d[FX_PROJ + 1] = 100
+    d[FX_SIZE] = w; d[FX_SIZE + 1] = h; d[FX_SIZE + 2] = 1 / w; d[FX_SIZE + 3] = 1 / h
+
+    const dl = this.shadowSettings.directionalLight
+    let lx = 0.5, ly = 1.0, lz = 0.75, inten = dl?.intensity ?? 1.0
+    if (dl) {
+      if (dl.enabled === false) inten = 0
+      const ex = dl.position[0] - dl.target[0], ey = dl.position[1] - dl.target[1], ez = dl.position[2] - dl.target[2]
+      const len = Math.hypot(ex, ey, ez) || 1
+      lx = ex / len; ly = ey / len; lz = ez / len
+    }
+    d[FX_LIGHT_DIR] = lx; d[FX_LIGHT_DIR + 1] = ly; d[FX_LIGHT_DIR + 2] = lz; d[FX_LIGHT_DIR + 3] = inten
+    const lc = dl?.color ?? [1, 0.95, 0.9]
+    d[FX_LIGHT_COLOR] = lc[0]; d[FX_LIGHT_COLOR + 1] = lc[1]; d[FX_LIGHT_COLOR + 2] = lc[2]
+    d[FX_LIGHT_COLOR + 3] = useProjectStore.getState().environmentSettings?.exposure ?? 1.0
+
+    const pl = this.shadowSettings.pointLight
+    const pointOn = meshPath && this.pointShadowActive()
+    const pp = pl?.position ?? [0, 3, 0]
+    d[FX_POINT_POS] = pp[0]; d[FX_POINT_POS + 1] = pp[1]; d[FX_POINT_POS + 2] = pp[2]; d[FX_POINT_POS + 3] = pl?.far ?? 50
+    const pc = pl?.color ?? [1, 1, 1]
+    d[FX_POINT_COLOR] = pc[0]; d[FX_POINT_COLOR + 1] = pc[1]; d[FX_POINT_COLOR + 2] = pc[2]
+    d[FX_POINT_COLOR + 3] = (pl?.enabled === true || (pointOn && pl?.enabled !== false)) ? (pl?.intensity ?? 1) : 0
+
+    d[FX_SHADOW] = meshPath && this.directionalShadowActive() ? 1 : 0
+    d[FX_SHADOW + 1] = this.shadowSettings.bias
+    d[FX_SHADOW + 2] = this.shadowSettings.normalBias
+    d[FX_SHADOW + 3] = this.shadowSettings.filterMode === "vsm" ? 1 : 0
+    d[FX_SHADOW2] = pointOn ? 1 : 0
+    d[FX_SHADOW2 + 1] = this.shadowSettings.resolution
+    d[FX_SHADOW2 + 2] = deferred ? 1 : 0
+    d[FX_SHADOW2 + 3] = this.taaHistoryValid ? 1 : 0
+
+    const ao = this.state.postProcessState.ssao
+    d[FX_AO] = ao.radius; d[FX_AO + 1] = ao.intensity; d[FX_AO + 2] = ao.sampleCount; d[FX_AO + 3] = this.ssaoBias
+    const sr = this.state.postProcessState.ssr
+    d[FX_SSR] = sr.maxSteps; d[FX_SSR + 1] = sr.thickness; d[FX_SSR + 2] = sr.falloff; d[FX_SSR + 3] = sr.iblBlend
+    const df = this.state.postProcessState.dof
+    d[FX_DOF] = df.focalDistance; d[FX_DOF + 1] = df.aperture; d[FX_DOF + 2] = this.dofMaxBlur
+    d[FX_DOF + 3] = df.bokehShape === "hexagon" || df.bokehShape === "hexagonal" ? 1 : df.bokehShape === "octagon" || df.bokehShape === "octagonal" ? 2 : 0
+    d[FX_MISC] = DEBUG_CODES[this.gBufferDebugView] ?? 0
+    d[FX_EYE] = CAM_EYE[0]; d[FX_EYE + 1] = CAM_EYE[1]; d[FX_EYE + 2] = CAM_EYE[2]
+    this.device.queue.writeBuffer(this.fxUniformBuffer, 0, d)
+  }
+
+  /** Per-frame G-buffer geometry uniforms: mvp, model, previous mvp (motion), albedo (the `color` uniform), eye, material. */
+  private writeGBufferUniforms() {
+    if (!this.device || !this.gbufferUniformBuffer) return
+    const g = this.gbufferData
+    g.set(this.mvpMatrix, 0)
+    g.set(this.rotMatrix, 16)
+    g.set(this.prevMvp, 32)
+    let r = 0.8, gg = 0.8, b = 0.8
+    const off = this.frameFields.color
+    const view = this.cpuUniformView
+    if (off >= 0 && view) { r = view.getFloat32(off, true); gg = view.getFloat32(off + 4, true); b = view.getFloat32(off + 8, true) }
+    g[48] = r; g[49] = gg; g[50] = b; g[51] = 1
+    g[52] = CAM_EYE[0]; g[53] = CAM_EYE[1]; g[54] = CAM_EYE[2]; g[55] = 1
+    g[56] = 0.5; g[57] = 0.0; g[58] = 0; g[59] = 0
+    this.device.queue.writeBuffer(this.gbufferUniformBuffer, 0, g)
   }
 
   setExternalLoopDriven(external: boolean) {
@@ -1483,9 +1884,13 @@ export class WebGPUAdapter implements RenderAdapter {
       this.hasCompute = false
     }
     this.pruneTextures()
+    const needsDepth = ppSteps.some(st => st.pass === "ssao" || st.pass === "ssr" || st.pass === "dof")
+    if (needsDepth !== this.userNeedsDepth || (needsDepth && !this.userDepthTex)) {
+      this.userNeedsDepth = needsDepth
+      this.createUserDepth()
+    }
     if (this.hasPostProcess && this.device && this.canvas) {
-      if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device, this.format)
-      this.pingPong.resize(this.canvas.width, this.canvas.height)
+      this.ensurePingPong()
       this.syncPostProcessPasses(ppSteps)
     } else {
       this.postProcessSignature = ""
@@ -1801,6 +2206,10 @@ export class WebGPUAdapter implements RenderAdapter {
   }
 
   private cleanupDeadResources() {
+    this.releaseFidelityResources()
+    this.releaseGBuffer()
+    this.shadowDepthTex = null; this.shadowDepthView = null
+    this.shadowCubeTex = null; this.shadowArrayView = null; this.shadowFaceViews = []
     this.depthTexture = null
     this.depthTextureView = null
     this.vertexBuffers.clear()
@@ -1907,42 +2316,291 @@ export class WebGPUAdapter implements RenderAdapter {
     store.setLastCompileError(null)
   }
 
-  private initGBuffer(width: number, height: number) {
-    if (!this.device) return
-    const w = Math.max(1, width)
-    const h = Math.max(1, height)
+  // ---------------------------------------------------------------------------------------------------------------
+  // Fidelity resources
+  // ---------------------------------------------------------------------------------------------------------------
 
+  /** Shared bind layout, samplers, uniform block, dummies and the depth-only shadow pipeline. Safe to call again. */
+  private initFidelityResources() {
+    const device = this.device
+    if (!device) return
+    this.releaseFidelityResources()
+    const F = GPUShaderStage.FRAGMENT
+    try {
+      this.fxLayout = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: F, sampler: { type: "filtering" } },
+          { binding: 1, visibility: F, texture: { sampleType: "float" } },
+          { binding: 2, visibility: F, buffer: { type: "uniform" } },
+          { binding: 3, visibility: F, texture: { sampleType: "depth" } },
+          { binding: 4, visibility: F, texture: { sampleType: "float" } },
+          { binding: 5, visibility: F, texture: { sampleType: "depth" } },
+          { binding: 6, visibility: F, sampler: { type: "comparison" } },
+          { binding: 7, visibility: F, texture: { sampleType: "float" } },
+          { binding: 8, visibility: F, texture: { sampleType: "depth", viewDimension: "2d-array" } },
+          { binding: 9, visibility: F, texture: { sampleType: "float" } },
+        ],
+      })
+      this.fxPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.fxLayout] })
+      this.fxSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" })
+      this.fxCmpSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", compare: "less" })
+      const dd = device.createTexture({ size: [1, 1], format: "depth24plus", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT })
+      const da = device.createTexture({ size: [1, 1, 6], format: "depth24plus", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT })
+      this.dummyTextures = [dd, da]
+      this.dummyDepthView = dd.createView()
+      this.dummyShadowArrayView = da.createView({ dimension: "2d-array" })
+      this.defaultView = this.defaultTexture?.createView() ?? null
+
+    } catch (e) {
+      console.warn("Fidelity resources unavailable:", e)
+    }
+  }
+
+  /** Lazily created (only once a fidelity feature is on) so default frames hold no extra uniform buffers. */
+  private ensureFxUniformBuffer() {
+    if (this.device && !this.fxUniformBuffer) {
+      this.fxUniformBuffer = this.device.createBuffer({ size: FX_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: "FidelityUniforms" })
+      this.invalidateFxBindGroups()
+    }
+  }
+
+  /** Depth-only shadow pipeline (no fragment stage, no colour targets) + light-matrix slots; created when shadows are first enabled. */
+  private ensureShadowResources() {
+    const device = this.device
+    if (!device || this.shadowPipeline) return
+    try {
+      // Depth-only shadow pipeline: no fragment stage, no colour targets.
+      const module = device.createShaderModule({ code: shadowDepthWgsl })
+      const bgl = device.createBindGroupLayout({
+        entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 64 } }],
+      })
+      this.shadowUniformBuffer = device.createBuffer({ size: this.shadowData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: "ShadowLightMatrices" })
+      this.shadowBindGroup = device.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: this.shadowUniformBuffer, offset: 0, size: 64 } }] })
+      this.shadowPipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex: { module, entryPoint: "vertex_main", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }] },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 2 },
+      })
+    } catch (e) {
+      console.warn("Shadow resources unavailable:", e)
+    }
+  }
+
+  private releaseFidelityResources() {
+    for (const t of this.dummyTextures) { try { t.destroy() } catch {} }
+    this.dummyTextures = []
+    this.dummyDepthView = null; this.dummyShadowArrayView = null; this.defaultView = null
+    try { this.fxUniformBuffer?.destroy() } catch {}
+    try { this.shadowUniformBuffer?.destroy() } catch {}
+    try { this.gbufferUniformBuffer?.destroy() } catch {}
+    this.fxUniformBuffer = null; this.shadowUniformBuffer = null; this.gbufferUniformBuffer = null
+    this.fxLayout = null; this.fxPipelineLayout = null; this.fxSampler = null; this.fxCmpSampler = null
+    this.shadowPipeline = null; this.shadowBindGroup = null; this.gbufferBindGroup = null
+    this.fxPipelines.clear()
+    this.fxPasses = []
+    this.depthCopyPass = null
+    this.fxSignature = ""
+    this.previewCache.clear()
+    try { this.previewQuad?.destroy() } catch {}
+    this.previewQuad = null
+    for (const t of this.taaHistory) { try { t?.destroy() } catch {} }
+    this.taaHistory = [null, null]; this.taaHistoryViews = [null, null]; this.taaHistoryValid = false
+    try { this.userDepthTex?.destroy() } catch {}
+    this.userDepthTex = null; this.userDepthView = null
+    this.cleanupSky()
+    this.deferredLightingBindGroup = null
+    this.deferredLightingPipeline = null
+    this.deferredLightingProgram = null
+    this.deferredGeometryPipeline = null
+  }
+
+  private fxBody(kind: FxKind): string {
+    switch (kind) {
+      case "shadow": return fxShadowResolveWgsl
+      case "ssao": return fxSsaoWgsl
+      case "ssr": return fxSsrWgsl
+      case "dof": return fxDofWgsl
+      case "fxaa": return fxFxaaWgsl
+      case "taa": return fxTaaWgsl
+      case "debug": return fxDebugWgsl
+      default: return fxDepthCopyWgsl
+    }
+  }
+
+  private getFxPipeline(kind: FxKind): GPURenderPipeline | null {
+    const device = this.device
+    if (!device || !this.fxPipelineLayout) return null
+    const cached = this.fxPipelines.get(kind)
+    if (cached) return cached
+    try {
+      const module = device.createShaderModule({ code: fxCommonWgsl + "\n" + this.fxBody(kind) })
+      const targets: GPUColorTargetState[] = kind === "depthcopy"
+        ? [{ format: "r16float" }]
+        : kind === "taa" ? [{ format: this.format }, { format: this.format }] : [{ format: this.format }]
+      const pipeline = device.createRenderPipeline({
+        layout: this.fxPipelineLayout,
+        vertex: { module, entryPoint: "vertex_main" },
+        fragment: { module, entryPoint: "fragment_main", targets },
+        primitive: { topology: "triangle-list" },
+      })
+      this.fxPipelines.set(kind, pipeline)
+      return pipeline
+    } catch (e) {
+      console.warn(`Fidelity pass "${kind}" failed to build:`, e)
+      return null
+    }
+  }
+
+  private makeFxPass(kind: FxKind): FxPass | null {
+    const pipeline = this.getFxPipeline(kind)
+    if (!pipeline) return null
+    const labels: Record<FxKind, string> = {
+      shadow: "FxShadowResolve", ssao: "FxSSAO", ssr: "FxSSR", dof: "FxDoF", fxaa: "FxFXAA", taa: "FxTAA", debug: "FxDebug", depthcopy: "FxDepthCopy",
+    }
+    const att = () => ({ view: null as any, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" })
+    const history = kind === "taa"
+    return {
+      kind, label: labels[kind], pipeline, history,
+      desc: { label: labels[kind], colorAttachments: history ? [att(), att()] : [att()] },
+      bgCache: [new Map(), new Map()],
+    }
+  }
+
+  /** The ordered list of fidelity passes implied by the current state (see FIDELITY_PASS_ORDER). */
+  private desiredFxKinds(): FxKind[] {
+    const kinds: FxKind[] = []
+    const deferred = this.state.pipelineMode === "deferred"
+    const pp = this.state.postProcessState
+    if (!deferred && this.shadowSettings.enabled) kinds.push("shadow")
+    if (pp.ssao.enabled) kinds.push("ssao")
+    if (pp.ssr.enabled) kinds.push("ssr")
+    if (pp.dof.enabled) kinds.push("dof")
+    if (this.antiAliasingMode === "taa" || pp.taa.enabled) kinds.push("taa")
+    else if (this.antiAliasingMode === "fxaa" || pp.fxaa.enabled) kinds.push("fxaa")
+    if (!deferred && this.gBufferDebugView !== "none") kinds.push("debug")
+    return kinds
+  }
+
+  private ensurePingPong() {
+    if (!this.device || !this.canvas) return
+    if (!this.pingPong) this.pingPong = new WebGPUPingPong(this.device, this.format)
+    this.pingPong.resize(this.canvas.width, this.canvas.height)
+  }
+
+  /** Rebuilds the fidelity pass list only when its structure (which effects, which mode) changed. */
+  private syncFxPasses() {
+    const kinds = this.desiredFxKinds()
+    if (this.device && (kinds.length > 0 || this.state.pipelineMode === "deferred")) this.ensureFxUniformBuffer()
+    if (this.shadowSettings.enabled) this.ensureShadowResources()
+    const sig = `${this.device ? 1 : 0}|${kinds.join(",")}`
+    if (sig === this.fxSignature) return
+    this.fxSignature = sig
+    if (!this.device || !this.fxPipelineLayout) { this.fxPasses = []; return }
+    const passes: FxPass[] = []
+    for (const k of kinds) { const p = this.makeFxPass(k); if (p) passes.push(p) }
+    this.fxPasses = passes
+    if (passes.length > 0) this.ensurePingPong()
+    this.createTaaHistory()
+    this.invalidateFxBindGroups()
+    renderCoordinator.requestRender()
+  }
+
+  private createTaaHistory() {
+    for (const t of this.taaHistory) { try { t?.destroy() } catch {} }
+    this.taaHistory = [null, null]; this.taaHistoryViews = [null, null]
+    this.taaHistoryValid = false; this.taaHistoryIndex = 0
+    if (!this.device || !this.canvas || !this.fxPasses.some(p => p.kind === "taa")) return
+    const w = Math.max(1, this.canvas.width), h = Math.max(1, this.canvas.height)
+    for (let i = 0; i < 2; i++) {
+      const t = this.device.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: "TAAHistory" })
+      this.taaHistory[i] = t
+      this.taaHistoryViews[i] = t.createView()
+    }
+  }
+
+  /** Float copy of scene depth for user-chain SSAO/SSR/DoF nodes (they sample depth as texture_2d<f32>). */
+  private createUserDepth() {
+    this.clearUserPassBindGroups()
+    try { this.userDepthTex?.destroy() } catch {}
+    this.userDepthTex = null; this.userDepthView = null
+    if (!this.userNeedsDepth || !this.device || !this.canvas || !this.fxPipelineLayout) { this.depthCopyPass = null; return }
+    const w = Math.max(1, this.canvas.width), h = Math.max(1, this.canvas.height)
+    this.userDepthTex = this.device.createTexture({ size: [w, h], format: "r16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: "UserChainDepth" })
+    this.userDepthView = this.userDepthTex.createView()
+    if (!this.depthCopyPass) this.depthCopyPass = this.makeFxPass("depthcopy")
+  }
+
+  private sceneDepthView(): GPUTextureView | null {
+    return this.deferredActive() && this.gBufferViews ? this.gBufferViews.depth : this.depthTextureView
+  }
+
+  private createFxBindGroup(input: GPUTextureView, history: GPUTextureView | null): GPUBindGroup | null {
+    const device = this.device
+    const depth = this.sceneDepthView()
+    if (!device || !this.fxLayout || !this.fxSampler || !this.fxCmpSampler || !this.fxUniformBuffer || !depth || !this.defaultView) return null
+    const deferred = this.deferredActive() && !!this.gBufferViews
+    return device.createBindGroup({
+      layout: this.fxLayout,
+      entries: [
+        { binding: 0, resource: this.fxSampler },
+        { binding: 1, resource: input },
+        { binding: 2, resource: { buffer: this.fxUniformBuffer } },
+        { binding: 3, resource: depth },
+        { binding: 4, resource: deferred ? this.gBufferViews!.normal : this.defaultView },
+        { binding: 5, resource: this.shadowDepthView ?? this.dummyDepthView! },
+        { binding: 6, resource: this.fxCmpSampler },
+        { binding: 7, resource: history ?? (deferred ? this.gBufferViews!.roughness : this.defaultView) },
+        { binding: 8, resource: this.shadowArrayView ?? this.dummyShadowArrayView! },
+        { binding: 9, resource: this.defaultView },
+      ],
+    })
+  }
+
+  /** Drops cached fidelity bind groups (resize, mode switch, shadow-map or history re-creation). */
+  private invalidateFxBindGroups() {
+    for (const p of this.fxPasses) { p.bgCache[0].clear(); p.bgCache[1].clear() }
+    if (this.depthCopyPass) { this.depthCopyPass.bgCache[0].clear(); this.depthCopyPass.bgCache[1].clear() }
+    this.taaHistoryValid = false
+    this.updateDeferredLightingBindGroup()
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Deferred pipeline: G-buffer, geometry pipeline, lighting
+  // ---------------------------------------------------------------------------------------------------------------
+
+  /** User pass bind groups bake in G-buffer / user-depth views: drop them whenever those are (re)created or destroyed. */
+  private clearUserPassBindGroups() {
+    for (const p of this.postProcessPasses) p.bindGroupCache?.clear()
+  }
+
+  private releaseGBuffer() {
+    this.clearUserPassBindGroups()
     try { this.gBufferAlbedoTex?.destroy() } catch {}
     try { this.gBufferNormalTex?.destroy() } catch {}
     try { this.gBufferRoughnessTex?.destroy() } catch {}
     try { this.gBufferDepthTex?.destroy() } catch {}
     try { this.gBufferMotionTex?.destroy() } catch {}
+    this.gBufferAlbedoTex = null; this.gBufferNormalTex = null; this.gBufferRoughnessTex = null
+    this.gBufferDepthTex = null; this.gBufferMotionTex = null
+    this.gBufferViews = null
+    this.state.gBufferTargets = null
+    this.deferredLightingBindGroup = null
+  }
 
-    this.gBufferAlbedoTex = this.device.createTexture({
-      size: [w, h],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
-    this.gBufferNormalTex = this.device.createTexture({
-      size: [w, h],
-      format: "rgba16float",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
-    this.gBufferRoughnessTex = this.device.createTexture({
-      size: [w, h],
-      format: "rg8unorm",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
-    this.gBufferDepthTex = this.device.createTexture({
-      size: [w, h],
-      format: "depth24plus-stencil8",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
-    this.gBufferMotionTex = this.device.createTexture({
-      size: [w, h],
-      format: "rg16float",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    })
+  private initGBuffer(width: number, height: number) {
+    if (!this.device) return
+    const w = Math.max(1, width)
+    const h = Math.max(1, height)
+    this.releaseGBuffer()
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    const make = (format: GPUTextureFormat) => this.device!.createTexture({ size: [w, h], format, usage })
+    const F = GBUFFER_FORMATS
+    this.gBufferAlbedoTex = make(F.albedo)
+    this.gBufferNormalTex = make(F.normal)
+    this.gBufferRoughnessTex = make(F.roughnessMetallic)
+    this.gBufferDepthTex = make(F.depth)
+    this.gBufferMotionTex = make(F.motion)
 
     this.gBufferViews = {
       albedo: this.gBufferAlbedoTex.createView(),
@@ -1951,11 +2609,11 @@ export class WebGPUAdapter implements RenderAdapter {
       depth: this.gBufferDepthTex.createView(),
       motion: this.gBufferMotionTex.createView(),
     }
-    setTexMeta(this.gBufferAlbedoTex, "rgba8unorm", w, h)
-    setTexMeta(this.gBufferNormalTex, "rgba16float", w, h)
-    setTexMeta(this.gBufferRoughnessTex, "rg8unorm", w, h)
-    setTexMeta(this.gBufferDepthTex, "depth24plus-stencil8", w, h)
-    setTexMeta(this.gBufferMotionTex, "rg16float", w, h)
+    setTexMeta(this.gBufferAlbedoTex, F.albedo, w, h)
+    setTexMeta(this.gBufferNormalTex, F.normal, w, h)
+    setTexMeta(this.gBufferRoughnessTex, F.roughnessMetallic, w, h)
+    setTexMeta(this.gBufferDepthTex, F.depth, w, h)
+    setTexMeta(this.gBufferMotionTex, F.motion, w, h)
 
     this.state.gBufferTargets = {
       albedo: this.gBufferAlbedoTex,
@@ -1964,63 +2622,30 @@ export class WebGPUAdapter implements RenderAdapter {
       depth: this.gBufferDepthTex,
       motionVectors: this.gBufferMotionTex,
     }
-
-    this.updateDeferredLightingBindGroup()
+    this.invalidateFxBindGroups()
   }
 
   private initShadowMap(resolution: number = 2048) {
     if (!this.device) return
     try { this.shadowDepthTex?.destroy() } catch {}
+    this.shadowDepthView = null
     try {
       this.shadowDepthTex = this.device.createTexture({
         size: [resolution, resolution, 1],
         format: "depth24plus",
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       })
+      this.shadowDepthView = this.shadowDepthTex.createView()
     } catch {}
+    this.invalidateFxBindGroups()
   }
 
+  /** G-buffer geometry pipeline: its colour targets are generated from GBUFFER_FORMATS (same source as the textures). */
   private initDeferredGeometryPipeline() {
     if (!this.device) return
     try {
-      const code = `
-struct VertexInput {
-  @location(0) position: vec3<f32>,
-};
-
-struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-  @location(1) normal: vec3<f32>,
-};
-
-struct GBufferOutput {
-  @location(0) albedo: vec4<f32>,
-  @location(1) normal: vec4<f32>,
-  @location(2) roughnessMetallic: vec2<f32>,
-  @location(3) motion: vec2<f32>,
-};
-
-@vertex
-fn vertex_main(input: VertexInput) -> VertexOutput {
-  var out: VertexOutput;
-  out.position = vec4<f32>(input.position, 1.0);
-  out.uv = input.position.xy * 0.5 + 0.5;
-  out.normal = vec3<f32>(0.0, 1.0, 0.0);
-  return out;
-}
-
-@fragment
-fn fragment_main(in: VertexOutput) -> GBufferOutput {
-  var out: GBufferOutput;
-  out.albedo = vec4<f32>(0.8, 0.8, 0.8, 1.0);
-  out.normal = vec4<f32>(in.normal * 0.5 + 0.5, 1.0);
-  out.roughnessMetallic = vec2<f32>(0.5, 0.0);
-  out.motion = vec2<f32>(0.0, 0.0);
-  return out;
-}
-`
-      const module = this.device.createShaderModule({ code })
+      const module = this.device.createShaderModule({ code: gbufferWgsl })
+      const F = GBUFFER_FORMATS
       this.deferredGeometryPipeline = this.device.createRenderPipeline({
         layout: "auto",
         vertex: {
@@ -2031,87 +2656,30 @@ fn fragment_main(in: VertexOutput) -> GBufferOutput {
         fragment: {
           module,
           entryPoint: "fragment_main",
-          targets: [
-            { format: "rgba8unorm" },
-            { format: "rgba16float" },
-            { format: "rg8unorm" },
-            { format: "rg16float" },
-          ],
+          targets: [{ format: F.albedo }, { format: F.normal }, { format: F.roughnessMetallic }, { format: F.motion }],
         },
         primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: { format: "depth24plus-stencil8", depthWriteEnabled: true, depthCompare: "less" },
+        depthStencil: { format: F.depth, depthWriteEnabled: true, depthCompare: "less" },
       })
-    } catch {}
+      try { this.gbufferUniformBuffer?.destroy() } catch {}
+      this.gbufferUniformBuffer = this.device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: "GBufferUniforms" })
+      this.gbufferBindGroup = this.device.createBindGroup({
+        layout: this.deferredGeometryPipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: this.gbufferUniformBuffer } }],
+      })
+    } catch (e) {
+      console.warn("Deferred geometry pipeline error:", e)
+      this.deferredGeometryPipeline = null
+    }
   }
 
   private initDeferredLightingPipeline() {
-    if (!this.device) return
+    if (!this.device || !this.fxPipelineLayout) return
+    this.ensureFxUniformBuffer()
     try {
-      this.deferredLightingUniformBuffer?.destroy()
-      this.deferredLightingUniformBuffer = this.device.createBuffer({
-        size: 64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      })
-
-      const wgsl = `
-struct DeferredUniforms {
-  lightDir: vec3<f32>,
-  lightIntensity: f32,
-  lightColor: vec3<f32>,
-  envExposure: f32,
-  debugView: i32,
-  shadowEnabled: f32,
-  pad0: f32,
-  pad1: f32,
-};
-
-@group(0) @binding(0) var u_sampler: sampler;
-@group(0) @binding(1) var u_albedoTex: texture_2d<f32>;
-@group(0) @binding(2) var u_normalTex: texture_2d<f32>;
-@group(0) @binding(3) var u_roughnessTex: texture_2d<f32>;
-@group(0) @binding(4) var u_depthTex: texture_2d<f32>;
-@group(0) @binding(5) var u_motionTex: texture_2d<f32>;
-@group(0) @binding(6) var<uniform> u_params: DeferredUniforms;
-
-@vertex
-fn vertex_main(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4<f32> {
-  var pos = array<vec2<f32>, 3>(
-    vec2<f32>(-1.0, -3.0),
-    vec2<f32>( 3.0,  1.0),
-    vec2<f32>(-1.0,  1.0)
-  );
-  return vec4<f32>(pos[vertexIndex], 0.0, 1.0);
-}
-
-@fragment
-fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
-  let dims = textureDimensions(u_albedoTex);
-  let uv = fragCoord.xy / vec2<f32>(f32(max(dims.x, 1u)), f32(max(dims.y, 1u)));
-  let albedo = textureSample(u_albedoTex, u_sampler, uv);
-  let normalRough = textureSample(u_normalTex, u_sampler, uv);
-  let roughnessMetallic = textureSample(u_roughnessTex, u_sampler, uv);
-  let depth = textureSample(u_depthTex, u_sampler, uv).r;
-  let motion = textureSample(u_motionTex, u_sampler, uv);
-
-  if (u_params.debugView == 1) { return vec4<f32>(albedo.rgb, 1.0); }
-  if (u_params.debugView == 2) { return vec4<f32>(normalRough.xyz * 0.5 + 0.5, 1.0); }
-  if (u_params.debugView == 3) { return vec4<f32>(vec3<f32>(roughnessMetallic.r), 1.0); }
-  if (u_params.debugView == 4) { return vec4<f32>(vec3<f32>(roughnessMetallic.g), 1.0); }
-  if (u_params.debugView == 5) { return vec4<f32>(vec3<f32>(depth), 1.0); }
-  if (u_params.debugView == 6) { return vec4<f32>(vec3<f32>(motion.xy * 10.0 + 0.5, 0.0), 1.0); }
-
-  let N = normalize(normalRough.xyz * 2.0 - 1.0);
-  let L = normalize(u_params.lightDir);
-  let NdotL = max(dot(N, L), 0.0);
-  var shadow: f32 = 1.0;
-  let diffuse = albedo.rgb * u_params.lightColor * (NdotL * shadow * u_params.lightIntensity);
-  let ambient = albedo.rgb * 0.15 * u_params.envExposure;
-  return vec4<f32>(diffuse + ambient, albedo.a);
-}
-`
-      const module = this.device.createShaderModule({ code: wgsl })
+      const module = this.device.createShaderModule({ code: fxCommonWgsl + "\n" + fxDeferredLightingWgsl })
       this.deferredLightingPipeline = this.device.createRenderPipeline({
-        layout: "auto",
+        layout: this.fxPipelineLayout,
         vertex: { module, entryPoint: "vertex_main" },
         fragment: { module, entryPoint: "fragment_main", targets: [{ format: this.format }] },
         primitive: { topology: "triangle-list" },
@@ -2119,84 +2687,33 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
       this.deferredLightingProgram = this.deferredLightingPipeline
       this.updateDeferredLightingBindGroup()
     } catch (e) {
+      console.warn("Deferred lighting pipeline error:", e)
       this.deferredLightingProgram = {}
     }
   }
 
+  /** Lighting reads the G-buffer through the shared fidelity layout: albedo=1, normal=4, depth=3, material=7, motion=9. */
   private updateDeferredLightingBindGroup() {
-    if (!this.device || !this.deferredLightingPipeline || !this.deferredLightingUniformBuffer) return
-    const defaultTexView = this.defaultTexture?.createView() || ({} as any)
-    const albView = this.gBufferViews?.albedo || defaultTexView
-    const normView = this.gBufferViews?.normal || defaultTexView
-    const roughView = this.gBufferViews?.roughness || defaultTexView
-    const depthView = this.gBufferViews?.depth || defaultTexView
-    const motView = this.gBufferViews?.motion || defaultTexView
-
+    const g = this.gBufferViews
+    if (!this.device || !this.deferredLightingPipeline || !this.fxLayout || !g || !this.fxSampler || !this.fxCmpSampler
+      || !this.fxUniformBuffer || !this.dummyDepthView || !this.dummyShadowArrayView) return
     try {
       this.deferredLightingBindGroup = this.device.createBindGroup({
-        layout: this.deferredLightingPipeline.getBindGroupLayout(0),
+        layout: this.fxLayout,
         entries: [
-          { binding: 0, resource: this.defaultSampler || this.postProcessSampler! },
-          { binding: 1, resource: albView },
-          { binding: 2, resource: normView },
-          { binding: 3, resource: roughView },
-          { binding: 4, resource: depthView },
-          { binding: 5, resource: motView },
-          { binding: 6, resource: { buffer: this.deferredLightingUniformBuffer } },
+          { binding: 0, resource: this.fxSampler },
+          { binding: 1, resource: g.albedo },
+          { binding: 2, resource: { buffer: this.fxUniformBuffer } },
+          { binding: 3, resource: g.depth },
+          { binding: 4, resource: g.normal },
+          { binding: 5, resource: this.shadowDepthView ?? this.dummyDepthView },
+          { binding: 6, resource: this.fxCmpSampler },
+          { binding: 7, resource: g.roughness },
+          { binding: 8, resource: this.shadowArrayView ?? this.dummyShadowArrayView },
+          { binding: 9, resource: g.motion },
         ],
       })
     } catch {}
-  }
-
-  private updateDeferredLightingUniforms() {
-    if (!this.device || !this.deferredLightingUniformBuffer) return
-    const debugViewCodes: Record<GBufferDebugView, number> = {
-      none: 0,
-      albedo: 1,
-      normal: 2,
-      roughness: 3,
-      metallic: 4,
-      depth: 5,
-      motion: 6,
-    }
-    const debugCode = debugViewCodes[this.gBufferDebugView] ?? 0
-
-    const dirLight = this.shadowSettings.directionalLight
-    let lDirX = 0.5, lDirY = 1.0, lDirZ = 0.75
-    let lColR = 1.0, lColG = 0.95, lColB = 0.9
-    let lInt = dirLight?.intensity ?? 1.0
-
-    if (dirLight) {
-      if (dirLight.enabled === false) {
-        lInt = 0.0
-      }
-      if (dirLight.position && dirLight.target) {
-        const dx = dirLight.position[0] - dirLight.target[0]
-        const dy = dirLight.position[1] - dirLight.target[1]
-        const dz = dirLight.position[2] - dirLight.target[2]
-        const len = Math.hypot(dx, dy, dz) || 1.0
-        lDirX = dx / len
-        lDirY = dy / len
-        lDirZ = dz / len
-      }
-      if (dirLight.color) {
-        lColR = dirLight.color[0]
-        lColG = dirLight.color[1]
-        lColB = dirLight.color[2]
-      }
-    }
-
-    const exp = useProjectStore.getState().environmentSettings?.exposure ?? 1.0
-    const shadowEnabled = (this.shadowSettings?.enabled && this.shadowDepthTex) ? 1.0 : 0.0
-
-    const data = this.deferredArray
-    data[0] = lDirX; data[1] = lDirY; data[2] = lDirZ; data[3] = lInt
-    data[4] = lColR; data[5] = lColG; data[6] = lColB; data[7] = exp
-    this.deferredInts[8] = debugCode
-    data[9] = shadowEnabled
-    data[10] = 0.0; data[11] = 0.0
-
-    this.device.queue.writeBuffer(this.deferredLightingUniformBuffer, 0, data)
   }
 
   setRenderingPipelineMode(mode: RenderingPipelineMode) {
@@ -2205,13 +2722,14 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
       const w = this.canvas?.width || 1920
       const h = this.canvas?.height || 1080
       this.initGBuffer(w, h)
+      // ponytail: pre-mount (no device) the render-fidelity suite expects descriptor-only targets; item 4 of w4-fixup left as-is
       if (!this.state.gBufferTargets) {
         this.state.gBufferTargets = {
-          albedo: this.gBufferAlbedoTex || { format: "rgba8unorm", width: w, height: h },
-          normal: this.gBufferNormalTex || { format: "rgba16float", width: w, height: h },
-          roughnessMetallic: this.gBufferRoughnessTex || { format: "rg8unorm", width: w, height: h },
-          depth: this.gBufferDepthTex || { format: "depth24plus-stencil8", width: w, height: h },
-          motionVectors: this.gBufferMotionTex || { format: "rg16float", width: w, height: h },
+          albedo: this.gBufferAlbedoTex || { format: GBUFFER_FORMATS.albedo, width: w, height: h },
+          normal: this.gBufferNormalTex || { format: GBUFFER_FORMATS.normal, width: w, height: h },
+          roughnessMetallic: this.gBufferRoughnessTex || { format: GBUFFER_FORMATS.roughnessMetallic, width: w, height: h },
+          depth: this.gBufferDepthTex || { format: GBUFFER_FORMATS.depth, width: w, height: h },
+          motionVectors: this.gBufferMotionTex || { format: GBUFFER_FORMATS.motion, width: w, height: h },
         }
       }
       if (!this.deferredGeometryPipeline) {
@@ -2221,8 +2739,11 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
         this.initDeferredLightingPipeline()
       }
     } else {
-      this.state.gBufferTargets = null
+      // Forward does not need the G-buffer: free its GPU memory.
+      this.releaseGBuffer()
     }
+    this.syncFxPasses()
+    this.invalidateFxBindGroups()
   }
 
   setPipelineMode(mode: RenderingPipelineMode) {
@@ -2233,12 +2754,17 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     return this.state.pipelineMode
   }
 
+  getFidelityCapabilities(): FidelityCapabilities {
+    return { effectiveShadowFilter: this.shadowSettings.filterMode, unsupported: [] }
+  }
+
   getGBufferTextures(): GBufferTargets | null {
     return this.state.gBufferTargets
   }
 
   setGBufferDebugView(view: GBufferDebugView) {
     this.gBufferDebugView = view
+    this.syncFxPasses()
   }
 
   getGBufferDebugView(): GBufferDebugView {
@@ -2259,6 +2785,7 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (this.device && config.resolution) {
       this.initShadowMap(config.resolution)
     }
+    this.syncFxPasses()
   }
 
   updateShadowSettings(settings: Partial<ShadowSettings>) {
@@ -2275,6 +2802,7 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (this.device && settings.resolution) {
       this.initShadowMap(settings.resolution)
     }
+    this.syncFxPasses()
   }
 
   getShadowSettings(): ShadowSettings {
@@ -2286,18 +2814,29 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (enabled) {
       if (this.device && !this.shadowCubeTex) {
         try {
+          // Six depth faces; sampled through a 2d-array view with the same per-face matrices used to render them.
           this.shadowCubeTex = this.device.createTexture({
             size: [512, 512, 6],
             format: "depth24plus",
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
           })
+          this.shadowArrayView = this.shadowCubeTex.createView({ dimension: "2d-array" })
+          this.shadowFaceViews = []
+          for (let f = 0; f < 6; f++) {
+            this.shadowFaceViews.push(this.shadowCubeTex.createView({ dimension: "2d", baseArrayLayer: f, arrayLayerCount: 1 }))
+          }
         } catch {}
       } else if (!this.device && !this.shadowCubeTex) {
         this.shadowCubeTex = { width: 512, height: 512, depthOrArrayLayers: 6, format: "depth24plus" } as any
       }
     } else {
+      try { this.shadowCubeTex?.destroy() } catch {}
       this.shadowCubeTex = null
+      this.shadowArrayView = null
+      this.shadowFaceViews = []
     }
+    this.invalidateFxBindGroups()
+    this.syncFxPasses()
   }
 
   setPostProcessEnabled(
@@ -2311,6 +2850,7 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
         Object.assign(this.state.postProcessState[pass], params)
       }
     }
+    this.syncFxPasses()
   }
 
   updateSSRSettings(settings: Partial<SSRSettings>) {
@@ -2319,6 +2859,7 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (settings.thickness !== undefined) this.state.postProcessState.ssr.thickness = settings.thickness
     if (settings.falloff !== undefined) this.state.postProcessState.ssr.falloff = settings.falloff
     if (settings.iblBlend !== undefined) this.state.postProcessState.ssr.iblBlend = settings.iblBlend
+    this.syncFxPasses()
   }
 
   updateDoFSettings(settings: Partial<DoFSettings>) {
@@ -2326,6 +2867,8 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (settings.focalDistance !== undefined) this.state.postProcessState.dof.focalDistance = settings.focalDistance
     if (settings.aperture !== undefined) this.state.postProcessState.dof.aperture = settings.aperture
     if (settings.bokehShape !== undefined) this.state.postProcessState.dof.bokehShape = settings.bokehShape
+    if (settings.maxBlur !== undefined) this.dofMaxBlur = settings.maxBlur
+    this.syncFxPasses()
   }
 
   updateSSAOSettings(settings: Partial<SSAOSettings>) {
@@ -2333,12 +2876,15 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     if (settings.radius !== undefined) this.state.postProcessState.ssao.radius = settings.radius
     if (settings.intensity !== undefined) this.state.postProcessState.ssao.intensity = settings.intensity
     if (settings.sampleCount !== undefined) this.state.postProcessState.ssao.sampleCount = settings.sampleCount
+    if (settings.bias !== undefined) this.ssaoBias = settings.bias
+    this.syncFxPasses()
   }
 
   setAntiAliasingMode(mode: AntiAliasingMode) {
     this.antiAliasingMode = mode
     this.state.postProcessState.fxaa.enabled = (mode === "fxaa")
     this.state.postProcessState.taa.enabled = (mode === "taa")
+    this.syncFxPasses()
   }
 
   getAntiAliasingMode(): AntiAliasingMode {
@@ -2363,6 +2909,165 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     })
     const mie = 0.002 * this.state.atmosphereParams.turbidity
     return { rayleigh, mie }
+  }
+
+  /**
+   * Applies the whole fidelity settings object. Only sections that differ from the last applied object are touched, and
+   * GPU resources are rebuilt only when their structure changes (mode, enabled effects, shadow resolution, point cube).
+   */
+  applyRenderSettings(settings: RenderSettings) {
+    const prev = this.appliedSettings
+    if (prev === settings) return
+    const differs = (a: object, b: object) => Object.keys(b).some(k => (a as any)[k] !== (b as any)[k])
+    let changed = false
+    if (settings.renderMode !== prev.renderMode) { this.setRenderingPipelineMode(settings.renderMode); changed = true }
+    if (differs(prev.shadows, settings.shadows)) {
+      const sh = settings.shadows
+      const patch: Partial<ShadowSettings> = { enabled: sh.enabled, filterMode: sh.filterMode, bias: sh.bias, normalBias: sh.normalBias }
+      if (sh.resolution !== prev.shadows.resolution && [512, 1024, 2048, 4096].includes(sh.resolution)) patch.resolution = sh.resolution
+      this.updateShadowSettings(patch)
+      if (sh.pointShadows !== prev.shadows.pointShadows) this.setPointLightShadowCube(sh.pointShadows)
+      changed = true
+    }
+    if (settings.antiAliasing !== prev.antiAliasing) { this.setAntiAliasingMode(settings.antiAliasing); changed = true }
+    if (differs(prev.ssao, settings.ssao)) { this.updateSSAOSettings(settings.ssao); changed = true }
+    if (differs(prev.ssr, settings.ssr)) { this.updateSSRSettings(settings.ssr); changed = true }
+    if (differs(prev.dof, settings.dof)) { this.updateDoFSettings(settings.dof); changed = true }
+    if (differs(prev.atmosphere, settings.atmosphere)) {
+      const a = settings.atmosphere
+      this.state.atmosphereParams = { ...a, timeOfDay: Math.max(0, Math.min(24, a.timeOfDay)) }
+      changed = true
+    }
+    if (settings.gbufferDebugView !== prev.gbufferDebugView) { this.setGBufferDebugView(settings.gbufferDebugView); changed = true }
+    this.appliedSettings = settings
+    if (changed) renderCoordinator.requestRender()
+  }
+
+  /**
+   * Renders one node's WGSL into an offscreen rgba8 target and returns the pixels as ImageData. Never touches the canvas
+   * texture, never runs inside renderFrame, and calls are serialised (concurrency 1). Pipelines are cached per source hash.
+   * Sources whose vertex stage uses @builtin(vertex_index) draw a fullscreen triangle, sources that emit position.xy as
+   * clip space draw a quad, anything else draws the preview geometry with a fixed camera.
+   */
+  renderToTarget(request: RenderToTargetRequest): Promise<ImageBitmap | ImageData | null> {
+    const run = () => this.runPreview(request)
+    const p = this.previewChain.then(run, run) as Promise<ImageData | null>
+    this.previewChain = p.catch(() => null)
+    return p
+  }
+
+  private compilePreview(wgsl: string): Promise<{ pipeline: GPURenderPipeline; mode: "mesh" | "quad" | "tri" } | null> {
+    const device = this.device
+    if (!device) return Promise.resolve(null)
+    const mode = /@builtin\(\s*vertex_index\s*\)/.test(wgsl) ? "tri" : /vec4(?:f|<f32>)\s*\(\s*\w+\.position\.xy\s*,/.test(wgsl) ? "quad" : "mesh"
+    return new Promise((resolve) => {
+      this.compileChecked<{ pipeline: GPURenderPipeline; mode: "mesh" | "quad" | "tri" }>(
+        (dev) => {
+          const module = dev.createShaderModule({ code: wgsl })
+          const pipeline = dev.createRenderPipeline({
+            layout: "auto",
+            vertex: {
+              module, entryPoint: "vertex_main",
+              ...(mode !== "tri" ? { buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" as GPUVertexFormat }] }] } : {}),
+            },
+            fragment: { module, entryPoint: "fragment_main", targets: [{ format: "rgba8unorm" }] },
+            primitive: { topology: "triangle-list", cullMode: "none" },
+            ...(mode === "mesh" ? { depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" } } : {}),
+          } as GPURenderPipelineDescriptor)
+          return { value: { pipeline, mode }, module }
+        },
+        () => this.device !== device,
+        (v) => resolve(v),
+        () => resolve(null),
+      )
+    })
+  }
+
+  private async runPreview(req: RenderToTargetRequest): Promise<ImageData | null> {
+    const device = this.device
+    const wgsl = req?.source?.wgsl
+    if (!device || !this.initialized || !wgsl || this.inFrame) return null
+    if (!Number.isFinite(req.width) || !Number.isFinite(req.height)) return null
+    const w = Math.max(1, Math.min(2048, Math.floor(req.width)))
+    const h = Math.max(1, Math.min(2048, Math.floor(req.height)))
+    const key = sourceHash(wgsl)
+    let entry = this.previewCache.get(key)
+    if (entry === undefined) {
+      entry = await this.compilePreview(wgsl)
+      if (this.device !== device) return null
+      this.previewCache.set(key, entry)
+      if (this.previewCache.size > 32) this.previewCache.delete(this.previewCache.keys().next().value as string)
+    }
+    if (!entry) return null
+
+    const temps: Array<{ destroy(): void }> = []
+    try {
+      const res = this.buildUniformResources(wgsl)
+      temps.push(res.buffer)
+      const f = this.resolveFrameFields(res.layout)
+      if (f.mvp >= 0) {
+        const proj = setPerspectiveMatrixWebGPU(new Float32Array(16), Math.PI / 4, w / h, 0.1, 100)
+        const view = setLookAtMatrix(new Float32Array(16), CAM_EYE, CAM_TARGET, CAM_UP)
+        const rot = setRotationMatrix(new Float32Array(16), 0.5, 0.8)
+        const mv = multiplyMatricesInto(new Float32Array(16), view, rot)
+        new Float32Array(res.cpu, f.mvp, 16).set(multiplyMatricesInto(new Float32Array(16), proj, mv))
+      }
+      if (f.time >= 0) new Float32Array(res.cpu, f.time, 1)[0] = 0
+      device.queue.writeBuffer(res.buffer, 0, res.cpu)
+      const bindGroup = device.createBindGroup({ layout: entry.pipeline.getBindGroupLayout(0), entries: this.buildBindGroupEntries(wgsl, res.buffer) })
+
+      const color = device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, label: "NodePreviewTarget" })
+      temps.push(color)
+      const bytesPerRow = Math.ceil((w * 4) / 256) * 256
+      const readback = device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: "NodePreviewReadback" })
+      temps.push(readback)
+
+      const enc = device.createCommandEncoder()
+      let depthAttachment: GPURenderPassDepthStencilAttachment | undefined
+      if (entry.mode === "mesh") {
+        const depth = device.createTexture({ size: [w, h], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT })
+        temps.push(depth)
+        depthAttachment = { view: depth.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" }
+      }
+      const pass = enc.beginRenderPass({
+        label: "NodePreviewPass",
+        colorAttachments: [{ view: color.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+        ...(depthAttachment ? { depthStencilAttachment: depthAttachment } : {}),
+      })
+      pass.setPipeline(entry.pipeline)
+      pass.setBindGroup(0, bindGroup)
+      if (entry.mode === "tri") {
+        pass.draw(3)
+      } else if (entry.mode === "quad") {
+        if (!this.previewQuad) {
+          const quad = new Float32Array([-1, -1, 0, 1, -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1, 1, 0])
+          this.previewQuad = device.createBuffer({ size: quad.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST })
+          device.queue.writeBuffer(this.previewQuad, 0, quad)
+        }
+        pass.setVertexBuffer(0, this.previewQuad)
+        pass.draw(6)
+      } else {
+        this.ensureGeometryBuffer(this.currentGeometry)
+        const vb = this.vertexBuffers.get(this.currentGeometry) ?? this.vertexBuffers.get("cube")
+        if (!vb) { pass.end(); return null }
+        pass.setVertexBuffer(0, vb)
+        pass.draw(this.vertexCounts.get(this.currentGeometry) ?? 36)
+      }
+      pass.end()
+      enc.copyTextureToBuffer({ texture: color }, { buffer: readback, bytesPerRow, rowsPerImage: h }, [w, h, 1])
+      device.queue.submit([enc.finish()])
+      await readback.mapAsync((globalThis as any).GPUMapMode?.READ ?? 1)
+      if (this.device !== device) return null
+      const mapped = new Uint8Array(readback.getMappedRange())
+      const out = new Uint8ClampedArray(w * h * 4)
+      for (let y = 0; y < h; y++) out.set(mapped.subarray(y * bytesPerRow, y * bytesPerRow + w * 4), y * w * 4)
+      readback.unmap()
+      return typeof ImageData !== "undefined" ? new ImageData(out, w, h) : ({ data: out, width: w, height: h, colorSpace: "srgb" } as unknown as ImageData)
+    } catch {
+      return null
+    } finally {
+      for (const t of temps) { try { t.destroy() } catch {} }
+    }
   }
 
   dispose() {
@@ -2426,28 +3131,12 @@ fn fragment_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f
     try { this.skyboxUniformBuffer?.destroy() } catch {}
     this.skyboxUniformBuffer = null
     this.skyboxSampler = null
-    try { this.gBufferAlbedoTex?.destroy() } catch {}
-    try { this.gBufferNormalTex?.destroy() } catch {}
-    try { this.gBufferRoughnessTex?.destroy() } catch {}
-    try { this.gBufferDepthTex?.destroy() } catch {}
-    try { this.gBufferMotionTex?.destroy() } catch {}
-    this.gBufferViews = null
-    this.gBufferAlbedoTex = null
-    this.gBufferNormalTex = null
-    this.gBufferRoughnessTex = null
-    this.gBufferDepthTex = null
-    this.gBufferMotionTex = null
-    this.state.gBufferTargets = null
-    try { this.deferredLightingUniformBuffer?.destroy() } catch {}
-    this.deferredLightingUniformBuffer = null
-    this.deferredLightingPipeline = null
-    this.deferredLightingProgram = null
-    this.deferredLightingBindGroup = null
-    this.deferredGeometryPipeline = null
+    this.releaseGBuffer()
+    this.releaseFidelityResources()
     try { this.shadowDepthTex?.destroy() } catch {}
-    this.shadowDepthTex = null
+    this.shadowDepthTex = null; this.shadowDepthView = null
     try { this.shadowCubeTex?.destroy() } catch {}
-    this.shadowCubeTex = null
+    this.shadowCubeTex = null; this.shadowArrayView = null; this.shadowFaceViews = []
     try { this.device?.destroy() } catch {}
     this.device = null
     this.context = null; this.initialized = false

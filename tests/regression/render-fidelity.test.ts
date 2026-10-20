@@ -823,6 +823,16 @@ describe("Milestone 2 Gate 2 Deep Adversarial Challenge: Rendering Fidelity & Pa
         expect(typeof lTex.format, `WebGL2 ${ch}.format`).toBe("string")
         expect(typeof tTex.format, `Three.js ${ch}.format`).toBe("string")
 
+        // Exact declared formats per backend (read from each adapter's G-buffer declaration)
+        const expectedFormats = {
+          webgpu: { albedo: "rgba8unorm", normal: "rgba16float", roughnessMetallic: "rg8unorm", depth: "depth24plus", motionVectors: "rg16float" },
+          webgl2: { albedo: "rgba8unorm", normal: "rgba16float", roughnessMetallic: "rgba16float", depth: "depth24plus", motionVectors: "rgba16float" }, // float path (EXT_color_buffer_float present)
+          threejs: { albedo: "rgba16float", normal: "rgba16float", roughnessMetallic: "rg8unorm", depth: "depth24plus-stencil8", motionVectors: "rg16float" },
+        }
+        expect(gTex.format, `WebGPU ${ch}.format`).toBe(expectedFormats.webgpu[ch])
+        expect(lTex.format, `WebGL2 ${ch}.format`).toBe(expectedFormats.webgl2[ch])
+        expect(tTex.format, `Three.js ${ch}.format`).toBe(expectedFormats.threejs[ch])
+
         // Verify width is a positive number on all 3
         expect(typeof gTex.width, `WebGPU ${ch}.width`).toBe("number")
         expect(typeof lTex.width, `WebGL2 ${ch}.width`).toBe("number")
@@ -907,8 +917,7 @@ describe("Milestone 2 Adversarial Challenger Suite: Rendering Fidelity & Multi-B
   describe("Target 2: Point Light Shadow Cube Map Faces, Allocation & Sampling", () => {
 
 
-    // fleet: fixed in W4 (point-light shadow cube is not yet sampled by the deferred lighting pass)
-    it.fails("[WebGL2] deferred lighting shader samples the point-light shadow cube map when enabled", async () => {
+    it("[WebGL2] deferred lighting shader samples the point-light shadow cube map when enabled", async () => {
       const canvas = document.createElement("canvas")
       await webgl2Adapter.mount(canvas)
       webgl2Adapter.setRenderingPipelineMode("deferred")
@@ -980,8 +989,7 @@ describe("Milestone 2 Adversarial Challenger Suite: Rendering Fidelity & Multi-B
         }
       })
 
-      // fleet: fixed in W4 (GBuffer textures are currently retained after switching back to forward)
-      if (name !== "Three.js") it.fails(`[${name}] switching to forward releases unused GBuffer GPU textures`, async () => {
+      if (name !== "Three.js") it(`[${name}] switching to forward releases unused GBuffer GPU textures`, async () => {
         const canvas = document.createElement("canvas")
         await adapter.mount(canvas)
         adapter.setRenderingPipelineMode("deferred")

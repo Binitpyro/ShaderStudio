@@ -264,6 +264,8 @@ export interface RenderAdapter {
    * Resolves null when unsupported or the source fails to compile.
    */
   renderToTarget?(request: RenderToTargetRequest): Promise<ImageBitmap | ImageData | null>
+  /** Which fidelity settings this device/backend honours; lets the Render panel show e.g. "VSM unavailable on this GPU". */
+  getFidelityCapabilities?(): FidelityCapabilities
 
   // R2 Extended Methods & Parity State
   state?: MultiBackendParityState
@@ -285,4 +287,10 @@ export interface RenderAdapter {
   getAntiAliasingMode?(): AntiAliasingMode
   setAtmosphereParams?(params: { timeOfDay: number; sunIntensity?: number; turbidity?: number }): void
   calculateRayleighMieScattering?(wavelengthNm?: number[]): { rayleigh: number[]; mie: number }
+}
+
+/** Dotted setting paths (e.g. "ssao.intensity") a backend ignores, plus the shadow filter actually in effect. */
+export interface FidelityCapabilities {
+  effectiveShadowFilter: ShadowFilterMode
+  unsupported: string[]
 }

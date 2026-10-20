@@ -124,3 +124,59 @@ describe("ThreeJSAdapter (fleet w3)", () => {
     expect(spy).toHaveBeenCalledWith({ drawCalls: 7, triangles: 1234 })
   })
 })
+
+describe("ThreeJSAdapter GLSL3 #version handling (w4-three-version)", () => {
+  let env: ReturnType<typeof setupE2ETestEnvironment>
+  let adapter: ThreeJSAdapter
+  let a: any
+
+  beforeEach(async () => {
+    env = setupE2ETestEnvironment()
+    adapter = new ThreeJSAdapter()
+    adapter.setExternalLoopDriven(true)
+    await adapter.mount(env.createCanvas() as any)
+    a = adapter as any
+  })
+  afterEach(() => {
+    adapter.dispose()
+    vi.restoreAllMocks()
+    teardownE2ETestEnvironment()
+  })
+
+  const glsl3Frag = "#version 300 es\r\nprecision highp float;\r\nout vec4 fragColor;\r\nvoid main() { fragColor = vec4(1.0); }\r\n"
+
+  it("strips the user's leading #version line before handing GLSL3 source to ShaderMaterial", () => {
+    adapter.recompileShader(glsl3Frag)
+
+    expect(useProjectStore.getState().lastCompileError).toBeNull()
+    expect(a.material.glslVersion).toBe(THREE.GLSL3)
+    expect(a.material.fragmentShader.startsWith("#version")).toBe(false)
+    expect(a.material.fragmentShader).toContain("out vec4 fragColor;")
+  })
+
+  it("strips #version from the preview material used by renderToTarget", () => {
+    const mat = a.getPreviewMaterial(glsl3Frag) as THREE.ShaderMaterial
+    expect(mat).not.toBeNull()
+    expect(mat.glslVersion).toBe(THREE.GLSL3)
+    expect(mat.fragmentShader.startsWith("#version")).toBe(false)
+  })
+
+  it("maps driver error lines back to the user's original source (version line counted)", () => {
+    const r = a.renderer
+    r.compile.mockImplementation(() => {
+      const gl = {
+        getShaderInfoLog: (s: any) => (s.src ? "ERROR: 0:6: 'foo' : undeclared identifier" : ""),
+        getShaderSource: (s: any) => "#define X\n".repeat(3) + s.src,
+        getProgramInfoLog: () => "",
+      }
+      // Driver sees the stripped body; `foo;` is body line 3 => full line 6 => user line 4.
+      r.debug.onShaderError(gl, {}, { src: "" }, { src: "void main() {\r\n\r\n foo; }" })
+    })
+
+    adapter.recompileShader("#version 300 es\r\nvoid main() {\r\n\r\n foo; }")
+
+    const err = useProjectStore.getState().lastCompileError!
+    expect(err).toContain("Fragment shader error")
+    expect(err).toContain("ERROR: 0:4:")
+  })
+})

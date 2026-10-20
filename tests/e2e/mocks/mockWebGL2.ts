@@ -153,7 +153,27 @@ export class MockWebGL2RenderingContext {
   readonly TEXTURE_WRAP_T = 0x2803
   readonly TEXTURE_WRAP_R = 0x8072
 
+  readonly FRAMEBUFFER_BINDING = 0x8ca6
+  readonly VIEWPORT = 0x0ba2
+  readonly BLEND = 0x0be2
+  readonly SCISSOR_TEST = 0x0c11
+  readonly SCISSOR_BOX = 0x0c10
+  readonly COLOR_CLEAR_VALUE = 0x0c22
+  readonly ACTIVE_TEXTURE = 0x84e0
+  readonly TEXTURE_BINDING_2D = 0x8069
+  readonly BLEND_SRC_RGB = 0x80c9
+  readonly BLEND_DST_RGB = 0x80c8
+  readonly BLEND_SRC_ALPHA = 0x80cb
+  readonly BLEND_DST_ALPHA = 0x80ca
+  blendFn: number[] = [1, 0, 1, 0]
+  scissorBox: number[] = [0, 0, 0, 0]
+  readonly CURRENT_PROGRAM = 0x8b8d
+  readonly VERTEX_ARRAY_BINDING = 0x85b5
+  readonly LESS = 0x0201
+
   drawBuffersList: number[] = []
+  depthFuncValue = 0x0201
+  readPixelsCalls: Array<{ width: number; height: number; framebuffer: MockWebGLFramebuffer | null }> = []
 
   canvas: MockCanvasElement
   activeProgram: MockWebGLProgram | null = null
@@ -193,6 +213,18 @@ export class MockWebGL2RenderingContext {
 
   disable(cap: number): void {
     this.enabledCaps.delete(cap)
+  }
+
+  isEnabled(cap: number): boolean {
+    return this.enabledCaps.has(cap)
+  }
+
+  scissor(x: number, y: number, w: number, h: number): void {
+    this.scissorBox = [x, y, w, h]
+  }
+
+  blendFuncSeparate(a: number, b: number, c: number, d: number): void {
+    this.blendFn = [a, b, c, d]
   }
 
   depthMask(_flag: boolean): void {}
@@ -517,6 +549,39 @@ export class MockWebGL2RenderingContext {
   renderbufferStorage(_target: number, _internalformat: number, _width: number, _height: number): void {}
 
   framebufferRenderbuffer(_target: number, _attachment: number, _renderbuffertarget: number, _renderbuffer: any): void {}
+
+  depthFunc(func: number): void {
+    this.depthFuncValue = func
+  }
+
+  uniform4f(location: MockWebGLUniformLocation | null, x: number, y: number, z: number, w: number): void {
+    if (location) {
+      location.value = [x, y, z, w]
+      this.uniformValues.set(location.name, [x, y, z, w])
+    }
+  }
+
+  getParameter(pname: number): any {
+    if (pname === this.FRAMEBUFFER_BINDING) return this.boundFramebuffer
+    if (pname === this.VIEWPORT) return [this.viewportRect.x, this.viewportRect.y, this.viewportRect.width, this.viewportRect.height]
+    if (pname === this.CURRENT_PROGRAM) return this.activeProgram
+    if (pname === this.VERTEX_ARRAY_BINDING) return this.activeVAO
+    if (pname === this.COLOR_CLEAR_VALUE) return [...this.clearColorValues]
+    if (pname === this.SCISSOR_BOX) return [...this.scissorBox]
+    if (pname === this.ACTIVE_TEXTURE) return this.activeTextureUnit
+    if (pname === this.TEXTURE_BINDING_2D) return this.boundTextures.get(this.activeTextureUnit) ?? null
+    if (pname === this.BLEND_SRC_RGB) return this.blendFn[0]
+    if (pname === this.BLEND_DST_RGB) return this.blendFn[1]
+    if (pname === this.BLEND_SRC_ALPHA) return this.blendFn[2]
+    if (pname === this.BLEND_DST_ALPHA) return this.blendFn[3]
+    return null
+  }
+
+  readPixels(_x: number, _y: number, width: number, height: number, _format: number, _type: number, pixels: ArrayBufferView): void {
+    this.readPixelsCalls.push({ width, height, framebuffer: this.boundFramebuffer })
+    const bytes = pixels as unknown as Uint8Array
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i % 4 === 3 ? 255 : 64
+  }
 
   isContextLost(): boolean {
     return this.contextLost

@@ -275,14 +275,24 @@ export class MockGPUCommandEncoder {
     return pass
   }
 
+  copies: Array<{ src: any; dst: any; size: any }> = []
+
+  copyTextureToBuffer(src: any, dst: any, size: any): void {
+    this.copies.push({ src, dst, size })
+  }
+
+  copyTextureToTexture(src: any, dst: any, size: any): void {
+    this.copies.push({ src, dst, size })
+  }
+
   beginComputePass(descriptor?: any): MockGPUComputePassEncoder {
     const pass = new MockGPUComputePassEncoder(descriptor)
     this.computePasses.push(pass)
     return pass
   }
 
-  finish(): { renderPasses: MockGPURenderPassEncoder[]; computePasses: MockGPUComputePassEncoder[] } {
-    return { renderPasses: this.renderPasses, computePasses: this.computePasses }
+  finish(): { renderPasses: MockGPURenderPassEncoder[]; computePasses: MockGPUComputePassEncoder[]; copies: any[] } {
+    return { renderPasses: this.renderPasses, computePasses: this.computePasses, copies: this.copies }
   }
 }
 
@@ -480,6 +490,7 @@ export function setupWebGPUMock(): {
   ;(globalThis as any).GPUTextureUsage = MockGPUTextureUsage
   ;(globalThis as any).GPUShaderStage = MockGPUShaderStage
   ;(globalThis as any).GPUColorWrite = MockGPUColorWrite
+  ;(globalThis as any).GPUMapMode = { READ: 1, WRITE: 2 }
 
   if (!globalThis.navigator) {
     ;(globalThis as any).navigator = { gpu: mockGPU }
@@ -503,6 +514,7 @@ export function teardownWebGPUMock(): void {
   delete (globalThis as any).GPUTextureUsage
   delete (globalThis as any).GPUShaderStage
   delete (globalThis as any).GPUColorWrite
+  delete (globalThis as any).GPUMapMode
 
   if (globalThis.navigator) {
     if (originalGPU !== undefined) {

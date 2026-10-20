@@ -3,84 +3,181 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ShaderStudio design tokens. Reference: docs/design-system.md
+   Layers: raw tokens (:root / .dark) -> @theme inline (Tailwind utilities) -> shadcn aliases. */
+
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* surfaces */
+  --color-canvas: var(--ds-canvas);
+  --color-panel: var(--ds-panel);
+  --color-raised: var(--ds-raised);
+  --color-overlay: var(--ds-overlay);
+  --color-hover: var(--ds-hover);
+  --color-active: var(--ds-active);
+  /* borders */
+  --color-line: var(--ds-line);
+  --color-line-strong: var(--ds-line-strong);
+  /* text */
+  --color-fg: var(--ds-fg);
+  --color-fg-muted: var(--ds-fg-muted);
+  --color-fg-subtle: var(--ds-fg-subtle);
+  --color-fg-disabled: var(--ds-fg-disabled);
+  /* the one accent */
+  --color-brand: var(--ds-brand);
+  --color-brand-hover: var(--ds-brand-hover);
+  --color-brand-fg: var(--ds-brand-fg);
+  --color-brand-soft: var(--ds-brand-soft);
+  --color-brand-text: var(--ds-brand-text);
+  /* semantic */
+  --color-success: var(--ds-success);
+  --color-warning: var(--ds-warning);
+  --color-danger: var(--ds-danger);
+  --color-danger-solid: var(--ds-danger-solid);
+  --color-info: var(--ds-info);
+  --color-success-soft: color-mix(in oklab, var(--ds-success) 14%, transparent);
+  --color-warning-soft: color-mix(in oklab, var(--ds-warning) 14%, transparent);
+  --color-danger-soft: color-mix(in oklab, var(--ds-danger) 14%, transparent);
+  --color-info-soft: color-mix(in oklab, var(--ds-info) 14%, transparent);
+
+  /* typography */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-2xs: 0.6875rem;  --text-2xs--line-height: 1rem;      /* 11/16 */
+  --text-xs: 0.75rem;     --text-xs--line-height: 1.125rem;   /* 12/18 */
+  --text-sm: 0.8125rem;   --text-sm--line-height: 1.25rem;    /* 13/20 */
+  --text-base: 0.875rem;  --text-base--line-height: 1.375rem; /* 14/22 */
+  --text-lg: 1rem;        --text-lg--line-height: 1.5rem;     /* 16/24 */
+  --text-xl: 1.25rem;     --text-xl--line-height: 1.75rem;    /* 20/28 */
+
+  /* radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* elevation */
+  --shadow-sm: var(--ds-shadow-sm);
+  --shadow-md: var(--ds-shadow-md);
+  --shadow-lg: var(--ds-shadow-lg);
+
+  /* motion */
+  --ease-out-soft: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in-out-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --default-transition-duration: var(--ds-dur-fast);
+  --default-transition-timing-function: var(--ease-out-soft);
+
+  /* shadcn compatibility aliases (existing components keep working) */
+  --color-background: var(--ds-canvas);
+  --color-foreground: var(--ds-fg);
+  --color-card: var(--ds-panel);
+  --color-card-foreground: var(--ds-fg);
+  --color-popover: var(--ds-overlay);
+  --color-popover-foreground: var(--ds-fg);
+  --color-primary: var(--ds-brand);
+  --color-primary-foreground: var(--ds-brand-fg);
+  --color-secondary: var(--ds-raised);
+  --color-secondary-foreground: var(--ds-fg);
+  --color-muted: var(--ds-raised);
+  --color-muted-foreground: var(--ds-fg-muted);
+  --color-accent: var(--ds-hover);
+  --color-accent-foreground: var(--ds-fg);
+  --color-destructive: var(--ds-danger-solid);
+  --color-destructive-foreground: #fff;
+  --color-border: var(--ds-line);
+  --color-input: var(--ds-line-strong);
+  --color-ring: var(--ds-ring);
+  --color-sidebar: var(--ds-panel);
+  --color-sidebar-foreground: var(--ds-fg);
 }
 
+/* Light (default when no class). 4px spacing base = Tailwind's default --spacing (0.25rem). */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
+  color-scheme: light;
+  --radius: 0.5rem;
+  --ds-canvas: #f6f6f8;
+  --ds-panel: #ffffff;
+  --ds-raised: #f0f0f3;
+  --ds-overlay: #ffffff;
+  --ds-hover: #ececf0;
+  --ds-active: #e3e3e9;
+  --ds-line: #e4e4ea;
+  --ds-line-strong: #cfcfd8;
+  --ds-fg: #17181c;
+  --ds-fg-muted: #565864;
+  --ds-fg-subtle: #6b6d79;
+  --ds-fg-disabled: #a4a6b1;
+  --ds-brand: #4a5bd4;          /* 5.6:1 vs white; white text on it 5.6:1 */
+  --ds-brand-hover: #3f4fc2;
+  --ds-brand-fg: #ffffff;
+  --ds-brand-soft: rgb(74 91 212 / 0.1);
+  --ds-brand-text: #4a5bd4;
+  --ds-ring: #4a5bd4;
+  --ds-success: #1f7a45;
+  --ds-warning: #8a5a00;
+  --ds-danger: #c0392b;
+  --ds-danger-solid: #c0392b;
+  --ds-info: #1b62a8;
+  --ds-shadow-sm: 0 1px 2px rgb(16 17 24 / 0.06);
+  --ds-shadow-md: 0 4px 12px rgb(16 17 24 / 0.08), 0 1px 2px rgb(16 17 24 / 0.06);
+  --ds-shadow-lg: 0 12px 32px rgb(16 17 24 / 0.14), 0 2px 6px rgb(16 17 24 / 0.08);
+  --ds-dur-fast: 120ms;
+  --ds-dur-base: 180ms;
+  --ds-dur-slow: 280ms;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
+  color-scheme: dark;
+  --ds-canvas: #0f1013;
+  --ds-panel: #16171b;
+  --ds-raised: #1d1e23;
+  --ds-overlay: #22232a;
+  --ds-hover: #25262d;
+  --ds-active: #2d2f37;
+  --ds-line: #25262d;
+  --ds-line-strong: #363842;
+  --ds-fg: #ececf0;
+  --ds-fg-muted: #a0a1ab;
+  --ds-fg-subtle: #8a8b96;
+  --ds-fg-disabled: #5b5c66;
+  --ds-brand: #4d5fd6;          /* white text on it 5.35:1 */
+  --ds-brand-hover: #5c6de0;
+  --ds-brand-fg: #ffffff;
+  --ds-brand-soft: rgb(139 156 255 / 0.14);
+  --ds-brand-text: #8b9cff;     /* 7.5:1 vs canvas, 7.1:1 vs panel */
+  --ds-ring: #8b9cff;
+  --ds-success: #6fcf97;
+  --ds-warning: #e0b341;
+  --ds-danger: #f2777a;
+  --ds-danger-solid: #c8414c;
+  --ds-info: #6cb2f0;
+  --ds-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --ds-shadow-md: 0 4px 12px rgb(0 0 0 / 0.4), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --ds-shadow-lg: 0 16px 40px rgb(0 0 0 / 0.55), 0 0 0 1px rgb(255 255 255 / 0.06);
 }
 
 @layer base {
-  * { @apply border-border; }
-  body { @apply bg-background text-foreground; }
+  * { @apply border-line; }
+  html { font-family: var(--font-sans); }
+  body {
+    @apply bg-canvas text-fg text-sm antialiased;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  code, kbd, pre, samp { font-family: var(--font-mono); }
+  :focus-visible { outline: 2px solid var(--ds-ring); outline-offset: 2px; }
+  ::selection { background: var(--ds-brand-soft); }
+}
+
+/* numeric readouts: tabular figures, mono */
+@utility tabular { font-variant-numeric: tabular-nums; }
+@utility num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* focus ring helper for custom controls: ring on keyboard focus only */
+@utility focus-ring {
+  &:focus-visible { outline: 2px solid var(--ds-ring); outline-offset: 1px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --ds-dur-fast: 0.01ms; --ds-dur-base: 0.01ms; --ds-dur-slow: 0.01ms; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
