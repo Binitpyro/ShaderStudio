@@ -193,6 +193,386 @@ const headerLines = (target: string) => `// ====================================
 // Target: ${target}
 // =====================================================================`
 
+// ---------------------------------------------------------------------------------------------------------------------
+// GLSL -> HLSL semantic fixups (run after the identifier rewrite, so types are already floatN / floatNxN):
+//  1. `vecN(scalar)` splat constructors are illegal in HLSL -> `((floatN)(scalar))`.
+//  2. GLSL matrices are column-major, the emitted `floatNxN(a, b, ...)` fills rows, so the HLSL matrix is the transpose and
+//     every GLSL matrix product `L * R` (mat*vec, vec*mat, mat*mat) becomes `mul(R, L)`; `v *= M` -> `v = mul(M, v)`.
+//     (mat*vec: mul(v, M) = M*v; vec*mat: mul(M, v) = v*M; mat*mat: (AB)^T = B^T A^T = mul(B, A).)
+// All scanning runs on the maskNonCode() view, so comments and strings are never read or rewritten.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const isW = (c: string | undefined): boolean => c !== undefined && /\w/.test(c)
+const isWs = (c: string | undefined): boolean => c !== undefined && /\s/.test(c)
+const MAT_NAME = /^float([234])x\1$/
+const NOT_A_CALL = new Set(["return", "else", "if", "while", "for", "switch", "case", "do"])
+const SS_MARK = "/*ShaderStudio"
+
+function matchClose(mask: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < mask.length; i++) {
+    const c = mask[i]
+    if (c === "(" || c === "[" || c === "{") depth++
+    else if ((c === ")" || c === "]" || c === "}") && --depth === 0) return i
+  }
+  return -1
+}
+
+function matchOpen(mask: string, close: number): number {
+  let depth = 0
+  for (let i = close; i >= 0; i--) {
+    const c = mask[i]
+    if (c === ")" || c === "]" || c === "}") depth++
+    else if ((c === "(" || c === "[" || c === "{") && --depth === 0) return i
+  }
+  return -1
+}
+
+/** Indices in [from, to) of depth-0 characters that are in `chars`. */
+function topLevel(mask: string, from: number, to: number, chars: string): number[] {
+  const out: number[] = []
+  let depth = 0
+  for (let i = from; i < to; i++) {
+    const c = mask[i]
+    if ("([{".includes(c)) depth++
+    else if (")]}".includes(c)) depth--
+    else if (depth === 0 && chars.includes(c)) out.push(i)
+  }
+  return out
+}
+
+/** `vecN(x)` with exactly one argument: HLSL has no scalar splat constructor, a cast splats (and is fine for an equal-size vector). */
+function fixSplats(code: string): string {
+  const re = /\b(?:float|int|uint|bool)[234]\s*\(/g
+  const first = maskNonCode(code)
+  const starts: number[] = []
+  for (let m = re.exec(first); m; m = re.exec(first)) starts.push(m.index)
+  // innermost (last-starting) first: earlier text never moves, and the mask is rebuilt for every rewrite
+  for (let k = starts.length - 1; k >= 0; k--) {
+    const mask = maskNonCode(code)
+    const open = mask.indexOf("(", starts[k])
+    const close = matchClose(mask, open)
+    if (close < 0 || topLevel(mask, open + 1, close, ",").length > 0 || !mask.slice(open + 1, close).trim()) continue
+    const type = mask.slice(starts[k], open).trim()
+    code = `${code.slice(0, starts[k])}((${type})(${code.slice(open + 1, close)}))${code.slice(close + 1)}`
+  }
+  return code
+}
+
+interface MatCtx {
+  mats: Set<string>
+  funcs: Set<string>
+}
+
+type ExprType = "mat" | "num" | "other"
+
+/** Names of variables / parameters declared with a matrix type (handles `mat2 a = ..., b;` lists). */
+function declaredMatrices(mask: string): string[] {
+  const out: string[] = []
+  const re = /\bfloat([234])x\1\s+([A-Za-z_]\w*)/g
+  for (let m = re.exec(mask); m; m = re.exec(mask)) {
+    let p = m.index + m[0].length
+    if (/^\s*\(/.test(mask.slice(p))) continue
+    out.push(m[2])
+    let depth = 0
+    for (; p < mask.length; p++) {
+      const c = mask[p]
+      if ("([{".includes(c)) depth++
+      else if (")]}".includes(c)) {
+        if (--depth < 0) break
+      } else if (depth === 0 && c === ";") break
+      else if (depth === 0 && c === ",") {
+        const n = /^\s*([A-Za-z_]\w*)\s*(?=[=,;[])/.exec(mask.slice(p + 1))
+        if (!n) break
+        out.push(n[1])
+      }
+    }
+  }
+  return out
+}
+
+function matrixFunctions(mask: string): Set<string> {
+  const out = new Set<string>()
+  const re = /\bfloat([234])x\1\s+([A-Za-z_]\w*)\s*\(/g
+  for (let m = re.exec(mask); m; m = re.exec(mask)) out.add(m[2])
+  return out
+}
+
+function typeOfPrimary(text: string, cx: MatCtx): ExprType {
+  const t = text.trim().replace(/^[-+!~\s]+/, "")
+  if (/^[\d.]/.test(t)) return "num"
+  const mk = maskNonCode(t)
+  if (t[0] === "(") return matchClose(mk, 0) === t.length - 1 ? typeOfExpr(t.slice(1, -1), cx) : "other"
+  const m = /^([A-Za-z_]\w*)(\()?/.exec(t)
+  if (!m) return "other"
+  if (!m[2]) return m[0].length === t.length && cx.mats.has(m[1]) ? "mat" : "other"
+  const open = m[0].length - 1
+  if (matchClose(mk, open) !== t.length - 1) return "other"
+  if (MAT_NAME.test(m[1]) || cx.funcs.has(m[1])) return "mat"
+  if (m[1] === "mul") {
+    const inner = mk.slice(open + 1, -1)
+    const comma = topLevel(inner, 0, inner.length, ",")
+    if (comma.length === 1) {
+      const a = t.slice(open + 1, open + 1 + comma[0])
+      const b = t.slice(open + 2 + comma[0], -1)
+      if (typeOfExpr(a, cx) === "mat" && typeOfExpr(b, cx) === "mat") return "mat"
+    }
+  }
+  return "other"
+}
+
+/** Type of an operand chain `a * b / c`, folded left to right (mat*mat -> mat, mat*vec -> vec, mat*number -> mat). */
+function typeOfTerm(text: string, cx: MatCtx): ExprType {
+  const mk = maskNonCode(text)
+  const ops = topLevel(mk, 0, text.length, "*/")
+  let acc: ExprType = typeOfPrimary(text.slice(0, ops[0] ?? text.length), cx)
+  for (let k = 0; k < ops.length; k++) {
+    const rhs = typeOfPrimary(text.slice(ops[k] + 1, ops[k + 1] ?? text.length), cx)
+    if (acc === "mat") acc = rhs === "mat" || rhs === "num" ? "mat" : "other"
+    else if (acc === "num") acc = rhs === "mat" && mk[ops[k]] === "*" ? "mat" : rhs === "num" ? "num" : "other"
+    else acc = "other"
+  }
+  return acc
+}
+
+/** Type of an expression: a sum is a matrix when any of its terms is one. */
+function typeOfExpr(text: string, cx: MatCtx): ExprType {
+  const mk = maskNonCode(text)
+  const cuts = topLevel(mk, 0, text.length, "+-").filter((i) => {
+    const before = mk.slice(0, i).trimEnd()
+    return before !== "" && /[\w)\].]$/.test(before) && !/\d[eE]$/.test(before)
+  })
+  const bounds = [-1, ...cuts, text.length]
+  const kinds: ExprType[] = []
+  for (let k = 0; k + 1 < bounds.length; k++) kinds.push(typeOfTerm(text.slice(bounds[k] + 1, bounds[k + 1]), cx))
+  if (kinds.includes("mat")) return "mat"
+  return kinds.every((x) => x === "num") ? "num" : "other"
+}
+
+/** Start of the operand (primary + postfix chain: calls, indexing, members) that ends just before `end`, or -1. */
+function operandStart(mask: string, end: number): number {
+  let j = end - 1
+  while (j >= 0 && isWs(mask[j])) j--
+  for (;;) {
+    if (j < 0) return -1
+    const c = mask[j]
+    if (c === "]") {
+      const o = matchOpen(mask, j)
+      if (o < 1) return -1
+      j = o - 1
+      continue
+    }
+    if (c === ")") {
+      const o = matchOpen(mask, j)
+      if (o < 0) return -1
+      let q = o - 1
+      while (q >= 0 && isW(mask[q])) q--
+      return NOT_A_CALL.has(mask.slice(q + 1, o)) ? o : q + 1
+    }
+    if (!isW(c) && c !== ".") return -1
+    let q = j
+    while (q >= 0 && (isW(mask[q]) || mask[q] === ".")) q--
+    let s = q + 1
+    if ((mask[q] === "-" || mask[q] === "+") && /[eE]/.test(mask[q - 1] ?? "")) {
+      let r = q - 2
+      while (r >= 0 && (isW(mask[r]) || mask[r] === ".")) r--
+      if (/\d/.test(mask[r + 1] ?? "")) s = r + 1
+    }
+    if (mask[s] === "." && (mask[s - 1] === ")" || mask[s - 1] === "]")) {
+      j = s - 1
+      continue
+    }
+    return s
+  }
+}
+
+/** End (exclusive) of the operand starting at `i` (optional unary prefix, primary, postfix chain), or -1. */
+function operandEnd(mask: string, i: number): number {
+  const n = mask.length
+  let j = i
+  while (isWs(mask[j])) j++
+  while ("+-!~".includes(mask[j] ?? "x")) {
+    j++
+    while (isWs(mask[j])) j++
+  }
+  let callable = false
+  if (mask[j] === "(") {
+    const c = matchClose(mask, j)
+    if (c < 0) return -1
+    j = c + 1
+  } else if (isW(mask[j]) || (mask[j] === "." && /\d/.test(mask[j + 1] ?? ""))) {
+    const num = /[\d.]/.test(mask[j])
+    j++
+    while (j < n && (isW(mask[j]) || (num && mask[j] === "."))) j++
+    if (num && (mask[j] === "-" || mask[j] === "+") && /[eE]/.test(mask[j - 1])) {
+      j++
+      while (j < n && isW(mask[j])) j++
+    }
+    callable = !num
+  } else return -1
+  for (;;) {
+    if (mask[j] === "(" && callable) {
+      const c = matchClose(mask, j)
+      if (c < 0) return -1
+      j = c + 1
+    } else if (mask[j] === "[") {
+      const c = matchClose(mask, j)
+      if (c < 0) return -1
+      j = c + 1
+    } else if (mask[j] === "." && isW(mask[j + 1])) {
+      j++
+      while (j < n && isW(mask[j])) j++
+    } else return j
+    callable = false
+  }
+}
+
+const prevNonWs = (mask: string, i: number): number => {
+  let p = i - 1
+  while (p >= 0 && isWs(mask[p])) p--
+  return p
+}
+
+const marked = (code: string, after: number): boolean => code.slice(after).trimStart().startsWith(SS_MARK)
+
+/** True when the statement around `at` mentions a matrix, so an operator we cannot parse deserves a visible note. */
+function statementTouchesMatrix(mask: string, at: number, cx: MatCtx): boolean {
+  let a = at
+  while (a > 0 && !";{}".includes(mask[a - 1])) a--
+  let b = at
+  while (b < mask.length && mask[b] !== ";") b++
+  const stmt = mask.slice(a, b)
+  return /\bfloat([234])x\1\s*\(/.test(stmt) || [...cx.mats, ...cx.funcs].some((n) => new RegExp(String.raw`\b${n}\b`).test(stmt))
+}
+
+const NOTE = "/*ShaderStudio: matrix multiply not translated, rewrite with mul() (HLSL matrices are the transpose of GLSL's)*/"
+
+/** GLSL `L * R` with a matrix operand -> `mul(R, L)`. Left-associative; the left operand is the whole `a * b` chain before the operator. */
+function rewriteMatMul(code: string, cx: MatCtx): string {
+  let from = 0
+  for (;;) {
+    const mask = maskNonCode(code)
+    let done = true
+    for (let i = from; i < mask.length; i++) {
+      if (mask[i] !== "*" || mask[i + 1] === "=" || marked(code, i + 1)) continue
+      const leftEnd = prevNonWs(mask, i) + 1
+      let ls = leftEnd > 0 ? operandStart(mask, leftEnd) : -1
+      const re = operandEnd(mask, i + 1)
+      if (ls < 0 || re < 0) {
+        if (!statementTouchesMatrix(mask, i, cx)) continue
+        code = `${code.slice(0, i + 1)} ${NOTE}${code.slice(i + 1)}`
+        done = false
+        from = i + 1 + NOTE.length
+        break
+      }
+      // extend over `x * ` / `x / ` to the left (a unary sign in front of the operand belongs to the chain only after an operator)
+      for (;;) {
+        let p = prevNonWs(mask, ls)
+        while (p >= 0 && "+-!~".includes(mask[p])) {
+          const q = prevNonWs(mask, p)
+          if (q >= 0 && (isW(mask[q]) || ")].".includes(mask[q]))) break
+          p = q
+        }
+        if (p >= 0 && (mask[p] === "/" || (mask[p] === "*" && mask[p + 1] !== "="))) {
+          const s2 = operandStart(mask, p)
+          if (s2 < 0) break
+          ls = s2
+        } else break
+      }
+      const left = code.slice(ls, leftEnd)
+      const rs = mask.slice(i + 1).search(/\S/) + i + 1
+      const right = code.slice(rs, re)
+      const lt = typeOfExpr(left, cx)
+      const rt = typeOfExpr(right, cx)
+      if ((lt === "mat" || rt === "mat") && lt !== "num" && rt !== "num") {
+        code = `${code.slice(0, ls)}mul(${right}, ${left})${code.slice(re)}`
+        done = false
+        from = ls
+        break
+      }
+    }
+    if (done) return code
+  }
+}
+
+/** `v *= M` -> `v = mul(M, v)` (GLSL `v = v * M`); scalar and matrix-by-scalar forms stay `*=`. */
+function rewriteMulAssign(code: string, cx: MatCtx): string {
+  let from = 0
+  for (;;) {
+    const mask = maskNonCode(code)
+    const k = mask.indexOf("*=", from)
+    if (k < 0) return code
+    from = k + 2
+    if (marked(code, k + 2)) continue
+    let e = k + 2
+    let depth = 0
+    for (; e < mask.length; e++) {
+      const c = mask[e]
+      if ("([{".includes(c)) depth++
+      else if (")]}".includes(c)) {
+        if (--depth < 0) break
+      } else if (depth === 0 && (c === ";" || c === ",")) break
+    }
+    const tail = mask.slice(k + 2, e).trimEnd().length
+    const rhs = code.slice(k + 2, k + 2 + tail).trim()
+    if (typeOfExpr(rhs, cx) !== "mat") continue
+    const le = prevNonWs(mask, k) + 1
+    const ls = le > 0 ? operandStart(mask, le) : -1
+    if (ls < 0) {
+      code = `${code.slice(0, k + 2)} ${NOTE}${code.slice(k + 2)}`
+      from = k + 2 + NOTE.length
+      continue
+    }
+    const lhs = code.slice(ls, le)
+    code = `${code.slice(0, ls)}${lhs} = mul(${rhs}, ${lhs})${code.slice(k + 2 + tail)}`
+    from = ls + 1
+  }
+}
+
+/** Top-level pieces of GLSL-ish code: each function (signature + body) or each `;`-terminated global statement. */
+function topLevelChunks(mask: string): Array<[number, number]> {
+  const out: Array<[number, number]> = []
+  let start = 0
+  let depth = 0
+  for (let i = 0; i < mask.length; i++) {
+    const c = mask[i]
+    if (c === "{") depth++
+    else if (c === "}" && --depth === 0) {
+      out.push([start, i + 1])
+      start = i + 1
+    } else if (c === ";" && depth === 0) {
+      out.push([start, i + 1])
+      start = i + 1
+    }
+  }
+  if (start < mask.length) out.push([start, mask.length])
+  return out
+}
+
+/**
+ * Applies the HLSL fixups to a split shader: `prelude` (helper functions, globals; scoped per function) and `body`
+ * (the contents of main, one scope that also sees the prelude's global matrices).
+ */
+export function fixHlslSemantics(prelude: string, body: string): { prelude: string; body: string } {
+  const pre = fixSplats(prelude)
+  const main = fixSplats(body)
+  const funcs = matrixFunctions(maskNonCode(pre))
+  const globals = new Set<string>()
+  const process = (text: string): string => {
+    const cx: MatCtx = { mats: new Set([...globals, ...declaredMatrices(maskNonCode(text))]), funcs }
+    return rewriteMulAssign(rewriteMatMul(text, cx), cx)
+  }
+  let outPre = ""
+  const mask = maskNonCode(pre)
+  for (const [a, b] of topLevelChunks(mask)) {
+    const chunk = pre.slice(a, b)
+    const isFunction = mask.slice(a, b).includes("{")
+    if (!isFunction) for (const n of declaredMatrices(mask.slice(a, b))) globals.add(n)
+    outPre += process(chunk)
+  }
+  return { prelude: outPre, body: process(main) }
+}
+
 /**
  * Transpiles GLSL shader code and active uniforms into a production-ready
  * Unity ShaderLab + HLSL shader compatible with Universal Render Pipeline (URP).
@@ -266,8 +646,7 @@ export function transpileToUnityHLSL(options: EngineExportOptions): string {
   for (const u of uniforms) rules.set(u.name, `_${u.name}`)
   for (const w of HLSL_RESERVED) if (!rules.has(w)) rules.set(w, `${w}_`)
 
-  const prelude = rewriteIdentifiers(sp.prelude, rules)
-  const body = rewriteIdentifiers(sp.body, rules)
+  const { prelude, body } = fixHlslSemantics(rewriteIdentifiers(sp.prelude, rules), rewriteIdentifiers(sp.body, rules))
   const usesMod = collectIdentifiers(prelude + "\n" + body).has("mod")
 
   // Varyings the fragment reads become file-scope statics filled from the interpolated vertex output.
@@ -640,7 +1019,10 @@ export function transpileToUE5(
   // Extract body of void main(...) if present, preserving genuine user shader logic
   const rawBody = extractMainBody(source) ?? source
 
-  const translatedBody = translateGlslToHlsl(rawBody)
+  const hasMain = rawBody !== source
+  const hlsl = translateGlslToHlsl(rawBody)
+  const fixed = fixHlslSemantics(hasMain ? "" : hlsl, hasMain ? hlsl : "")
+  const translatedBody = hasMain ? fixed.body : fixed.prelude
 
   // For Custom Expression: map fragColor / gl_FragColor to return statement
   let customExprBody = translatedBody

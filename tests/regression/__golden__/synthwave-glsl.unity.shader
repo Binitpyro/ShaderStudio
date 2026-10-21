@@ -82,7 +82,7 @@ Shader "Custom/ShaderStudioEffect"
                 // Perspective ground projection (derivatives are taken outside any branch)
                 float depth = 1.0 / max(horizon - uv.y, 0.001);
                 float2 gridUv = float2(uv.x * depth, depth - _Time.y * _u_speed);
-                float2 fw = max(fwidth(gridUv), float2(0.0001));
+                float2 fw = max(fwidth(gridUv), ((float2)(0.0001)));
                 float2 grid = abs(frac(gridUv - 0.5) - 0.5) / fw;
                 float line_ = min(grid.x, grid.y);
                 float gridIntensity = 1.0 - min(line_, 1.0);

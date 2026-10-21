@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import * as THREE from "three"
 import {
   transpileToUnityHLSL,
+  fixHlslSemantics,
   transpileToGodotShader,
   transpileToShadertoy,
   transpileToUE5,
@@ -431,7 +432,7 @@ void main() { fragColor = u_lightColor * u_metallic; }`)
 
       const spaced = transpileToUE5("void\n main\n (\n )\n {\n float myCustomVar = 42.0;\n gl_FragColor = vec4(myCustomVar);\n }", [])
       expect(spaced.customExpressionHLSL).toContain("myCustomVar")
-      expect(spaced.customExpressionHLSL).toContain("return float4(myCustomVar);")
+      expect(spaced.customExpressionHLSL).toContain("return ((float4)(myCustomVar));")
 
       const bare = transpileToUE5("float a = 1.0; float b = 2.0; float c = a + b;", [])
       expect(bare.customExpressionHLSL).toContain("float a = 1.0;")
@@ -1038,6 +1039,147 @@ describe("Tier 5: Comprehensive White-Box Adversarial Coverage & Boundary Harden
       expect(r3f).toContain("shaderMaterial")
       expect(r3f).toContain("HologramMaterial")
       expect(r3f).toContain("StorybookPreview")
+    })
+  })
+})
+
+describe("GLSL -> HLSL semantic fixups (Unity / Unreal)", () => {
+  const fix = (body: string, prelude = "") => fixHlslSemantics(prelude, body)
+  const unityBody = (glsl: string) => {
+    const out = transpileToUnityHLSL({ shaderSource: glsl })
+    return out.slice(out.indexOf("Shader Studio Translated Body"), out.indexOf("return fragColor;\n            }"))
+  }
+
+  describe("scalar splat constructors", () => {
+    it("casts a one-scalar vecN constructor", () => {
+      expect(fix("float3 c = float3(0.04);").body).toBe("float3 c = ((float3)(0.04));")
+      expect(fix("float2 f = max(g, float2(0.0001));").body).toBe("float2 f = max(g, ((float2)(0.0001)));")
+    })
+    it("handles nested parentheses and inner constructors", () => {
+      expect(fix("c += float3(0.04 / (d + 0.05)) * t;").body).toBe("c += ((float3)(0.04 / (d + 0.05))) * t;")
+      expect(fix("x = float3(float2(a));").body).toBe("x = ((float3)(((float2)(a))));")
+      expect(fix("x = float4(f(a, b));").body).toBe("x = ((float4)(f(a, b)));")
+    })
+    it("leaves multi-argument constructors, declarations and other types alone", () => {
+      const src = "float3 a = float3(1.0, 2.0, 3.0);\nfloat3 b = float3(float2(1.0, 2.0), 3.0);\nfloat4 c = float4(a, 1.0);\nfloat2x2 m = float2x2(1.0, 0.0, 0.0, 1.0);"
+      expect(fix(src).body).toBe(src)
+    })
+    it("casts int / uint / bool constructors and keeps a vector argument valid", () => {
+      expect(fix("int2 i = int2(3); bool3 b = bool3(true);").body).toBe("int2 i = ((int2)(3)); bool3 b = ((bool3)(true));")
+      expect(fix("float3 q = float3(p);").body).toBe("float3 q = ((float3)(p));")
+    })
+    it("never rewrites comments or strings", () => {
+      const src = "// float3(0.5) here\n/* float2(1.0) */ float a = 1.0; // trailing float3(a)"
+      expect(fix(src).body).toBe(src)
+    })
+  })
+
+  describe("matrix multiplication", () => {
+    const decl = "float2x2 m = float2x2(c, -s, s, c);\n"
+    it("M * v -> mul(v, M) and v * M -> mul(M, v)", () => {
+      expect(fix(decl + "float2 a = m * p;").body).toBe(decl + "float2 a = mul(p, m);")
+      expect(fix(decl + "float2 a = p * m;").body).toBe(decl + "float2 a = mul(m, p);")
+    })
+    it("A * B -> mul(B, A)", () => {
+      const d = "float3x3 A = float3x3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);\nfloat3x3 B = A;\n"
+      expect(fix(d + "float3x3 C = A * B;").body).toBe(d + "float3x3 C = mul(B, A);")
+    })
+    it("keeps left associativity: rot * p * 2.0 -> mul(p, rot) * 2.0", () => {
+      expect(fix("float2x2 rot = float2x2(c, -s, s, c);\np = rot * p * 2.0 + float2(100.0);").body).toBe(
+        "float2x2 rot = float2x2(c, -s, s, c);\np = mul(p, rot) * 2.0 + ((float2)(100.0));"
+      )
+    })
+    it("the whole left chain is the vector operand: a * b * M -> mul(M, a * b)", () => {
+      expect(fix(decl + "float2 r = a * b * m;").body).toBe(decl + "float2 r = mul(m, a * b);")
+    })
+    it("chains of matrices: A * B * v and v * A * B", () => {
+      const d = "float2x2 A = float2x2(1.0, 0.0, 0.0, 1.0);\nfloat2x2 B = A;\n"
+      expect(fix(d + "float2 r = A * B * v;").body).toBe(d + "float2 r = mul(v, mul(B, A));")
+      expect(fix(d + "float2 r = v * A * B;").body).toBe(d + "float2 r = mul(B, mul(A, v));")
+    })
+    it("rewrites inside constructor arguments and keeps the swizzle", () => {
+      expect(fix(decl + "return float3(m * p.xz, p.y).xzy;").body).toBe(decl + "return float3(mul(p.xz, m), p.y).xzy;")
+    })
+    it("leaves scalar * matrix and scalar math alone", () => {
+      expect(fix(decl + "float2x2 k = 2.0 * m;\nfloat y = a * b;").body).toBe(decl + "float2x2 k = 2.0 * m;\nfloat y = a * b;")
+    })
+    it("v *= M -> v = mul(M, v); scalar *= and matrix *= scalar stay", () => {
+      expect(fix(decl + "p *= m;").body).toBe(decl + "p = mul(m, p);")
+      expect(fix(decl + "p *= 2.0;\nm *= 2.0;").body).toBe(decl + "p *= 2.0;\nm *= 2.0;")
+      expect(fix(decl + "float2x2 n = m;\nn *= m;").body).toBe(decl + "float2x2 n = m;\nn = mul(m, n);")
+    })
+    it("tracks function parameters, matrix-returning functions and prelude globals", () => {
+      const pre = "float2x2 rotate(float a) { return float2x2(cos(a), -sin(a), sin(a), cos(a)); }\nfloat2 spin(float2x2 r, float2 q) { return r * q; }\nfloat2x2 G = float2x2(1.0, 0.0, 0.0, 1.0);"
+      const out = fix("float2 z = rotate(t) * p + G * p;", pre)
+      expect(out.prelude).toContain("return mul(q, r);")
+      expect(out.body).toBe("float2 z = mul(p, rotate(t)) + mul(p, G);")
+    })
+    it("declaration lists (float2x2 a = ..., b;) track every name", () => {
+      expect(fix("float2x2 a = m0, b = m1;\nfloat2 r = b * v;").body).toBe("float2x2 a = m0, b = m1;\nfloat2 r = mul(v, b);")
+    })
+    it("scopes matrix names per function (a float named like a matrix elsewhere is untouched)", () => {
+      const pre = "float f(float m, float p) { return m * p; }\nfloat2 g(float2 p) { float2x2 m = float2x2(1.0, 0.0, 0.0, 1.0); return m * p; }"
+      const out = fix("", pre).prelude
+      expect(out).toContain("return m * p; }\nfloat2 g")
+      expect(out).toContain("return mul(p, m); }")
+    })
+    it("never touches comments or strings, and only emits a note for a statement it cannot parse", () => {
+      const src = decl + "// p = m * q;\n/* m * p */\nfloat2 a = m * p; // m * p"
+      expect(fix(src).body).toBe(decl + "// p = m * q;\n/* m * p */\nfloat2 a = mul(p, m); // m * p")
+      const bad = fix(decl + "float2 a = m * ;\nfloat q = 2.0 * 3.0 * ;")
+      expect(bad.body).toContain("/*ShaderStudio: matrix multiply not translated")
+      expect(bad.body.match(/ShaderStudio/g)).toHaveLength(1)
+    })
+    it("a *= whose target cannot be parsed gets a note instead of wrong code", () => {
+      expect(fix(decl + "*= m;").body).toContain("/*ShaderStudio: matrix multiply not translated")
+    })
+    it("arithmetic mixes: sums with a matrix term, unary signs, indexing, exponent literals", () => {
+      expect(fix(decl + "float2x2 s2 = m + m;\nfloat2 a = -m * p;").body).toBe(decl + "float2x2 s2 = m + m;\nfloat2 a = -mul(p, m);")
+      expect(fix(decl + "float2 a = x * -p * m;").body).toBe(decl + "float2 a = mul(m, x * -p);")
+      expect(fix(decl + "float2 a = m * -p;").body).toBe(decl + "float2 a = mul(-p, m);")
+      expect(fix(decl + "float2 a = m * v[0];").body).toBe(decl + "float2 a = mul(v[0], m);")
+      expect(fix(decl + "float2 a = 1e-3 * m * p;\nfloat b = 2.5e+2 * k;").body).toBe(decl + "float2 a = mul(p, 1e-3 * m);\nfloat b = 2.5e+2 * k;")
+      expect(fix(decl + "float2 a = (m * p).yx;\nfloat2 b = f(x).yx * m;").body).toBe(decl + "float2 a = (mul(p, m)).yx;\nfloat2 b = mul(m, f(x).yx);")
+      expect(fix(decl + "float2 a = mul(m, m) * p;").body).toBe(decl + "float2 a = mul(p, mul(m, m));")
+      expect(fix(decl + "float2 a = (m * m) * p; float2 b = p * (m * m);").body).toBe(
+        decl + "float2 a = mul(p, (mul(m, m))); float2 b = mul((mul(m, m)), p);"
+      )
+    })
+  })
+
+  describe("engines", () => {
+    it("Unity: the splat and mat2 rules reach the emitted shader", () => {
+      const out = unityBody(`void main() {
+  float c = cos(u_time), s = sin(u_time);
+  mat2 rot = mat2(c, -s, s, c);
+  vec2 p = rot * gl_FragCoord.xy * 2.0 + vec2(100.0);
+  vec3 col = vec3(0.5) * p.x + vec3(p.y);
+  fragColor = vec4(col, 1.0);
+}`)
+      expect(out).toContain("float2x2 rot = float2x2(c, -s, s, c);")
+      expect(out).toContain("mul(i.positionCS.xy, rot) * 2.0 + ((float2)(100.0))")
+      expect(out).toContain("((float3)(0.5)) * p.x + ((float3)(p.y))")
+    })
+    it("Unity: helper functions in the prelude are fixed with their own scope", () => {
+      const out = transpileToUnityHLSL({
+        shaderSource: `mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+vec3 warp(vec3 p) { p.xz = rot(p.y) * p.xz; return p; }
+void main() { fragColor = vec4(warp(vec3(0.2)), 1.0); }`,
+      })
+      expect(out).toContain("p.xz = mul(p.xz, rot(p.y));")
+      expect(out).toContain("warp(((float3)(0.2)))")
+    })
+    it("Unreal HLSL gets the same fixups; Godot keeps GLSL semantics untouched", () => {
+      const src = `void main() { mat2 m = mat2(1.0, 0.0, 0.0, 1.0); vec2 q = m * vec2(0.5); fragColor = vec4(q, vec3(0.1)); }`
+      const ue = transpileToUE5(src).customExpressionHLSL
+      expect(ue).toContain("mul(((float2)(0.5)), m)")
+      const godot = transpileToGodotShader({ shaderSource: src })
+      expect(godot).toContain("m * vec2(0.5)")
+      expect(godot).not.toContain("mul(")
+    })
+    it("Unreal: a source without main() is treated as helper code", () => {
+      const ue = transpileToUE5("mat2 R = mat2(1.0, 0.0, 0.0, 1.0);\nvec2 f(vec2 p) { return R * p + vec2(1.0); }").customExpressionHLSL
+      expect(ue).toContain("return mul(p, R) + ((float2)(1.0));")
     })
   })
 })
