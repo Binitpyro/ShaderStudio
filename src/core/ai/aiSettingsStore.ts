@@ -3,6 +3,9 @@ import { persist } from "zustand/middleware"
 import type { AIProvider, AISettings } from "./types"
 
 interface AISettingsState extends AISettings {
+  /** One-time, in-memory only: legacy plaintext keys were found in storage and dropped. */
+  keysMigrationNotice: boolean
+  dismissKeysMigrationNotice: () => void
   setActiveProvider: (provider: AIProvider) => void
   setApiKey: (provider: keyof AISettings["apiKeys"], key: string) => void
   setEndpoint: (provider: keyof AISettings["endpoints"], endpoint: string) => void
@@ -43,6 +46,8 @@ export const useAISettingsStore = create<AISettingsState>()(
   persist(
     (set) => ({
       ...DEFAULT_SETTINGS,
+      keysMigrationNotice: false,
+      dismissKeysMigrationNotice: () => set({ keysMigrationNotice: false }),
 
       setActiveProvider: (provider) => set({ activeProvider: provider }),
 
@@ -73,14 +78,15 @@ export const useAISettingsStore = create<AISettingsState>()(
       name: "shader-studio-ai-settings",
       // API keys only touch localStorage when the user opted in ("Remember keys on this device").
       partialize: (s) => {
-        const { apiKeys, ...rest } = s
+        const { apiKeys, keysMigrationNotice: _notice, dismissKeysMigrationNotice: _dismiss, ...rest } = s
         return s.rememberKeys ? { ...rest, apiKeys } : rest
       },
       // Drop keys that an older version (or a since-revoked opt-in) left in storage, and rewrite storage without them.
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<AISettingsState>
         const { apiKeys, ...rest } = p
-        return { ...current, ...rest, ...(p.rememberKeys && apiKeys ? { apiKeys: { ...current.apiKeys, ...apiKeys } } : {}) }
+        const hadLegacyKeys = !p.rememberKeys && !!apiKeys && Object.values(apiKeys).some((k) => typeof k === "string" && k !== "")
+        return { ...current, ...rest, keysMigrationNotice: hadLegacyKeys, ...(p.rememberKeys && apiKeys ? { apiKeys: { ...current.apiKeys, ...apiKeys } } : {}) }
       },
       onRehydrateStorage: () => () => {
         if (typeof localStorage !== "undefined") queueMicrotask(() => useAISettingsStore.setState({}))

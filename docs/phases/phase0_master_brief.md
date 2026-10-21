@@ -1,3 +1,5 @@
+> Historical design brief (pre-overhaul). It no longer describes the current code; see README.md.
+
 # SHADER STUDIO — MASTER BRIEF (read first, reference throughout all phases)
 
 ## ROLE

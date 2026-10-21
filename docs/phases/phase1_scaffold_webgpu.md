@@ -1,3 +1,5 @@
+> Historical design brief (pre-overhaul). It no longer describes the current code; see README.md.
+
 # SHADER STUDIO - PHASE 1: CORE WEBGPU & LAYOUT
 
 > **ROLE:** You are a senior graphics engineer. We are building "Shader Studio", a browser-based shader compositor. Building iteratively to avoid context limits. See the master brief for full project context and architecture rules.

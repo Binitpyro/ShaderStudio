@@ -18,22 +18,25 @@ export function computeHandshakeProof(token, nonce) {
 const SHADER_EXTENSIONS = [".wgsl", ".glsl", ".frag", ".vert"]
 const MAX_BODY_BYTES = 5 * 1024 * 1024 // 5 MB
 
+// Explicit origins only: Vite dev (5173) / preview (4173) and the Tauri webview origins. Anything else is opt-in via
+// SHADER_STUDIO_ALLOWED_ORIGINS (comma-separated), SHADER_STUDIO_ALLOWED_ORIGIN, --allowed-origin or options.allowedOrigins.
 const DEFAULT_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:4173",
   "http://127.0.0.1:4173",
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
 ])
 
-const LOCAL_ORIGIN_REGEX = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/
+const csvEnv = (name) => (process.env[name] || "").split(",").map((v) => v.trim()).filter(Boolean)
 
-const ALLOWED_AI_HOSTS = new Set([
-  "api.anthropic.com",
-  "generativelanguage.googleapis.com",
-  "api.openai.com",
-  "localhost",
-  "127.0.0.1",
-])
+// AI proxy: cloud providers over https, plus the two local runtimes on their well-known ports only (an any-port
+// localhost allowance is SSRF into whatever else listens locally). Extra ports: SHADER_STUDIO_PROXY_LOCAL_PORTS.
+const ALLOWED_AI_HOSTS = new Set(["api.anthropic.com", "generativelanguage.googleapis.com", "api.openai.com"])
+const LOCAL_AI_HOSTS = new Set(["localhost", "127.0.0.1"])
+const DEFAULT_LOCAL_AI_PORTS = ["11434", "1234", "8080"] // Ollama, LM Studio, the app's default custom endpoint
 
 /**
  * Validates whether an origin is allowed by the strict CORS policy.
@@ -41,9 +44,9 @@ const ALLOWED_AI_HOSTS = new Set([
 export function isAllowedOrigin(origin, extraOrigins = []) {
   if (!origin || typeof origin !== "string") return false
   if (DEFAULT_ALLOWED_ORIGINS.has(origin)) return true
-  if (LOCAL_ORIGIN_REGEX.test(origin)) return true
   if (Array.isArray(extraOrigins) && extraOrigins.includes(origin)) return true
   if (process.env.SHADER_STUDIO_ALLOWED_ORIGIN && origin === process.env.SHADER_STUDIO_ALLOWED_ORIGIN) return true
+  if (csvEnv("SHADER_STUDIO_ALLOWED_ORIGINS").includes(origin)) return true
   return false
 }
 
@@ -131,11 +134,13 @@ export function extractToken(req, url) {
 export function isAllowedAiUrl(targetUrl) {
   try {
     const parsed = new URL(targetUrl)
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false
-    if (parsed.protocol === "http:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
-      return false
+    if (parsed.username || parsed.password) return false
+    if (LOCAL_AI_HOSTS.has(parsed.hostname)) {
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false
+      const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80")
+      return [...DEFAULT_LOCAL_AI_PORTS, ...csvEnv("SHADER_STUDIO_PROXY_LOCAL_PORTS")].includes(port)
     }
-    return ALLOWED_AI_HOSTS.has(parsed.hostname)
+    return parsed.protocol === "https:" && ALLOWED_AI_HOSTS.has(parsed.hostname)
   } catch {
     return false
   }
@@ -192,6 +197,7 @@ export function createBridgeServer(options = {}) {
     process.env.SHADER_STUDIO_TOKEN ||
     randomBytes(24).toString("hex")
   const quiet = !!options.quiet
+  const authTimeoutMs = options.authTimeoutMs !== undefined ? options.authTimeoutMs : 5000
 
   const browserClients = new Set()
   const agentClients = new Set()
@@ -276,6 +282,13 @@ export function createBridgeServer(options = {}) {
       if (!isSafePath(requestedPath, root)) {
         res.writeHead(403, { "Content-Type": "application/json" })
         res.end(JSON.stringify({ error: "Forbidden: path escapes root boundary" }))
+        return
+      }
+
+      // Same extension allowlist as the watcher: with no directory the root is cwd, which must not serve .env, keys, etc.
+      if (!SHADER_EXTENSIONS.includes(extname(requestedPath).toLowerCase())) {
+        res.writeHead(403, { "Content-Type": "application/json" })
+        res.end(JSON.stringify({ error: "Forbidden: only shader source files can be served" }))
         return
       }
 
@@ -444,6 +457,7 @@ export function createBridgeServer(options = {}) {
       try {
         const fetchResponse = await fetch(targetUrl, {
           method: "POST",
+          redirect: "manual", // a 3xx must not bounce an allowed host to an internal address
           headers: {
             "Content-Type": "application/json",
             ...headers,
@@ -477,10 +491,19 @@ export function createBridgeServer(options = {}) {
       return
     }
 
-    // 2. Token check on upgrade
+    // 2. Token check on upgrade. Header/query tokens (CLI and agent clients) authenticate immediately. A browser client
+    // connects with ?nonce= only and sends {type:"auth", token} after it has verified our hello proof, so a port squatter
+    // never sees the token.
     const host = req.headers.host || `localhost:${port}`
     const url = new URL(req.url, `http://${host}`)
     const providedToken = extractToken(req, url)
+
+    if (!providedToken && url.searchParams.get("nonce")) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req)
+      })
+      return
+    }
 
     if (!providedToken) {
       wss.handleUpgrade(req, socket, head, (ws) => {
@@ -544,27 +567,49 @@ export function createBridgeServer(options = {}) {
     const url = new URL(req.url, `http://${host}`)
     const isAgent = url.searchParams.get("role") === "agent"
 
-    // Handshake proof: lets the client verify this server really knows the token before trusting pushed shader source.
+    // Handshake proof: lets the client verify this server really knows the token before it sends the token or trusts pushed source.
     const nonce = url.searchParams.get("nonce")
     if (nonce) ws.send(JSON.stringify({ type: "hello", proof: computeHandshakeProof(token, nonce) }))
 
-    if (isAgent) {
-      agentClients.add(ws)
-      if (!quiet) console.log(`[Bridge] External AI Agent connected (${agentClients.size} agent(s))`)
-    } else {
-      browserClients.add(ws)
-      if (!quiet) console.log(`[Bridge] Browser Studio connected (${browserClients.size} client(s))`)
+    // Header/query tokens were already verified at upgrade; nonce-only sockets must send {type:"auth", token}.
+    let authed = !!extractToken(req, url)
+    let authTimer = null
+
+    const register = () => {
+      if (isAgent) {
+        agentClients.add(ws)
+        if (!quiet) console.log(`[Bridge] External AI Agent connected (${agentClients.size} agent(s))`)
+      } else {
+        browserClients.add(ws)
+        if (!quiet) console.log(`[Bridge] Browser Studio connected (${browserClients.size} client(s))`)
+      }
+
+      if (directory && !isAgent) {
+        const files = getShaderFiles(directory, directory)
+        ws.send(JSON.stringify({ type: "list", files }))
+        if (files.length > 0) broadcastFile(files[0], directory)
+      }
     }
 
-    if (directory && !isAgent) {
-      const files = getShaderFiles(directory, directory)
-      ws.send(JSON.stringify({ type: "list", files }))
-      if (files.length > 0) broadcastFile(files[0], directory)
+    if (authed) register()
+    else {
+      authTimer = setTimeout(() => ws.close(4401, "Unauthorized: no auth message within the handshake window"), authTimeoutMs)
     }
 
     ws.on("message", (raw) => {
       try {
         const data = JSON.parse(raw.toString())
+
+        if (!authed) {
+          if (data && data.type === "auth" && isTokenValid(data.token, token)) {
+            authed = true
+            clearTimeout(authTimer)
+            register()
+          } else {
+            ws.close(4401, "Unauthorized: authenticate first")
+          }
+          return
+        }
 
         // Response feedback from browser to pending HTTP RPC request
         if (data.type === "agent:feedback" && data.id) {
@@ -586,11 +631,13 @@ export function createBridgeServer(options = {}) {
           }
         }
       } catch {
-        /* ignore invalid JSON */
+        if (!authed) ws.close(4401, "Unauthorized: authenticate first")
       }
     })
 
     ws.on("close", () => {
+      clearTimeout(authTimer)
+      if (!authed) return
       browserClients.delete(ws)
       agentClients.delete(ws)
       if (!quiet) {

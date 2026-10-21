@@ -1,3 +1,5 @@
+> Historical design brief (pre-overhaul). It no longer describes the current code; see README.md.
+
 # SHADER STUDIO - PHASE 3: NODE GRAPH & GRAPH COMPILER
 
 > **CONTEXT:** Phases 1-2 (WebGPU, resize/device-loss handling, code sync, parameters) are working. Now replace the Left Panel placeholder with a React Flow node graph covering the full node set needed for freeform composition, not just mesh+material.

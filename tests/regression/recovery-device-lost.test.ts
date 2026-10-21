@@ -443,6 +443,26 @@ describe("Tier 2: Boundary & Corner Cases — WebGPU Device Loss & Fallback Reco
 
 
 
+  it("ignores a late loss from a device that is no longer current", async () => {
+    const adapter = new WebGPUAdapter()
+    adapter.recoveryBackoffMs = 200 // long: a wrongly-triggered recovery would still be mid-backoff when we assert
+    await adapter.mount(env.createCanvas() as any)
+    const oldDevice = env.webgpu.getDevice() as MockGPUDevice
+    // Rapid backend switch: the adapter now holds a different (live) device.
+    ;(adapter as any).device = { stale: false }
+    ;(adapter as any).initialized = true
+
+    oldDevice.simulateDeviceLost("late loss from old device", "unknown")
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect((adapter as any).initialized).toBe(true)
+    expect((adapter as any).isRecovering).toBe(false)
+    expect(useProjectStore.getState().deviceLost).toBe(false)
+    expect(useProjectStore.getState().lastCompileError).toBeNull()
+    ;(adapter as any).device = null
+    adapter.dispose()
+  })
+
 })
 })
 

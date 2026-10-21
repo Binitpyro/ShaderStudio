@@ -1,3 +1,5 @@
+> Historical design brief (pre-overhaul). It no longer describes the current code; see README.md.
+
 # SHADER STUDIO - PHASE 2: LIVE CODE SYNC, PARAMETERS & FALLBACK EDITOR
 
 > **CONTEXT:** Phase 1 (WebGPU viewport + resizable layout) is complete. This phase adds the code-editing surface. Per the master brief: **external IDE sync is primary, Monaco is fallback** — the user will always prefer editing in their real IDE over an in-browser editor.

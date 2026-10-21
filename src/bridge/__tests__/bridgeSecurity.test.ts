@@ -14,6 +14,11 @@ describe("Bridge Security & SSRF Protection", () => {
     expect(isAllowedAiUrl("http://127.0.0.1:1234/v1/chat/completions")).toBe(true)
   })
 
+  it("blocks other local ports (SSRF into local services)", () => {
+    expect(isAllowedAiUrl("http://localhost:6379/")).toBe(false)
+    expect(isAllowedAiUrl("http://127.0.0.1:8642/api/status")).toBe(false)
+  })
+
   it("blocks SSRF attacks to cloud metadata endpoints (169.254.169.254)", () => {
     expect(isAllowedAiUrl("http://169.254.169.254/latest/meta-data")).toBe(false)
     expect(isAllowedAiUrl("https://169.254.169.254/secret")).toBe(false)

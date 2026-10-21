@@ -326,6 +326,13 @@ function resolveLoadedSources(data: ProjectData): { wgsl: string; glsl: string }
   return { wgsl, glsl }
 }
 
+/** Compile a graph to a render queue; null when empty or invalid. Lets store writes publish the queue without NodeGraph mounted. */
+export function compileQueue(nodes: Node<GraphNodeData>[], edges: Edge[]): RenderQueue | null {
+  if (nodes.length === 0) return null
+  const { queue, error } = compileGraph(nodes, edges)
+  return error ? null : queue
+}
+
 export const STARTER_QUEUE = compileGraph(STARTER_NODES, STARTER_EDGES).queue
 
 export const useProjectStore = create<ProjectState>((set, get, api) => {
@@ -606,6 +613,7 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
       textureResources: [],
       _graphNodes: [],
       _graphEdges: [],
+      renderQueue: null,
       variations: [],
       activeVariationId: null,
       audioBindings: {},
@@ -659,6 +667,7 @@ export const useProjectStore = create<ProjectState>((set, get, api) => {
     activeBackend: data.backend,
     _graphNodes: data.graphNodes || [],
     _graphEdges: data.graphEdges || [],
+    renderQueue: compileQueue(data.graphNodes || [], data.graphEdges || []),
     uniformValues: data.uniformValues || {},
     graphUniforms: data.graphUniforms || [],
     wgslSource: sources.wgsl,

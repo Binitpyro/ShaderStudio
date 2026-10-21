@@ -153,7 +153,7 @@ const SAFE_TEXTURE_SRC = /^(data:image\/|blob:|https:\/\/)/i
 const NUM_LIMIT = 1e6
 
 export type ProjectImportResult =
-  | { ok: true; data: ProjectData; warnings: string[] }
+  | { ok: true; data: ProjectData; warnings: string[]; /** The projectId written in the file itself (data.projectId is always fresh for imports). */ fileProjectId?: string }
   | { ok: false; error: string }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -258,6 +258,54 @@ function checkGraph(nodes: unknown[], edges: unknown[]): string | null {
   return null
 }
 
+const clampNum = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(-NUM_LIMIT, Math.min(NUM_LIMIT, v)) : 0)
+
+/** Drop uniform entries that fail the strict check (e.g. null from a JSON-serialised NaN); defaults apply when they are missing. */
+function repairUniformMap(v: unknown, label: string, repairs: string[]): void {
+  if (!isObj(v)) return
+  for (const name of Object.keys(v)) {
+    if (checkUniformValue(name, v[name])) {
+      delete v[name]
+      repairs.push(`dropped invalid uniform "${name}" in ${label}`)
+    }
+  }
+}
+
+/**
+ * Stored rows only: repair what strict validation would reject so one bad value never makes a whole project unloadable.
+ * Mutates the already-cleaned copy. Untrusted imports skip this and stay strict.
+ */
+function repairStored(raw: Record<string, unknown>, repairs: string[]): void {
+  repairUniformMap(raw.uniformValues, "uniformValues", repairs)
+  if (Array.isArray(raw.variations)) {
+    raw.variations.forEach((v, i) => isObj(v) && repairUniformMap(v.uniformValues, `variations[${i}]`, repairs))
+  }
+  if (!Array.isArray(raw.graphNodes)) return
+  const seen = new Set<string>()
+  raw.graphNodes = raw.graphNodes.filter((n) => {
+    if (!isObj(n) || typeof n.id !== "string") return true
+    if (!seen.has(n.id)) return seen.add(n.id), true
+    repairs.push(`dropped duplicate node id "${n.id}"`)
+    return false
+  })
+  for (const n of raw.graphNodes as unknown[]) {
+    if (!isObj(n)) continue
+    if (isObj(n.position)) {
+      const { x, y } = n.position
+      if (!isFiniteNum(x) || !isFiniteNum(y)) {
+        n.position = { ...n.position, x: clampNum(x), y: clampNum(y) }
+        repairs.push(`clamped position of node "${String(n.id)}"`)
+      }
+    }
+    for (const k of ["width", "height"]) {
+      if (n[k] !== undefined && !isFiniteNum(n[k])) {
+        n[k] = Number.isFinite(n[k]) ? clampNum(n[k]) : undefined
+        repairs.push(`fixed ${k} of node "${String(n.id)}"`)
+      }
+    }
+  }
+}
+
 function validateProject(rawInput: unknown, mode: "import" | "stored"): ProjectImportResult {
   if (!isObj(rawInput)) return fail("not an object")
   const stripped = { count: 0 }
@@ -269,6 +317,14 @@ function validateProject(rawInput: unknown, mode: "import" | "stored"): ProjectI
   }
   const warnings: string[] = []
   if (stripped.count > 0) warnings.push(`${stripped.count} unsafe key(s) (__proto__, constructor, prototype) were removed`)
+  if (mode === "stored") {
+    const repairs: string[] = []
+    repairStored(raw, repairs)
+    if (repairs.length > 0) {
+      console.warn(`[db] repaired stored project "${String(raw.name)}": ${repairs.join("; ")}`)
+      warnings.push(...repairs)
+    }
+  }
 
   if (typeof raw.backend !== "string" || !BACKENDS.includes(raw.backend as BackendType)) {
     return fail(`backend must be one of ${BACKENDS.join(", ")}`)
@@ -386,7 +442,7 @@ function validateProject(rawInput: unknown, mode: "import" | "stored"): ProjectI
     createdAt: stored && isFiniteNum(raw.createdAt) ? raw.createdAt : now,
     updatedAt: stored && isFiniteNum(raw.updatedAt) ? raw.updatedAt : now,
   } as ProjectData
-  return { ok: true, data, warnings }
+  return { ok: true, data, warnings, fileProjectId: typeof raw.projectId === "string" && raw.projectId !== "" ? raw.projectId : undefined }
 }
 
 /**
@@ -426,4 +482,21 @@ export function uniqueImportName(name: string, existingNames: string[]): string 
   let candidate = `${name} (imported)`
   for (let i = 2; taken.has(candidate.toLowerCase()); i++) candidate = `${name} (imported ${i})`
   return candidate
+}
+
+/**
+ * Decide identity and name for a file opened from disk. A file whose projectId is already in the DB is the same
+ * project: ask (confirmUpdate) whether to update it in place; declining imports a renamed copy under a fresh id.
+ * A file whose id is unknown keeps its id and name untouched. Without any id it is a plain new import.
+ */
+export function resolveOpenedProject(
+  data: ProjectData,
+  fileProjectId: string | undefined,
+  existing: Array<{ name: string; projectId?: string }>,
+  confirmUpdate: (name: string) => boolean
+): ProjectData {
+  const copy = () => ({ ...data, name: uniqueImportName(data.name, existing.map((p) => p.name)) })
+  if (!fileProjectId) return copy()
+  if (existing.some((p) => p.projectId === fileProjectId)) return confirmUpdate(data.name) ? { ...data, projectId: fileProjectId } : copy()
+  return { ...data, projectId: fileProjectId }
 }

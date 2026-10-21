@@ -24,7 +24,7 @@
 
 ## 📖 Overview
 
-**Shader Studio** transforms graphics programming into an agile, visual, and AI-collaborative creative workflow. Built from the ground up for technical artists, game developers, creative coders, and autonomous AI agents, Shader Studio provides instant sub-millisecond shader compilation, hardware-accelerated compute shaders, and turnkey production pipelines.
+**Shader Studio** transforms graphics programming into an agile, visual, and AI-collaborative creative workflow. Built from the ground up for technical artists, game developers, creative coders, and autonomous AI agents, Shader Studio provides live shader recompilation as you type, WebGPU compute shaders, and turnkey production pipelines.
 
 Whether you are designing procedural materials for **Unity**, **Godot**, or **Three.js**, testing audio-reactive visualizers, or pairing with **Claude**, **Gemini**, **OpenAI**, or local **Ollama** models via the **Model Context Protocol (MCP)**, Shader Studio gives you real-time visual feedback without the heavyweight bloat of traditional game engines.
 
@@ -35,7 +35,7 @@ Whether you are designing procedural materials for **Unity**, **Godot**, or **Th
 ### 🤖 1. Agentic AI Visual Sandbox & MCP Server
 Shader Studio features a complete closed-loop AI runtime that empowers language models to see, inspect, and iterate on shader code in real time:
 - **Universal Model Context Protocol (MCP) Server (`scripts/mcp-server.js`)**: Connect Cursor, Claude Desktop, or Antigravity directly to your running canvas via stdio JSON-RPC. External agents can call `render_shader`, `get_viewport_snapshot`, `get_bridge_status`, `list_templates`, `load_template`, and `transpile_shader`.
-- **Integrated In-App Copilot Drawer (`src/components/AICopilotDrawer.tsx`)**: Multi-provider AI assistant supporting cloud models (Anthropic Claude, Google Gemini, OpenAI) and local zero-cost models (**Ollama** on `localhost:11434`, **LM Studio** on `localhost:1234`).
+- **Integrated In-App Copilot (`src/components/sidebars/AICopilotSidebar.tsx`)**: Multi-provider AI assistant supporting cloud models (Anthropic Claude, Google Gemini, OpenAI) and local zero-cost models (**Ollama** on `localhost:11434`, **LM Studio** on `localhost:1234`).
 - **Autonomous Vision Loop & Auto-Fix**: The AI compiles shader code, captures high-resolution viewport frames (`POST /api/agent/capture`), inspects GPU error diagnostics, and self-corrects broken shaders automatically.
 
 ### 🎨 2. Commercial Game Engine Transpiler
@@ -44,7 +44,7 @@ Export your procedural shaders directly into production-ready game engine format
 - **Godot 4 Spatial (`.gdshader`)**: Godot 4.x shading language with typed uniforms (`uniform vec3 u_color : source_color;`, `uniform float u_speed;`) and `fragment() { ALBEDO = ... }` outputs.
 - **Shadertoy GLSL (`.glsl`)**: Portable `mainImage(out vec4 fragColor, in vec2 fragCoord)` entry point mapped to `iTime` and `iResolution`.
 - **React Three Fiber Component (`.tsx`)**: Typed React Three Fiber material wrapper with reactive uniform hooks.
-- **Webflow / HTML Canvas Embed (`.html`)**: Self-contained zero-dependency WebGL2 canvas embed script ready to paste into any website.
+- **Webflow / HTML Canvas Embed (`.html`)**: Single paste-in HTML embed (canvas plus script) that renders your GLSL through three.js r128, which it loads from the cdnjs CDN, so the page needs network access.
 
 ### 📦 3. Custom 3D Model Drag-and-Drop Loader
 - Drag and drop any `.glb`, `.gltf`, or `.obj` 3D model directly onto the **MeshNode**.
@@ -218,6 +218,8 @@ To connect external AI coding tools (**Cursor**, **Claude Desktop**, or **Antigr
 - **MCP server** (`scripts/mcp-server.js`, `npm run mcp`): a stdio JSON-RPC server. Your AI client launches it and it talks to the bridge.
 
 `ws` is a devDependency, so `npm run bridge` needs a normal `npm install` (not `--omit=dev`).
+
+The bridge accepts browser origins `localhost`/`127.0.0.1` on ports 5173 and 4173 plus the Tauri origins; add others with `SHADER_STUDIO_ALLOWED_ORIGINS` (comma-separated). Its AI proxy reaches local models only on Ollama's port 11434, LM Studio's 1234 and the default custom endpoint's 8080; add ports with `SHADER_STUDIO_PROXY_LOCAL_PORTS` (comma-separated). `/api/file` serves only `.wgsl`, `.glsl`, `.frag` and `.vert` files.
 
 1. Start the bridge:
    ```bash

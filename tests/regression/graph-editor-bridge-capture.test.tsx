@@ -63,7 +63,9 @@ describe("bridge 4401 token flow", () => {
 
     expect(window.localStorage.getItem("shaderstudio_bridge_token")).toBe("s3cret")
     expect(FakeWS.instances).toHaveLength(2)
-    expect(FakeWS.instances[1].url).toContain("token=s3cret")
+    // Reconnects with a nonce (handshake) and never puts the token in the URL.
+    expect(FakeWS.instances[1].url).toContain("nonce=")
+    expect(FakeWS.instances[1].url).not.toContain("s3cret")
     act(() => { FakeWS.instances[1].readyState = 1; FakeWS.instances[1].onopen?.() })
     expect(bridgeNeedsToken()).toBe(false)
     expect(screen.queryByText("Bridge needs a token")).toBeNull()
@@ -76,7 +78,8 @@ describe("bridge 4401 token flow", () => {
     render(<SyncStatusBanner />)
     fireEvent.click(screen.getByRole("button", { name: "Retry" }))
     expect(FakeWS.instances).toHaveLength(2)
-    expect(FakeWS.instances[1].url).toContain("token=saved")
+    expect(FakeWS.instances[1].url).toContain("nonce=")
+    expect(FakeWS.instances[1].url).not.toContain("saved")
   })
 
   it("non-auth closes still back off and reconnect", async () => {

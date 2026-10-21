@@ -1,3 +1,5 @@
+> Historical design brief (pre-overhaul). It no longer describes the current code; see README.md.
+
 # SHADER STUDIO - PHASE 4: MULTI-BACKEND ADAPTERS, REAL POST-PROCESSING & POLISH
 
 > **CONTEXT:** WebGPU, the node graph, and code sync are all working. Add WebGL2 and Three.js backends, make post-processing actually process (not pass-through), and add the remaining v1 polish features from the master brief.

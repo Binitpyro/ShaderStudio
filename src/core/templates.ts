@@ -1,5 +1,5 @@
 import type { Node, Edge } from "@xyflow/react"
-import { useProjectStore, type BackendType, type UniformValue } from "@/stores/projectStore"
+import { useProjectStore, compileQueue, type BackendType, type UniformValue } from "@/stores/projectStore"
 import { compileGraph, type GraphNodeData } from "./graphCompiler"
 import { STARTER_NODES, STARTER_EDGES, STARTER_VERT_GLSL } from "./defaultStarterScene"
 import { SDF_VERT_GLSL } from "./sdf/sdfCompiler"
@@ -126,7 +126,7 @@ export function applyTemplate(template: ShaderTemplate): void {
   s.setGraphNodes(graph.nodes)
   s.setGraphEdges(graph.edges)
   // Publish the render queue (mesh step: SDF graphs -> "plane") here too, so it never depends on the graph editor being mounted.
-  const { queue, error } = compileGraph(graph.nodes, graph.edges)
-  if (!error) s.setRenderQueue(queue)
+  const queue = compileQueue(graph.nodes, graph.edges)
+  if (queue) s.setRenderQueue(queue)
   s.triggerRecompile()
 }

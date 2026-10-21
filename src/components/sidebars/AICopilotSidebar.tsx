@@ -46,6 +46,8 @@ export function AICopilotSidebar() {
       models: s.models,
       visualCritique: s.visualCritique,
       rememberKeys: s.rememberKeys,
+      keysMigrationNotice: s.keysMigrationNotice,
+      dismissKeysMigrationNotice: s.dismissKeysMigrationNotice,
       setRememberKeys: s.setRememberKeys,
       setActiveProvider: s.setActiveProvider,
       setApiKey: s.setApiKey,
@@ -100,6 +102,14 @@ export function AICopilotSidebar() {
         </TipIconButton>
       }
     >
+      {ai.keysMigrationNotice && (
+        <div role="status" className="flex items-start justify-between gap-2 rounded-lg bg-raised p-3 text-xs text-fg-muted">
+          <p>Saved API keys were cleared for security. Re-enter them and tick 'Remember keys on this device' to keep them.</p>
+          <Button size="sm" variant="secondary" onClick={ai.dismissKeysMigrationNotice}>
+            Dismiss
+          </Button>
+        </div>
+      )}
       {showSettings && (
         <section aria-label="Provider settings" className="flex flex-col gap-3 rounded-lg bg-raised p-3">
           <div className="flex flex-col gap-1.5">

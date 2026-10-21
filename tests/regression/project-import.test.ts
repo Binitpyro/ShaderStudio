@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import {
   validateProjectImport,
   validateStoredProject,
   parseProjectJson,
+  resolveOpenedProject,
   loadProjectFrom,
   deleteProjectFrom,
   type ProjectRwTable,
@@ -170,5 +171,75 @@ describe("db load/delete address projects by projectId", () => {
     expect(t.rows[0].projectId).toBeTruthy()
     await deleteProjectFrom(t, t.rows[0].projectId!)
     expect(t.rows).toHaveLength(0)
+  })
+})
+
+describe("stored rows are repaired, imports stay strict", () => {
+  const broken = (): any => {
+    const row: any = { ...good(), projectId: "id-9", createdAt: 1, updatedAt: 2 }
+    const n0 = row.graphNodes[0]
+    row.graphNodes = [n0, { ...n0, position: { x: 5, y: 5 } }, { ...n0, id: "far", position: { x: 5e9, y: -5e9 } }]
+    row.uniformValues = { u_bad: { type: "float", value: null }, u_ok: { type: "float", value: 2 } }
+    return row
+  }
+
+  it("repairs null uniforms, duplicate node ids and out-of-range positions, and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const r = validateStoredProject(broken())
+    if (!r.ok) throw new Error(r.error)
+    expect(r.data.uniformValues).toEqual({ u_ok: { type: "float", value: 2 } })
+    const ids = (r.data.graphNodes as any[]).map((n) => n.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids).toHaveLength(2)
+    const far = (r.data.graphNodes as any[]).find((n) => n.id === "far")
+    expect(far.position).toEqual({ x: 1e6, y: -1e6 })
+    expect(r.data.projectId).toBe("id-9")
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it("the same data is still rejected as an untrusted import", () => {
+    expect(validateProjectImport(broken()).ok).toBe(false)
+    const dup = broken()
+    delete dup.uniformValues.u_bad
+    dup.graphNodes = dup.graphNodes.slice(0, 2)
+    expect(validateProjectImport(dup).ok).toBe(false)
+  })
+})
+
+describe("opening a .shaderstudio file keeps identity", () => {
+  const file = () => ({ ...good(), projectId: "file-id", name: "Saved" })
+  const parse = () => {
+    const r = parseProjectJson(JSON.stringify(file()))
+    if (!r.ok) throw new Error(r.error)
+    return r
+  }
+
+  it("keeps id and name when the id is unknown", () => {
+    const r = parse()
+    const out = resolveOpenedProject(r.data, r.fileProjectId, [{ name: "Saved", projectId: "other" }], () => true)
+    expect(out.projectId).toBe("file-id")
+    expect(out.name).toBe("Saved")
+  })
+
+  it("updates in place when the id exists and the user agrees", () => {
+    const r = parse()
+    const out = resolveOpenedProject(r.data, r.fileProjectId, [{ name: "Saved", projectId: "file-id" }], () => true)
+    expect(out.projectId).toBe("file-id")
+    expect(out.name).toBe("Saved")
+  })
+
+  it("opens a renamed copy under a fresh id when the user declines", () => {
+    const r = parse()
+    const out = resolveOpenedProject(r.data, r.fileProjectId, [{ name: "Saved", projectId: "file-id" }], () => false)
+    expect(out.projectId).not.toBe("file-id")
+    expect(out.name).toBe("Saved (imported)")
+  })
+
+  it("a file without an id is a plain import", () => {
+    const r = parseProjectJson(JSON.stringify(good()))
+    if (!r.ok) throw new Error(r.error)
+    expect(r.fileProjectId).toBeUndefined()
+    expect(resolveOpenedProject(r.data, r.fileProjectId, [{ name: "Mine" }], () => true).name).toBe("Mine (imported)")
   })
 })

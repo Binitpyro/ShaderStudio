@@ -105,19 +105,32 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
   })
 
   describe("CORS origin validation", () => {
-    it("allows Vite dev/preview origins and arbitrary local ports", () => {
+    it("allows Vite dev/preview and Tauri origins, but not arbitrary local ports", () => {
       for (const o of [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "http://localhost:3000",
-        "http://127.0.0.1:8080",
-        "https://localhost:8443",
-        "http://localhost",
-        "http://127.0.0.1",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
       ]) {
-        expect(isAllowedOrigin(o)).toBe(true)
+        expect(isAllowedOrigin(o), o).toBe(true)
+      }
+      for (const o of ["http://localhost:3000", "http://127.0.0.1:8080", "https://localhost:8443", "http://localhost", "http://127.0.0.1", "http://localhost:8642"]) {
+        expect(isAllowedOrigin(o), o).toBe(false)
+      }
+    })
+
+    it("SHADER_STUDIO_ALLOWED_ORIGINS adds explicit comma-separated origins", () => {
+      expect(isAllowedOrigin("http://localhost:3000")).toBe(false)
+      process.env.SHADER_STUDIO_ALLOWED_ORIGINS = "http://localhost:3000, http://localhost:9000"
+      try {
+        expect(isAllowedOrigin("http://localhost:3000")).toBe(true)
+        expect(isAllowedOrigin("http://localhost:9000")).toBe(true)
+        expect(isAllowedOrigin("http://localhost:3001")).toBe(false)
+      } finally {
+        delete process.env.SHADER_STUDIO_ALLOWED_ORIGINS
       }
     })
 
@@ -300,6 +313,26 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
       expect(await ok.text()).toContain("@fragment fn main()")
       expect((await fetch(`${baseUrl}/api/file?path=missing.wgsl`, { headers: auth })).status).toBe(404)
       expect((await fetch(`${baseUrl}/api/file`, { headers: auth })).status).toBe(400)
+    })
+
+    it("serves only shader source extensions, even for in-root files (no directory => cwd root)", async () => {
+      writeFileSync(join(root, ".env"), "API_KEY=do-not-leak")
+      writeFileSync(join(root, "notes.txt"), "plain")
+      for (const p of [".env", "notes.txt", "sample.wgsl.bak"]) {
+        const res = await fetch(`${baseUrl}/api/file?path=${encodeURIComponent(p)}`, { headers: auth })
+        expect(res.status, p).toBe(403)
+        expect(await res.text()).not.toContain("do-not-leak")
+      }
+      // The no-directory bridge (root = cwd) is the case that mattered: package.json exists there.
+      const open = createBridgeServer({ port: 0, token: SECRET, quiet: true })
+      const port = await open.listen(0)
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/file?path=package.json`, { headers: auth })
+        expect(res.status).toBe(403)
+        expect(await res.text()).not.toContain("shader-studio")
+      } finally {
+        await open.close()
+      }
     })
 
     it("rejects an agent execute payload with an out-of-bounds path", async () => {
@@ -527,6 +560,45 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
       }
     })
 
+    it("pins local targets to Ollama 11434, LM Studio 1234 and the default custom 8080; other local ports need SHADER_STUDIO_PROXY_LOCAL_PORTS", () => {
+      for (const u of ["http://localhost:6379/", "http://127.0.0.1:8642/api/status", "http://localhost/", "http://localhost:9090/v1", "http://localhost:11435/"]) {
+        expect(isAllowedAiUrl(u), u).toBe(false)
+      }
+      for (const u of ["http://localhost:11434/api/chat", "http://127.0.0.1:1234/v1", "http://localhost:8080/v1"]) {
+        expect(isAllowedAiUrl(u), u).toBe(true)
+      }
+      expect(isAllowedAiUrl("http://user:pw@localhost:11434/")).toBe(false)
+      process.env.SHADER_STUDIO_PROXY_LOCAL_PORTS = "9090, 9091"
+      try {
+        expect(isAllowedAiUrl("http://localhost:9090/v1")).toBe(true)
+        expect(isAllowedAiUrl("http://127.0.0.1:9091/x")).toBe(true)
+        expect(isAllowedAiUrl("http://localhost:6379/")).toBe(false)
+      } finally {
+        delete process.env.SHADER_STUDIO_PROXY_LOCAL_PORTS
+      }
+    })
+
+    it("does not follow redirects from an allowed local target (redirect: manual)", async () => {
+      const { createServer } = await import("http")
+      let hits = 0
+      const internal = createServer((_q, r) => { hits++; r.end("INTERNAL-SECRET") }).listen(0, "127.0.0.1")
+      await new Promise((r) => internal.once("listening", r))
+      const internalPort = (internal.address() as { port: number }).port
+      const redirector = createServer((_q, r) => { r.writeHead(302, { Location: `http://127.0.0.1:${internalPort}/` }); r.end() }).listen(0, "127.0.0.1")
+      await new Promise((r) => redirector.once("listening", r))
+      const redirPort = (redirector.address() as { port: number }).port
+      process.env.SHADER_STUDIO_PROXY_LOCAL_PORTS = String(redirPort)
+      try {
+        const res = await post("/api/ai/proxy", { targetUrl: `http://127.0.0.1:${redirPort}/`, body: {} }, auth)
+        expect(await res.text()).not.toContain("INTERNAL-SECRET")
+        expect(hits).toBe(0)
+      } finally {
+        delete process.env.SHADER_STUDIO_PROXY_LOCAL_PORTS
+        redirector.close()
+        internal.close()
+      }
+    })
+
     it("blocks disallowed targets with 403 even with a valid token, and 400s a missing targetUrl", async () => {
       for (const targetUrl of ["http://169.254.169.254/latest/meta-data/", "https://internal-secret-service.local/keys"]) {
         const res = await post("/api/ai/proxy", { targetUrl }, auth)
@@ -601,6 +673,46 @@ describe("Local bridge RPC security (scripts/bridge.js)", () => {
       expect(await verifyBridgeProof(SECRET, "abc123", first.proof as string)).toBe(true)
       expect(await verifyBridgeProof("some-other-token", "abc123", first.proof as string)).toBe(false)
       expect(await verifyBridgeProof(SECRET, "different-nonce", first.proof as string)).toBe(false)
+    })
+
+    it("authenticates a nonce-only socket by an in-band auth message after the hello proof", async () => {
+      const ws = new WebSocket(`${wsUrl}?nonce=n1`)
+      const received: Record<string, unknown>[] = []
+      ws.on("message", (raw) => received.push(JSON.parse(raw.toString())))
+      await new Promise((r) => ws.once("open", r))
+      await waitUntil(() => received.some((m) => m.type === "hello"))
+      expect(bridge.browserClients.size).toBe(0) // not registered, no list/file pushed yet
+      expect(received.some((m) => m.type === "list")).toBe(false)
+      ws.send(JSON.stringify({ type: "auth", token: SECRET }))
+      await waitUntil(() => received.some((m) => m.type === "list"))
+      expect(bridge.browserClients.size).toBe(1)
+      ws.close()
+      await waitUntil(() => bridge.browserClients.size === 0)
+    })
+
+    it("closes 4401 on a wrong in-band token and on any non-auth first message", async () => {
+      for (const first of [JSON.stringify({ type: "auth", token: "wrong" }), JSON.stringify({ type: "agent:execute", id: "x", source: "s" }), "not json"]) {
+        const ws = new WebSocket(`${wsUrl}?nonce=n2`)
+        const code = new Promise<number>((done) => ws.on("close", (c) => done(c)))
+        await new Promise((r) => ws.once("open", r))
+        ws.send(first)
+        expect(await code, first).toBe(4401)
+        expect(bridge.browserClients.size).toBe(0)
+      }
+    })
+
+    it("closes a nonce-only socket that never authenticates", async () => {
+      const quick = createBridgeServer({ port: 0, token: SECRET, quiet: true, authTimeoutMs: 150 })
+      const port = await quick.listen(0)
+      try {
+        expect(await wsClose(`ws://127.0.0.1:${port}?nonce=n3`)).toBe(4401)
+      } finally {
+        await quick.close()
+      }
+    })
+
+    it("no token and no nonce is still refused", async () => {
+      expect(await wsClose(`${wsUrl}?role=agent`)).toBe(4401)
     })
 
     it("forwards agent:diagnostics from an agent socket to browser clients", async () => {

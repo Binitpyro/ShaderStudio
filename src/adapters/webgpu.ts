@@ -2196,7 +2196,8 @@ export class WebGPUAdapter implements RenderAdapter {
 
   private setupDeviceLostHandler(device: GPUDevice) {
     device.lost.then((info) => {
-      if (this.isDisposed) return
+      // A late loss from a device we already replaced (rapid backend switching) must not touch the current one.
+      if (this.isDisposed || this.device !== device) return
 
       // In WebGPU spec, info.reason === "destroyed" indicates application called device.destroy().
       // Mock tests might emit "GPU out of memory" with default reason "destroyed".

@@ -372,3 +372,22 @@ describe("projectStore: legacy single-source load and project id", () => {
     expect(useProjectStore.getState().exportProjectData().projectId).toBe("proj-1")
   })
 })
+
+describe("render queue publication without NodeGraph mounted", () => {
+  it("loadProjectData compiles the loaded graph into renderQueue", async () => {
+    const { STARTER_NODES, STARTER_EDGES } = await import("@/core/defaultStarterScene")
+    const s = useProjectStore.getState()
+    s.setRenderQueue(null)
+    s.loadProjectData({ name: "G", backend: "webgl2", graphNodes: STARTER_NODES, graphEdges: STARTER_EDGES } as any)
+    const q = useProjectStore.getState().renderQueue
+    expect(q).not.toBeNull()
+    expect(q!.length).toBeGreaterThan(0)
+  })
+
+  it("resetProject clears the previous project's renderQueue", () => {
+    useProjectStore.getState().loadStarterScene()
+    expect(useProjectStore.getState().renderQueue).not.toBeNull()
+    useProjectStore.getState().resetProject()
+    expect(useProjectStore.getState().renderQueue).toBeNull()
+  })
+})

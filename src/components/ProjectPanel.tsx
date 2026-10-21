@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react"
 import { useProjectStore } from "@/stores/projectStore"
-import { saveProject, loadProject, listProjects, deleteProject, parseProjectJson, uniqueImportName } from "@/db"
+import { saveProject, loadProject, listProjects, deleteProject, parseProjectJson, uniqueImportName, resolveOpenedProject } from "@/db"
 import { Button } from "@/components/ui/button"
 import { Save, FolderOpen, Download, Upload, FilePlus, Trash2, Sparkles, HardDriveDownload, HardDriveUpload } from "lucide-react"
 import { createProjectFromShadertoy } from "@/core/shadertoyImporter"
@@ -101,9 +101,10 @@ export function ProjectPanel() {
         setImportError(parsed.error)
         return
       }
-      // Fresh projectId (from validation) + unique name: an import can never overwrite a local project.
-      const data = parsed.data
-      data.name = uniqueImportName(data.name, (await listProjects()).map((p) => p.name))
+      // Re-opening a file you saved updates that project (after asking) instead of duplicating it every time.
+      const data = resolveOpenedProject(parsed.data, parsed.fileProjectId, await listProjects(), (name) =>
+        window.confirm(`"${name}" is already in your library. OK updates it in place; Cancel opens a separate copy.`)
+      )
       loadProjectData(data)
       triggerRecompile()
       await saveProject(data)

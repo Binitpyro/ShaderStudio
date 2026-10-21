@@ -326,7 +326,6 @@ export function connect(tokenOverride?: string) {
     const token = getBridgeToken()
     const env = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } })?.process?.env
     const baseUrl = env?.SHADER_STUDIO_BRIDGE_WS_URL || BRIDGE_URL
-    const wsUrl = token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl
 
     // Handshake: the bridge must prove it knows the token (HMAC of our nonce) before we apply anything it pushes.
     const nonce = token ? randomNonce() : null
@@ -334,7 +333,8 @@ export function connect(tokenOverride?: string) {
     const trusted = new Promise<boolean>((r) => { settleTrust = r })
     const trustTimer = setTimeout(() => settleTrust(false), HANDSHAKE_TIMEOUT_MS)
 
-    const sock = new WebSocket(nonce ? `${wsUrl}&nonce=${nonce}` : wsUrl)
+    // The token never goes in the URL: it is sent in-band only after the server's hello proof verifies.
+    const sock = new WebSocket(nonce ? `${baseUrl}?nonce=${nonce}` : baseUrl)
     ws = sock
     void trusted.then((ok) => {
       clearTimeout(trustTimer)
@@ -354,7 +354,9 @@ export function connect(tokenOverride?: string) {
       try {
         const data = JSON.parse(event.data)
         if (isBridgeHelloMessage(data)) {
-          settleTrust(!!token && !!nonce && (await verifyBridgeProof(token, nonce, data.proof)))
+          const ok = !!token && !!nonce && (await verifyBridgeProof(token, nonce, data.proof))
+          settleTrust(ok)
+          if (ok) sock.send(JSON.stringify({ type: "auth", token }))
           return
         }
         if (!nonce || !(await trusted)) return // unverified server: drop everything

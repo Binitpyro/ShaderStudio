@@ -36,6 +36,15 @@ export interface BridgeHelloMessage {
   proof: string
 }
 
+/**
+ * Sent by the client after it verified the hello proof. The token travels only in this message, never in the WebSocket
+ * URL; the server drops (4401) any other first message and any socket that has not authenticated within 5 s.
+ */
+export interface BridgeAuthMessage {
+  type: "auth"
+  token: string
+}
+
 export function isBridgeHelloMessage(msg: unknown): msg is BridgeHelloMessage {
   return typeof msg === "object" && msg !== null && (msg as { type?: string }).type === "hello" && typeof (msg as { proof?: unknown }).proof === "string"
 }
@@ -77,6 +86,7 @@ export interface AgentFeedbackMessage {
 
 export type BridgeMessage =
   | BridgeHelloMessage
+  | BridgeAuthMessage
   | BridgeFileMessage
   | BridgeListMessage
   | AgentExecuteMessage
