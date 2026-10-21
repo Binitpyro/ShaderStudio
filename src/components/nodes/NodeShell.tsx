@@ -13,13 +13,13 @@ const PORT_CLASS: Record<PortType, string> = {
   surface: "!bg-fg-muted",
 }
 
-/** A React Flow handle styled by port type: 10px dot, ring in the node surface colour, grows on hover. */
+/** A React Flow handle styled by port type: 12px dot, grows on hover. Its enlarged hit area lives in index.css ([data-port]). */
 export function Port({ portType, className, ...props }: HandleProps & { portType: PortType; className?: string }) {
   return (
     <Handle
       {...props}
       data-port={portType}
-      className={cn("!size-2.5 !rounded-full !border-2 !border-overlay transition-transform hover:!scale-125", PORT_CLASS[portType], className)}
+      className={cn("!size-3 !rounded-full !border-2 !border-overlay transition-transform hover:!scale-150", PORT_CLASS[portType], className)}
     />
   )
 }

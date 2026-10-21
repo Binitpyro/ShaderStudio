@@ -2112,3 +2112,38 @@ describe("math_expression nodes emit their validated expression (fleet w2-a-stat
     expect(r.queue.some((s) => s.type === "math_expression")).toBe(false)
   })
 })
+
+describe("graph editing: delete and disconnect", () => {
+  it("deletes with the Delete key as well as Backspace", async () => {
+    const { DELETE_KEYS } = await import("@/components/NodeGraph")
+    expect(DELETE_KEYS).toEqual(expect.arrayContaining(["Delete", "Backspace"]))
+  })
+
+  it("edgeRemovalsForNode removes every edge touching the node, and only those", async () => {
+    const { edgeRemovalsForNode } = await import("@/components/NodeGraph")
+    const edges: Edge[] = [
+      { id: "a", source: "n1", target: "n2" },
+      { id: "b", source: "n3", target: "n1" },
+      { id: "c", source: "n2", target: "n3" },
+    ]
+    expect(edgeRemovalsForNode("n1", edges)).toEqual([{ type: "remove", id: "a" }, { type: "remove", id: "b" }])
+    expect(edgeRemovalsForNode("n4", edges)).toEqual([])
+  })
+
+  it("disconnecting a node through processEdgeChanges drops its connections from the graph", async () => {
+    const { edgeRemovalsForNode } = await import("@/components/NodeGraph")
+    const nodes: Node<GraphNodeData>[] = [
+      { id: "m", type: "mesh", position: { x: 0, y: 0 }, data: { geometry: "sphere" } as GraphNodeData },
+      { id: "o", type: "output", position: { x: 200, y: 0 }, data: {} as GraphNodeData },
+    ]
+    const edges: Edge[] = [{ id: "e", source: "m", target: "o" }]
+    const next = processEdgeChanges(edgeRemovalsForNode("m", edges), nodes, edges)
+    expect(next).toEqual([])
+  })
+
+  it("every edge renders through the deletable edge type", async () => {
+    const { edgeTypes } = await import("@/components/NodeGraph")
+    const { DeletableEdge } = await import("@/components/nodes/DeletableEdge")
+    expect(edgeTypes.default).toBe(DeletableEdge)
+  })
+})

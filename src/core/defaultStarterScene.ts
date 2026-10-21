@@ -31,13 +31,13 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "material-1",
     type: "material",
-    position: { x: 270, y: 130 },
+    position: { x: 340, y: 130 },
     data: { type: "material", shaderPath: "starter.wgsl" },
   },
   {
     id: "postprocess-1",
     type: "postprocess",
-    position: { x: 490, y: 0 },
+    position: { x: 630, y: 0 },
     data: {
       type: "postprocess",
       passType: "bloom",
@@ -47,7 +47,7 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "postprocess-2",
     type: "postprocess",
-    position: { x: 490, y: 190 },
+    position: { x: 630, y: 190 },
     data: {
       type: "postprocess",
       passType: "vignette",
@@ -57,7 +57,7 @@ export const STARTER_NODES: Node<GraphNodeData>[] = [
   {
     id: "output-1",
     type: "output",
-    position: { x: 490, y: 390 },
+    position: { x: 630, y: 390 },
     data: { type: "output" },
   },
 ]

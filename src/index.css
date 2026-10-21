@@ -194,3 +194,22 @@
   text-align: inherit;
   font-size: inherit;
 }
+
+/* Port hit areas (Port in NodeShell.tsx). The graph auto-fits a narrow sidebar at ~0.3x, where a 12px dot is a 4px target.
+   The invisible area reaches ~28 screen px outward from the node edge at any zoom (NodeGraph sets --graph-zoom), but stays
+   24 graph px along the edge and only 6px inward, so stacked ports never overlap and controls inside the node stay clickable. */
+.react-flow__handle[data-port] {
+  z-index: 10;
+}
+.react-flow__handle[data-port]::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+}
+.react-flow__handle-left[data-port]::after {
+  left: min(-6px, calc(6px - 28px / var(--graph-zoom, 1)));
+}
+.react-flow__handle-right[data-port]::after {
+  right: min(-6px, calc(6px - 28px / var(--graph-zoom, 1)));
+}

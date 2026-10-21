@@ -10,7 +10,9 @@ import {
   type NodeChange,
   type EdgeChange,
   type NodeTypes,
+  type EdgeTypes,
   addEdge,
+  reconnectEdge,
   applyNodeChanges,
   applyEdgeChanges,
   useNodesState,
@@ -40,6 +42,7 @@ import { GenericCustomNode } from "@/components/nodes/GenericCustomNode"
 import { MathExpressionNode } from "@/components/nodes/MathExpressionNode"
 import { CommentNode } from "@/components/nodes/CommentNode"
 import { FrameNode } from "@/components/nodes/FrameNode"
+import { DeletableEdge } from "@/components/nodes/DeletableEdge"
 import { Button, Kbd, Separator } from "@/components/ui"
 import { compileGraph, buildSdfTree, type GraphNodeData, type RenderQueue } from "@/core/graphCompiler"
 import { useProjectStore, registerLiveGraphProvider } from "@/stores/projectStore"
@@ -65,6 +68,19 @@ function AutoFit({ userMoved }: { userMoved: { current: boolean } }) {
   }, [width, height, fitView, userMoved])
   return null
 }
+/** Snap radius for dropping a connection, in screen pixels (React Flow takes it in graph units). */
+const SNAP_SCREEN_PX = 30
+
+/**
+ * Reports the zoom (rounded) so port hit areas and the snap radius stay a constant size on screen:
+ * the graph auto-fits a narrow sidebar at ~0.3x, where a 12px port would otherwise be a 4px target.
+ */
+function ZoomWatch({ onZoom }: { onZoom: (zoom: number) => void }) {
+  const zoom = useStore((s) => Math.round(s.transform[2] * 20) / 20)
+  useEffect(() => { onZoom(zoom || 1) }, [zoom, onZoom])
+  return null
+}
+
 // React Flow's own CSS variables, mapped to design tokens so Controls follow the active theme.
 const RF_VARS = {
   "--xy-controls-button-background-color": "var(--ds-overlay)",
@@ -99,6 +115,18 @@ export const nodeTypes: NodeTypes = {
   comment: CommentNode,
   frame: FrameNode,
 }
+
+export const edgeTypes: EdgeTypes = { default: DeletableEdge }
+
+/** Delete works with both keys (React Flow's default is Backspace only, which Windows users don't reach for). */
+export const DELETE_KEYS = ["Delete", "Backspace"]
+
+/** Remove changes for every edge touching a node: used by "Disconnect all" and node deletion. */
+export function edgeRemovalsForNode(nodeId: string, edges: Edge[]): EdgeChange[] {
+  return edges.filter((e) => e.source === nodeId || e.target === nodeId).map((e) => ({ type: "remove", id: e.id }))
+}
+
+type GraphMenu = { kind: "node" | "edge"; id: string; x: number; y: number }
 
 // ---------------------------------------------------------------------------
 // Graph <-> store synchronisation (module level so it is unit-testable without a DOM).
@@ -403,6 +431,48 @@ export function NodeGraph({ className }: NodeGraphProps) {
     [commitEdges]
   )
 
+  // Drag an edge end onto another port to re-wire it, or onto empty canvas to disconnect it.
+  const reconnected = useRef(true)
+  const onReconnectStart = useCallback(() => { reconnected.current = false }, [])
+  const onReconnect = useCallback(
+    (oldEdge: Edge, connection: Connection) => {
+      reconnected.current = true
+      const next = reconnectEdge(oldEdge, connection, edgesRef.current)
+      commitEdges(next)
+      publishStructure(nodesRef.current, nodesRef.current, next)
+    },
+    [commitEdges]
+  )
+  const onReconnectEnd = useCallback(
+    (_: unknown, edge: Edge) => {
+      if (!reconnected.current) onEdgesChange([{ type: "remove", id: edge.id }])
+      reconnected.current = true
+    },
+    [onEdgesChange]
+  )
+
+  const [zoom, setZoom] = useState(1)
+
+  // Right-click menu on nodes and edges.
+  const [menu, setMenu] = useState<GraphMenu | null>(null)
+  const openMenu = useCallback((kind: GraphMenu["kind"], id: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    const box = containerRef.current?.getBoundingClientRect()
+    // Keep the menu (min-w-40 = 160px, two items ≈ 80px) inside the panel: the sidebar clips overflow.
+    const x = Math.max(4, Math.min(e.clientX - (box?.left ?? 0), (box?.width ?? 0) - 164))
+    const y = Math.max(4, Math.min(e.clientY - (box?.top ?? 0), (box?.height ?? 0) - 84))
+    setMenu({ kind, id, x, y })
+  }, [])
+  const deleteNode = useCallback((id: string) => {
+    const removals = edgeRemovalsForNode(id, edgesRef.current)
+    if (removals.length) onEdgesChange(removals)
+    onNodesChange([{ type: "remove", id }])
+  }, [onEdgesChange, onNodesChange])
+  const disconnectNode = useCallback((id: string) => {
+    const removals = edgeRemovalsForNode(id, edgesRef.current)
+    if (removals.length) onEdgesChange(removals)
+  }, [onEdgesChange])
+
   const onSelectionChange = useCallback(
     ({ nodes: selectedNodes }: { nodes: Node<GraphNodeData>[] }) => {
       const id = selectedNodes[0]?.id ?? null
@@ -706,18 +776,30 @@ export function NodeGraph({ className }: NodeGraphProps) {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onReconnect={onReconnect}
+        onReconnectStart={onReconnectStart}
+        onReconnectEnd={onReconnectEnd}
+        edgesReconnectable
+        reconnectRadius={14}
+        connectionRadius={SNAP_SCREEN_PX / zoom}
+        deleteKeyCode={DELETE_KEYS}
+        onNodeContextMenu={(e, node) => openMenu("node", node.id, e)}
+        onEdgeContextMenu={(e, edge) => openMenu("edge", edge.id, e)}
+        onPaneClick={() => setMenu(null)}
+        onMoveStart={(e) => { if (e) userMovedRef.current = true; setMenu(null) }}
         onSelectionChange={onSelectionChange}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         fitViewOptions={FIT_OPTIONS}
         minZoom={0.1}
-        onMoveStart={(e) => { if (e) userMovedRef.current = true }}
-        style={RF_VARS}
+        style={{ ...RF_VARS, "--graph-zoom": zoom } as CSSProperties}
         proOptions={{ hideAttribution: true }}
         className="bg-canvas"
       >
         <Background color="var(--ds-line, currentColor)" variant={BackgroundVariant.Dots} gap={20} size={1} />
         <AutoFit userMoved={userMovedRef} />
+        <ZoomWatch onZoom={setZoom} />
         <Controls showInteractive={false} position="bottom-left" />
         <Panel position="top-left" className="!m-2 max-w-[calc(100%-1rem)]">
           <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-line bg-overlay p-1 shadow-sm">
@@ -743,6 +825,30 @@ export function NodeGraph({ className }: NodeGraphProps) {
           </Panel>
         )}
       </ReactFlow>
+      {menu && (
+        <div
+          role="menu"
+          aria-label={menu.kind === "node" ? "Node actions" : "Connection actions"}
+          onKeyDown={(e) => { if (e.key === "Escape") setMenu(null) }}
+          className="absolute z-50 flex min-w-40 flex-col rounded-lg border border-line bg-overlay p-1 text-sm shadow-md"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          {menu.kind === "node" ? (
+            <>
+              <button role="menuitem" autoFocus className="rounded-md px-2 py-1.5 text-left hover:bg-hover" onClick={() => { disconnectNode(menu.id); setMenu(null) }}>
+                Disconnect all
+              </button>
+              <button role="menuitem" className="rounded-md px-2 py-1.5 text-left text-danger hover:bg-hover" onClick={() => { deleteNode(menu.id); setMenu(null) }}>
+                Delete node <span className="float-right text-2xs text-fg-subtle">Del</span>
+              </button>
+            </>
+          ) : (
+            <button role="menuitem" autoFocus className="rounded-md px-2 py-1.5 text-left text-danger hover:bg-hover" onClick={() => { onEdgesChange([{ type: "remove", id: menu.id }]); setMenu(null) }}>
+              Delete connection <span className="float-right text-2xs text-fg-subtle">Del</span>
+            </button>
+          )}
+        </div>
+      )}
       <PostProcessDrawer
         isOpen={drawer.isOpen}
         nodeId={drawer.nodeId}
