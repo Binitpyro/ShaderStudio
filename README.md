@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Three.js-r178-black?style=flat-square" alt="Three.js" />
   <img src="https://img.shields.io/badge/MCP_Server-Enabled-purple?style=flat-square" alt="MCP Server" />
   <img src="https://img.shields.io/badge/Local_AI-Ollama_%7C_LM_Studio-emerald?style=flat-square" alt="Local AI" />
-  <img src="https://img.shields.io/badge/Tests-2191_Passed-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-2237_Passed-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/TypeScript-5.9-blue?style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License MIT" />
 </p>
@@ -266,7 +266,7 @@ To edit shader files directly in VS Code or Cursor with live hot-reloading:
 | `npm run build` | Runs TypeScript compilation (`tsc -b`) and builds production assets with Vite. |
 | `npm run preview` | Previews the production build locally. |
 | `npm run typecheck` | Validates TypeScript types across the entire project without emitting code. |
-| `npm run test` | Executes the complete Vitest test suite (**2,191 tests across 94 test files**). |
+| `npm run test` | Executes the complete Vitest test suite (**2,237 tests across 95 test files**). |
 | `npm run bridge` | Starts the WebSocket local IDE file synchronizer & agent bridge (`scripts/bridge.js`). |
 | `npm run mcp` | Starts the stdio MCP server (`scripts/mcp-server.js`) for an AI client. |
 | `npm run build:all` | Full production build: WebAssembly (`wasm-pack`), typecheck, and Vite bundle (`scripts/build-all.js`). |
@@ -278,7 +278,7 @@ To edit shader files directly in VS Code or Cursor with live hot-reloading:
 
 ## 🧪 Testing & Quality Assurance
 
-Shader Studio maintains an exhaustive automated test suite with **2,191 unit, integration, and end-to-end tests** across 94 test files:
+Shader Studio maintains an exhaustive automated test suite with **2,237 unit, integration, and end-to-end tests** across 95 test files:
 
 - **Tier 1 (Feature Integrations)**: GPU uniform buffer alignment (16-byte WGSL rules), topological graph compiler sorting, multi-pass post-processing chains, texture sampler bindings, real-time FFT audio pipeline, compute simulation pipelines, and closed-loop agent RPC execution.
 - **Tier 2 (Boundary & Corner Cases)**: Context/device loss recovery, empty graph states, malformed uniform declarations, invalid texture paths, network 404 fallbacks, and rapid backend switching.
